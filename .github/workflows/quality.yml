@@ -1,0 +1,41 @@
+name: Quality
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    - cron: '17 2 * * 1'
+permissions:
+  contents: read
+concurrency:
+  group: quality-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  quality:
+    name: quality-gate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          fetch-depth: 0
+      - name: Select applicable gate
+        id: scope
+        run: python3 scripts/gate_scope.py >> "$GITHUB_OUTPUT"
+      - name: Full check
+        if: steps.scope.outputs.full == 'true'
+        run: make check
+      - name: Explanatory-doc check
+        if: steps.scope.outputs.full != 'true'
+        run: |
+          make docs-check
+          make secrets
+      - name: Attach redacted verification
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: verification-${{ github.sha }}
+          path: artifacts/
+          retention-days: 90
+          if-no-files-found: error

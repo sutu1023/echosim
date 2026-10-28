@@ -1,0 +1,6 @@
+title = "EchoSim: default detection with generated/cache exclusions"
+[extend]
+useDefault = true
+[[allowlists]]
+description = "Generated dependencies and reports only; tracked env is NEVER excluded"
+paths = ['''(^|/)(node_modules|\.venv|dist|artifacts|\.git|\.pytest_cache|\.ruff_cache)/''']

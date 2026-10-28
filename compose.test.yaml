@@ -1,0 +1,62 @@
+x-api-args: &api-args
+  PYTHON_IMAGE: ${PYTHON_IMAGE:?}
+  UV_IMAGE: ${UV_IMAGE:?}
+x-web-args: &web-args
+  NODE_IMAGE: ${NODE_IMAGE:?}
+  CADDY_IMAGE: ${CADDY_IMAGE:?}
+  PLAYWRIGHT_IMAGE: ${PLAYWRIGHT_IMAGE:?}
+x-env: &test-env
+  APP_ENV: test
+  APP_VERSION: ${TEST_APP_VERSION:-test-v1}
+  DATABASE_URL: postgresql+asyncpg://echosim_test:${TEST_DB_PASSWORD:?}@postgres:5432/echosim_test
+  TEST_DATABASE_URL: postgresql+asyncpg://echosim_test:${TEST_DB_PASSWORD:?}@postgres:5432/echosim_test
+  MODEL_MODE: fake
+  API_HOST: 0.0.0.0
+  API_PORT: "8000"
+services:
+  postgres:
+    image: echosim-m0-postgres:16.15
+    build:
+      context: .
+      dockerfile: infra/postgres.Dockerfile
+      args: {POSTGRES_IMAGE: "${POSTGRES_IMAGE:?}"}
+    environment: {POSTGRES_USER: echosim_test, POSTGRES_DB: echosim_test, POSTGRES_PASSWORD: "${TEST_DB_PASSWORD:?}"}
+    healthcheck: {test: [CMD-SHELL, "pg_isready -U echosim_test -d echosim_test"], interval: 2s, timeout: 2s, retries: 20}
+    networks: [isolated]
+  api:
+    image: ${TEST_API_IMAGE:-echosim-m0-api-test-runtime:local}
+    build: {context: ., dockerfile: infra/api.Dockerfile, target: runtime, args: *api-args}
+    environment: *test-env
+    depends_on: {postgres: {condition: service_healthy}}
+    healthcheck: {test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health',timeout=4)"], interval: 2s, timeout: 5s, retries: 30}
+    networks: [isolated]
+  web:
+    image: echosim-m0-web-test-runtime:local
+    build: {context: ., dockerfile: infra/web.Dockerfile, target: runtime, args: *web-args}
+    depends_on: {api: {condition: service_healthy}}
+    healthcheck: {test: [CMD, wget, -qO-, "http://127.0.0.1/health"], interval: 2s, timeout: 5s, retries: 30}
+    networks: [isolated]
+  api-tests:
+    image: echosim-m0-api-test:local
+    build: {context: ., dockerfile: infra/api.Dockerfile, target: test, args: *api-args}
+    environment: *test-env
+    depends_on: {postgres: {condition: service_healthy}}
+    volumes: [./artifacts:/app/artifacts]
+    command: [sh, -ec, "ruff check --config pyproject.toml app tests migrations /app/scripts && ruff format --check --config pyproject.toml app tests migrations /app/scripts && python /app/scripts/skill_check.py && python -m pytest -v --junitxml=/app/artifacts/pytest.xml"]
+    networks: [isolated]
+  node-tests:
+    image: echosim-m0-node-test:local
+    build: {context: ., dockerfile: infra/web.Dockerfile, target: tools, args: *web-args}
+    volumes: [./artifacts:/workspace/artifacts]
+    command: [sh, -ec, "pnpm spec:check && pnpm exec prettier --check web package.json && pnpm --filter @echosim/web test && pnpm --filter @echosim/web build"]
+    networks: [isolated]
+  browser-tests:
+    image: echosim-m0-browser-test:local
+    build: {context: ., dockerfile: infra/web.Dockerfile, target: browser, args: *web-args}
+    environment: {E2E_BASE_URL: "http://web"}
+    depends_on: {web: {condition: service_healthy}}
+    volumes: [./artifacts:/workspace/artifacts]
+    ipc: host
+    networks: [isolated]
+networks:
+  isolated: {internal: true}

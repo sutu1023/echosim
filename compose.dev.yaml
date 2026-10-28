@@ -1,0 +1,12 @@
+services:
+  api:
+    build: {target: test}
+    volumes: [./api/app:/app/api/app:ro]
+    read_only: false
+    command: [python, -m, uvicorn, app.main:create_app, --factory, --host, 0.0.0.0, --port, "8000", --reload]
+  web:
+    build: {target: tools}
+    environment: {API_UPSTREAM: "http://api:8000"}
+    volumes: [./web/src:/workspace/web/src, ./web/index.html:/workspace/web/index.html:ro]
+    command: [pnpm, --filter, "@echosim/web", dev, --port, "80"]
+    healthcheck: {test: [CMD, node, -e, "fetch('http://127.0.0.1/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]}

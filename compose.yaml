@@ -1,0 +1,65 @@
+name: echosim_m0
+x-logs: &logs
+  driver: none
+x-api-build: &api-build
+  context: .
+  dockerfile: infra/api.Dockerfile
+  target: runtime
+  args: {PYTHON_IMAGE: "${PYTHON_IMAGE:?}", UV_IMAGE: "${UV_IMAGE:?}"}
+services:
+  postgres:
+    image: echosim-m0-postgres:16.15
+    build:
+      context: .
+      dockerfile: infra/postgres.Dockerfile
+      args: {POSTGRES_IMAGE: "${POSTGRES_IMAGE:?}"}
+    environment:
+      POSTGRES_USER: echosim
+      POSTGRES_DB: echosim
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Run make init}
+    volumes: [pgdata:/var/lib/postgresql/data]
+    healthcheck: {test: [CMD-SHELL, "pg_isready -U echosim -d echosim"], interval: 3s, timeout: 2s, retries: 20}
+    logging: *logs
+    networks: [backend]
+  api:
+    image: echosim-m0-api:${APP_VERSION:?}
+    build: *api-build
+    environment:
+      APP_ENV: ${APP_ENV:?}
+      APP_VERSION: ${APP_VERSION:?}
+      DATABASE_URL: postgresql+asyncpg://echosim:${POSTGRES_PASSWORD:?}@postgres:5432/echosim
+      MODEL_MODE: ${MODEL_MODE:?}
+      API_HOST: 0.0.0.0
+      API_PORT: "8000"
+      LOG_DIRECTORY: /app/logs
+    volumes: [apilogs:/app/logs]
+    depends_on: {postgres: {condition: service_healthy}}
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health',timeout=4)"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    stop_grace_period: 35s
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    logging: *logs
+    networks: [backend]
+  web:
+    image: echosim-m0-web:${APP_VERSION:?}
+    build:
+      context: .
+      dockerfile: infra/web.Dockerfile
+      target: runtime
+      args: {NODE_IMAGE: "${NODE_IMAGE:?}", CADDY_IMAGE: "${CADDY_IMAGE:?}", PLAYWRIGHT_IMAGE: "${PLAYWRIGHT_IMAGE:?}"}
+    ports: ["127.0.0.1:${WEB_PORT:?}:80"]
+    depends_on: {api: {condition: service_healthy}}
+    healthcheck: {test: [CMD, wget, -qO-, "http://127.0.0.1/health"], interval: 5s, timeout: 5s, retries: 12}
+    logging: *logs
+    networks: [backend]
+networks:
+  backend: {}
+volumes:
+  pgdata: {}
+  apilogs: {}
