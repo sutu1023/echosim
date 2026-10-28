@@ -1,0 +1,12 @@
+schema: spec-driven
+context: |
+  回响 EchoSim。中文文档，保留 OpenSpec 英文结构标题及 MUST/SHALL。
+  当前M0仅运行骨架，不含真实模型或业务。先读 AGENTS.md 与 docs/standards/README.md。
+  规范86条与policy.json已由维护者确认；业务分M1-M4。每个场景编号，测试可追溯。
+rules:
+  proposal:
+    - 明确本轮范围、排除项和放弃方案。
+  specs:
+    - 每条能力至少正常、边界和四条失败路径，编号SC-能力-序号。
+  tasks:
+    - 编号可勾选，规约和规范先于骨架；证据区分未执行。

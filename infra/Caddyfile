@@ -1,0 +1,35 @@
+{
+	admin off
+	auto_https off
+	log default {
+		format filter {
+			wrap json
+			fields {
+				request delete
+				error delete
+				stacktrace delete
+				msg replace "Gateway runtime event"
+			}
+		}
+	}
+}
+:80 {
+	# Access logging is intentionally disabled here; the API emits allowlisted JSON.
+	# Do not enable default proxy access logs (raw IP/URI) without S12/O04 filtering.
+	header {
+		X-Content-Type-Options nosniff
+		Referrer-Policy no-referrer
+		X-Frame-Options DENY
+		Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; object-src 'none'; base-uri 'self'; frame-ancestors 'none'"
+		Cache-Control no-store
+	}
+	@api path /health /livez /api/*
+	handle @api {
+		reverse_proxy api:8000
+	}
+	handle {
+		root * /srv
+		try_files {path} /index.html
+		file_server
+	}
+}
