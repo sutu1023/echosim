@@ -1,0 +1,168 @@
+{
+  "milestone": "v0.0.1-skeleton",
+  "date": "2026-10-28",
+  "implementation_pr": "https://github.com/sutu1023/echosim/pull/1",
+  "implementation_merge": "33e3036",
+  "ci": "https://github.com/sutu1023/echosim/actions/runs/40697634170",
+  "ci_conclusion": "success",
+  "scope": "local M0; no real model calls or public deployment",
+  "tests": {
+    "backend": 29,
+    "backend_failures": 0,
+    "components": 7,
+    "browser_cases": 14,
+    "engines": [
+      "Chromium",
+      "WebKit"
+    ],
+    "widths": [
+      375,
+      768,
+      1280
+    ]
+  },
+  "clean_clone": {
+    "commit": "cf82c25",
+    "directory": "temporary independent clone",
+    "configuration": "new random credentials; independent project and port",
+    "make_init": 0,
+    "make_check": 0,
+    "make_up": 0,
+    "health_http": 200,
+    "database": "up",
+    "cleanup": "only clean-clone containers and volumes",
+    "human_peer_reproduction": false
+  },
+  "provenance": {
+    "commit": "cf82c25fda5efdc9905509ac99a7f3baee077833",
+    "dirty": false,
+    "source_sha256": "1e209c736a30088243b88de710cafca4247ebe0cc0afad0c2e2713ec7685d9af",
+    "images": {
+      "api": "sha256:53d4f0a777d246508a75e26157718baba826e125b98e59b77fe98b0e35fb944b",
+      "web": "sha256:504423d42abf0c488eedfb725d024d05ae7805e75057b37f5f89599ef11da1e7",
+      "postgres": "sha256:65afcf48ff794dee730bc242585b5dc1f3e650c3c8ba319e2731a8106f85f3f0"
+    }
+  },
+  "runtime": {
+    "versions": [
+      {
+        "version": "candidate-v2",
+        "build_id": "candidate-v2",
+        "image_id": "sha256:9a4a9cddc9153a29c778860466b93e6ef0361d608fdb1381a9b482a7cf3a872b",
+        "seconds": 3.289
+      },
+      {
+        "version": "test-v1",
+        "build_id": "skeleton-source-v1",
+        "image_id": "sha256:53d4f0a777d246508a75e26157718baba826e125b98e59b77fe98b0e35fb944b",
+        "seconds": 3.766
+      }
+    ],
+    "shutdown_seconds": 0.4184092089999467,
+    "exit_code": 0,
+    "model_calls": 0,
+    "proxy_error_request_redacted": true,
+    "scenarios": [
+      "SC-GATE-01",
+      "SC-GATE-06",
+      "SC-GATE-07",
+      "SC-GATE-08"
+    ]
+  },
+  "inflight_shutdown": {
+    "admitted_request_completed": true,
+    "exit_code": -15,
+    "seconds": 1.0282672510002158,
+    "signal": "SIGTERM"
+  },
+  "latency": {
+    "p95_ms": 1.0095830002683215,
+    "samples": 30,
+    "warning": false,
+    "failed": false,
+    "scope": "real isolated API HTTP + PostgreSQL, warmed, concurrency 1"
+  },
+  "restore": {
+    "scope": "local synthetic isolated database; NOT production disaster recovery",
+    "authenticated_encryption": true,
+    "algorithm": "AES-256-GCM (Node built-in crypto)",
+    "tamper_rejected": true,
+    "restored_value_verified": true,
+    "key_persisted": false,
+    "seconds": 0.732,
+    "scenario": "SC-GATE-09"
+  },
+  "mutation": {
+    "mutation": "dependency failure incorrectly starts ready=True",
+    "isolated_copy": true,
+    "detected": true,
+    "test_exit": 1,
+    "production_source_modified": false
+  },
+  "vulnerabilities": {
+    "api": {
+      "approved_exceptions": [],
+      "blocked": []
+    },
+    "web": {
+      "approved_exceptions": [
+        {
+          "target": "usr/bin/caddy",
+          "package": "github.com/go-jose/go-jose/v3",
+          "version": "v3.0.5",
+          "cve": "CVE-2026-116587"
+        },
+        {
+          "target": "usr/bin/caddy",
+          "package": "github.com/go-jose/go-jose/v4",
+          "version": "v4.1.5",
+          "cve": "CVE-2026-116587"
+        },
+        {
+          "target": "usr/bin/caddy",
+          "package": "golang.org/x/net",
+          "version": "v0.59.0",
+          "cve": "CVE-2026-78669"
+        },
+        {
+          "target": "usr/bin/caddy",
+          "package": "stdlib",
+          "version": "v1.26.8",
+          "cve": "CVE-2026-111943"
+        },
+        {
+          "target": "usr/bin/caddy",
+          "package": "stdlib",
+          "version": "v1.26.8",
+          "cve": "CVE-2026-78667"
+        },
+        {
+          "target": "usr/bin/caddy",
+          "package": "stdlib",
+          "version": "v1.26.8",
+          "cve": "CVE-2026-78669"
+        },
+        {
+          "target": "usr/bin/caddy",
+          "package": "stdlib",
+          "version": "v1.26.8",
+          "cve": "CVE-2026-97031"
+        }
+      ],
+      "blocked": []
+    },
+    "postgres": {
+      "approved_exceptions": [],
+      "blocked": []
+    }
+  },
+  "license_unapproved": 0,
+  "review": "Independent read-only AI review; concrete findings corrected and evidence checked. Human peer reproduction remains pending.",
+  "external_pending": [
+    "human peer or teacher reproduction",
+    "real mobile device",
+    "public server and domain",
+    "production blue-green and disaster recovery"
+  ],
+  "tag_creation": "After archive PR merge; inspect Git refs for final tag fact."
+}
