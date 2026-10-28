@@ -1,0 +1,28 @@
+{
+  "allowed": [
+    "MIT",
+    "Apache-2.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "PSF-2.0",
+    "PostgreSQL"
+  ],
+  "reviewed_exceptions": {
+    "MPL-2.0": [
+      "lightningcss",
+      "lightningcss-*"
+    ],
+    "CC0-1.0": [
+      "mdn-data"
+    ],
+    "BlueOak-1.0.0": [
+      "lru-cache"
+    ],
+    "MIT-0": [
+      "@csstools/css-syntax-patches-for-csstree",
+      "@csstools/color-helpers"
+    ]
+  },
+  "pending_review": {}
+}

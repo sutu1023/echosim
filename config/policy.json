@@ -1,0 +1,155 @@
+{
+  "presets": {
+    "quick": {
+      "roles": 4,
+      "rounds": 3,
+      "deadline_seconds": 180
+    },
+    "standard": {
+      "roles": 6,
+      "rounds": 5,
+      "deadline_seconds": 360
+    }
+  },
+  "capacity": {
+    "global_runs": 2,
+    "per_identity_runs": 1
+  },
+  "model": {
+    "provider": "deepseek",
+    "id": "deepseek-flash",
+    "thinking": false,
+    "format": "json_object",
+    "timeout_seconds": 30,
+    "attempts_per_step": 2,
+    "input_tokens": {
+      "background": 65536,
+      "other": 32768
+    },
+    "output_tokens": {
+      "background": 3072,
+      "personas": 4096,
+      "post": 768,
+      "round_review": 1024,
+      "final_review": 2048
+    },
+    "temperature": {
+      "background": 0.2,
+      "personas": 0.7,
+      "post": 0.7,
+      "round_review": 0.2,
+      "final_review": 0.2
+    }
+  },
+  "budget_cny": {
+    "development": {
+      "monthly": "10",
+      "daily": "1"
+    },
+    "production": {
+      "monthly": "40",
+      "daily": "2"
+    }
+  },
+  "quota": {
+    "identity_daily": 2,
+    "ip_daily": 10,
+    "extra_background_generations": 2,
+    "extra_persona_generations": 2,
+    "count_after_call_on_failure": true,
+    "timezone": "Asia/Shanghai"
+  },
+  "input": {
+    "url_max_chars": 2048,
+    "html_max_bytes": 2097152,
+    "redirects": 3,
+    "fetch_timeout_seconds": 10,
+    "body_chars": [
+      20,
+      20000
+    ],
+    "background_chars": [
+      20,
+      1500
+    ],
+    "title_chars": [
+      1,
+      120
+    ],
+    "focus_chars": [
+      1,
+      200
+    ],
+    "persona_name_max": 40,
+    "persona_description_max": 500,
+    "persona_view_max": 200,
+    "persona_style_max": 100,
+    "key_max_chars": 512
+  },
+  "pagination": {
+    "default": 20,
+    "max": 100
+  },
+  "retention_days": {
+    "content": 7,
+    "idle_session": 7,
+    "logs": 7,
+    "metadata": 30,
+    "budget": 90,
+    "backup": 7
+  },
+  "cleanup_seconds": 3600,
+  "recovery": {
+    "rpo_hours": 24,
+    "rto_hours": 1
+  },
+  "shutdown_seconds": 30,
+  "performance_ms": {
+    "api_p95_warn": 500,
+    "api_p95_fail": 1000,
+    "sse_first_warn": 1000,
+    "sse_first_fail": 3000,
+    "samples": 30
+  },
+  "review": {
+    "max_files": 15,
+    "max_effective_lines": 800
+  },
+  "ui": {
+    "spacing": [
+      4,
+      8,
+      12,
+      16,
+      24,
+      32
+    ],
+    "font_sizes": [
+      14,
+      16,
+      20,
+      28,
+      36
+    ],
+    "body_font": 16,
+    "target_size": 44,
+    "sidebar_breakpoint": 1024,
+    "test_widths": [
+      375,
+      768,
+      1280
+    ]
+  },
+  "news_candidates": [
+    "www.news.cn",
+    "www.chinanews.com.cn"
+  ],
+  "enabled_news_domains": [],
+  "milestones": {
+    "M0": "bootstrap",
+    "M1": "news-and-personas",
+    "M2": "fake-simulation",
+    "M3": "llm-and-budgets",
+    "M4": "sharing-and-public-deployment"
+  }
+}

@@ -1,0 +1,59 @@
+{
+  "id": "EX-005",
+  "status": "approved",
+  "scope": "local-m0",
+  "expires_at": "2026-11-03T16:00:00Z",
+  "caddy_image": "caddy@sha256:5e5286cb37d44086d651a5363f05f43a692ce4d649d88fb1bd844579f45fa9e8",
+  "entries": [
+    {
+      "target": "usr/bin/caddy",
+      "package": "github.com/go-jose/go-jose/v3",
+      "version": "v3.0.5",
+      "cve": "CVE-2026-116587"
+    },
+    {
+      "target": "usr/bin/caddy",
+      "package": "github.com/go-jose/go-jose/v4",
+      "version": "v4.1.5",
+      "cve": "CVE-2026-116587"
+    },
+    {
+      "target": "usr/bin/caddy",
+      "package": "golang.org/x/net",
+      "version": "v0.59.0",
+      "cve": "CVE-2026-78669"
+    },
+    {
+      "target": "usr/bin/caddy",
+      "package": "stdlib",
+      "version": "v1.26.8",
+      "cve": "CVE-2026-111943"
+    },
+    {
+      "target": "usr/bin/caddy",
+      "package": "stdlib",
+      "version": "v1.26.8",
+      "cve": "CVE-2026-78667"
+    },
+    {
+      "target": "usr/bin/caddy",
+      "package": "stdlib",
+      "version": "v1.26.8",
+      "cve": "CVE-2026-78669"
+    },
+    {
+      "target": "usr/bin/caddy",
+      "package": "stdlib",
+      "version": "v1.26.8",
+      "cve": "CVE-2026-97031"
+    }
+  ],
+  "configuration_sha256": {
+    "infra/Caddyfile": "d0e2e77cc06b0d74b629146d866e522ad397ce584d526ce4198769e161d5a040",
+    "compose.yaml": "2fbf4d85622da835975af48b4c1994a4c6ed018ae517e2f3f81989ce8bb803dc",
+    "compose.test.yaml": "e4c51d4f831951a0dbb8c280927d2b3c81c17e1ee35b280b2d65bd019b17821d",
+    "infra/web.Dockerfile": "b3026bbbb8dcb6e20884a2b5388a72b4c25c1076f6a2c0f2e248c1c8e1abe34b",
+    "config/policy.json": "eeae8d47115b939c6e064bd880beb745108340ebef16d3cb69a89979bf567cab",
+    "config/project.json": "ee86ee157c5bc7bb15917fbc3bde87992b13e7c4a316b621f88d438322cc77bf"
+  }
+}
