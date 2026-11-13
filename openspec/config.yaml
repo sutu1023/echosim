@@ -1,0 +1,9 @@
+schema: spec-driven
+context: |
+  EchoSim is a Chinese novel simulation and chapter creation product for individual creators.
+  Product baseline: docs/product.md. Canonical terms: GLOSSARY.md.
+  React/TypeScript/Vite; Python 3.12/FastAPI; PostgreSQL/pgvector;
+  durable worker jobs and SSE; read-only MCP; Render deployment and local Compose.
+  Keep the bootstrap runtime independent from unfinished business capabilities.
+  This is an individual project. Automated checks are the completion gate.
+  Keep project artifacts focused on product behavior and engineering operations.

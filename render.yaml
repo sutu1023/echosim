@@ -1,0 +1,52 @@
+services:
+  - type: web
+    name: echosim-web
+    runtime: docker
+    plan: starter
+    region: singapore
+    healthCheckPath: /health
+    autoDeployTrigger: "off"
+    envVars:
+      - key: APP_ENV
+        value: production
+      - key: APP_VERSION
+        value: 0.0.1
+      - key: PORT
+        value: "10000"
+      - key: HEALTH_TIMEOUT_SECONDS
+        value: "3"
+      - key: WORKER_POLL_SECONDS
+        value: "10"
+      - key: DATABASE_URL
+        fromDatabase:
+          name: echosim-db
+          property: connectionString
+  - type: worker
+    name: echosim-worker
+    runtime: docker
+    plan: starter
+    region: singapore
+    dockerCommand: python -m echosim.worker
+    autoDeployTrigger: "off"
+    envVars:
+      - key: APP_ENV
+        value: production
+      - key: APP_VERSION
+        value: 0.0.1
+      - key: PORT
+        value: "10000"
+      - key: HEALTH_TIMEOUT_SECONDS
+        value: "3"
+      - key: WORKER_POLL_SECONDS
+        value: "10"
+      - key: DATABASE_URL
+        fromDatabase:
+          name: echosim-db
+          property: connectionString
+
+databases:
+  - name: echosim-db
+    plan: basic-256mb
+    region: singapore
+    postgresMajorVersion: "17"
+    ipAllowList: []
