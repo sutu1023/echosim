@@ -88,3 +88,19 @@ docs/verification/      场景追溯与真实验证记录
 ## 许可
 
 尚未选择开源许可证；公开源码不表示授予额外使用许可。
+
+## 本地模型连接测试
+
+仅用于本机开发；不开放公网，不保存 KEY，也不提供聊天。保持 Compose 的 127.0.0.1 端口绑定。
+
+```sh
+APP_ENV=development MODEL_CONNECTION_TEST_ENABLED=true docker compose up --build -d api
+```
+
+打开 `http://localhost:8081/dev/model-test`（若本地 PORT 不同则替换端口），输入 OpenCode Go KEY 后测试。固定模型 deepseek-v4.1-flash；60 秒总超时，无自动重试。成功展示耗时及供应商用量，失败后重新输入 KEY。浏览器不要保存密码，KEY 不要通过聊天或命令行参数提供。
+
+关闭入口：`MODEL_CONNECTION_TEST_ENABLED=false docker compose up -d api`。生产环境即使开关为 true 也关闭。根页面及 /health 不代表模型可用。
+
+API：POST /api/v1/model-connection-tests，仅 JSON 的 api_key 字段；固定供应商、模型和提示，不接受覆盖。GET 同路径仅返回开发入口是否可用。所有响应禁止缓存。连接诊断配置版本 opencode-go-test-v1，提示 v1，max_tokens=256，温度使用供应商默认。
+
+运行依赖 httpx 提供异步 HTTPS 和取消，httpcore 提供实际连接时的公网地址校验接口；不引入完整模型 SDK。

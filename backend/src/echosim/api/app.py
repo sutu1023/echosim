@@ -12,6 +12,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException
 
+from echosim.api.model_connection import register_model_test
 from echosim.logging import emit
 from echosim.services.health import HealthService
 
@@ -26,7 +27,15 @@ def error_response(request: Request, status: int, code: str, message: str) -> JS
     )
 
 
-def create_app(health: HealthService, version: str, static_dir: Path | None = None) -> FastAPI:
+def create_app(
+    health: HealthService,
+    version: str,
+    static_dir: Path | None = None,
+    *,
+    app_env: str = "production",
+    model_test_enabled: bool = False,
+    model_test=None,
+) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         emit("api_started", service="api")
@@ -47,6 +56,7 @@ def create_app(health: HealthService, version: str, static_dir: Path | None = No
         except Exception:
             emit("request_failed", service="api", request_id=request.state.request_id)
             response = error_response(request, 500, "INTERNAL_ERROR", "服务暂时异常，请稍后重试")
+        response.headers["Cache-Control"] = "no-store"
         response.headers["X-Request-ID"] = request.state.request_id
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["Referrer-Policy"] = "no-referrer"
@@ -92,11 +102,18 @@ def create_app(health: HealthService, version: str, static_dir: Path | None = No
             },
         )
 
+    enabled = app_env == "development" and model_test_enabled
+    if enabled and model_test is not None:
+        register_model_test(app, model_test)
+
     if static_dir is not None and (static_dir / "index.html").is_file():
         app.mount("/assets", StaticFiles(directory=static_dir / "assets"), name="assets")
 
         @app.get("/")
         async def index():
             return FileResponse(static_dir / "index.html", headers={"Cache-Control": "no-cache"})
+
+        if enabled:
+            app.add_api_route("/dev/model-test", index, methods=["GET"])
 
     return app

@@ -2,7 +2,7 @@
 name = "echosim"
 version = "0.0.1"
 requires-python = ">=3.12,<3.13"
-dependencies = ["fastapi>=0.115,<1", "uvicorn>=0.34,<1", "psycopg[binary]>=3.2,<4", "pydantic-settings>=2.7,<3"]
+dependencies = ["fastapi>=0.115,<1", "uvicorn>=0.34,<1", "psycopg[binary]>=3.2,<4", "pydantic-settings>=2.7,<3", "httpx>=0.28,<1", "httpcore>=1,<2"]
 
 [dependency-groups]
 dev = ["pytest>=8,<10", "httpx>=0.28,<1", "ruff>=0.11,<1", "pip-audit>=2.9,<3"]

@@ -1,6 +1,6 @@
 # 运行规约追溯
 
-当前能力：system-runtime。自动化入口 `make check` 与 `make smoke`。
+当前能力：system-runtime、model-connection-test。自动化入口 `make check` 与 `make smoke`。
 
 | Requirement / Scenario | 可执行依据 |
 | --- | --- |
@@ -21,3 +21,23 @@
 | R5 Failed health request | App.test.tsx degraded/retry、connection error、malformed response |
 
 后端测试位于 backend/tests/test_runtime.py；前端测试位于 frontend/src/App.test.tsx；真实集成位于 scripts/smoke.py。正常/失败/边界通过用例名称区分。当前无登录或业务资源，因此双用户授权用例在相关业务变更中实现，不把封闭路由测试当成已实现权限隔离。
+
+## model-connection-test
+
+| Requirement / Scenario | 可执行依据 |
+| --- | --- |
+| R1 Explicit local enablement | test_success_and_origin；本地浏览器 /dev/model-test |
+| R1 Disabled or production | test_disabled（三组环境/开关） |
+| R1 Cross-origin submission | test_success_and_origin |
+| R2 Credential lifecycle | test_success_and_origin；ModelTest clears key / clears after；浏览器刷新清空 |
+| R2 Invalid input | test_invalid_key；test_valid_usage_and_unknown_fields |
+| R3 Successful invocation | test_success_and_origin；真实调用成功记录见 2026-11-13-model-connection-test.md |
+| R3 Missing usage | test_success_and_origin；ModelTest reports missing usage |
+| R3 Timeout | test_deadline（缩短注入期限，生产固定 60 秒） |
+| R3 Unsafe destination | test_public_backend_rejects_private；test_public_backend_pins_validated_address；test_transport_errors 302 |
+| R4 Provider rejection | test_transport_errors 401/403/429；前端分类失败测试 |
+| R4 Upstream failure | test_transport_errors 500；前端 MODEL_UPSTREAM_ERROR |
+| R4 Invalid successful response | test_invalid_response；test_malformed_and_large_transport |
+| R5 Pending and retry | ModelTest prevents duplicate pending requests / clears after |
+| R5 Accessible status | 本地浏览器键盘焦点；role=status/aria-live 组件；实际读屏语音未验证 |
+| R6 Reproducible verification | 2026-11-13-model-connection-test.md；test_safe_diagnostic_metadata；成功/失败安全调用元数据 |

@@ -3,7 +3,22 @@ import logging
 import sys
 from datetime import UTC, datetime
 
-_FIELDS = ("service", "request_id", "method", "status", "duration_ms", "dependency")
+_FIELDS = (
+    "service",
+    "request_id",
+    "method",
+    "status",
+    "duration_ms",
+    "dependency",
+    "model",
+    "configuration_version",
+    "prompt_version",
+    "timeout_seconds",
+    "max_tokens",
+    "temperature",
+    "usage",
+    "error_code",
+)
 
 
 class JsonFormatter(logging.Formatter):

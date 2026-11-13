@@ -8,6 +8,7 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(extra="ignore", hide_input_in_errors=True)
 
     app_env: Literal["development", "test", "production"]
+    model_connection_test_enabled: bool = False
     app_version: str = Field(min_length=1, max_length=64, pattern=r"^[a-zA-Z0-9._-]+$")
     database_url: SecretStr
     port: int = Field(ge=1, le=65535)
