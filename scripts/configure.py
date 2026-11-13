@@ -1,5 +1,6 @@
 """Write an explicit local-only environment without overwriting existing settings."""
 
+import base64
 import os
 import secrets
 from pathlib import Path
@@ -10,6 +11,7 @@ content = (
     "PUBLIC_ORIGIN=http://localhost:8081\nDEV_QUICK_LOGIN_ENABLED=false\n"
     "HEALTH_TIMEOUT_SECONDS=3\nWORKER_POLL_SECONDS=10\n"
     "POSTGRES_DB=echosim\nPOSTGRES_USER=echosim\n"
+    f"MODEL_MASTER_KEY={base64.urlsafe_b64encode(secrets.token_bytes(32)).decode()}\n"
     f"POSTGRES_PASSWORD={secrets.token_hex(32)}\n"
 )
 try:

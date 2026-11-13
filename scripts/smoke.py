@@ -1,5 +1,6 @@
 """Real dependency outage/recovery in a disposable, isolated Compose project."""
 
+import base64
 import json
 import os
 import secrets
@@ -18,6 +19,7 @@ with socket.socket() as sock:
 env = {
     **os.environ,
     "APP_ENV": "test",
+    "MODEL_MASTER_KEY": base64.urlsafe_b64encode(secrets.token_bytes(32)).decode(),
     "PUBLIC_ORIGIN": f"http://127.0.0.1:{port}",
     "DEV_QUICK_LOGIN_ENABLED": "false",
     "APP_VERSION": "smoke",

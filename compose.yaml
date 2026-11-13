@@ -6,6 +6,7 @@ x-runtime: &runtime
     PUBLIC_ORIGIN: ${PUBLIC_ORIGIN:-http://localhost:${PORT}}
     DEV_QUICK_LOGIN_ENABLED: ${DEV_QUICK_LOGIN_ENABLED:-false}
     MODEL_CONNECTION_TEST_ENABLED: ${MODEL_CONNECTION_TEST_ENABLED:-false}
+    MODEL_MASTER_KEY: ${MODEL_MASTER_KEY:-}
     APP_VERSION: ${APP_VERSION:?Set APP_VERSION}
     PORT: ${PORT:?Set PORT}
     HEALTH_TIMEOUT_SECONDS: ${HEALTH_TIMEOUT_SECONDS:?Set HEALTH_TIMEOUT_SECONDS}
@@ -36,6 +37,11 @@ services:
     command: ["python", "-m", "echosim.manage", "migrate"]
   worker:
     <<: *runtime
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     command: ["python", "-m", "echosim.worker"]
   db:
     image: pgvector/pgvector:pg17

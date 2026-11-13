@@ -41,7 +41,7 @@ test('empty list and uncertain submission reuses key until explicitly changed', 
   expect(writes[2].headers).not.toEqual(writes[0].headers);
 });
 
-test('private detail is text and clearly unavailable for creation features', async () => {
+test('private detail renders safe text and links to story preparation', async () => {
   window.history.replaceState({}, '', '/works/123');
   vi.stubGlobal('fetch', vi.fn((url: string) => {
     if (url.endsWith('capabilities')) return ok({ quick_login: false });
@@ -50,7 +50,7 @@ test('private detail is text and clearly unavailable for creation features', asy
   }));
   render(<Workspace />);
   expect(await screen.findByText('<script>private</script>')).toBeVisible();
-  expect(screen.getByText('故事准备尚未提供')).toBeVisible();
+  expect(screen.getByRole('link', { name: '准备故事与角色 →' })).toHaveAttribute('href', '/works/123/prepare');
   expect(document.querySelector('script')).toBeNull();
 });
 

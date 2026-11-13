@@ -1,3 +1,6 @@
+import { Simulation } from './Simulation';
+import { StoryPreparation } from './StoryPreparation';
+import { ModelSettings } from './ModelSettings';
 import { useEffect, useRef, useState } from 'react';
 import type { FormEvent } from 'react';
 
@@ -7,9 +10,9 @@ class RequestError extends Error {
   status: number;
   constructor(message: string, status: number) { super(message); this.status = status; }
 }
-async function request(path: string, init?: RequestInit) {
+export async function request(path: string, init?: RequestInit, timeout = 15000) {
   let response: Response;
-  try { response = await fetch('/api/v1' + path, { ...init, credentials: 'same-origin', signal: AbortSignal.timeout(15000) }); }
+  try { response = await fetch('/api/v1' + path, { ...init, credentials: 'same-origin', signal: AbortSignal.timeout(timeout) }); }
   catch { throw new RequestError('暂时无法连接服务，请重试', 0); }
   if (response.status === 204) return null;
   let data;
@@ -60,7 +63,8 @@ export function Workspace() {
         setIdentity(user);
         if (path === '/login') return;
         if (!user) { move('/login'); setError('请登录后查看自己的作品'); return; }
-        const data = await request(path === '/works' ? '/works' : path);
+        if (path === '/settings/models') return;
+        const data = await request(path === '/works' ? '/works' : path.replace(/\/(prepare|simulation)$/, ''));
         if (!live) return;
         if (path === '/works') { setItems(data.items); setCursor(data.next_cursor); }
         else setWork(data);
@@ -104,11 +108,11 @@ export function Workspace() {
   }
   return <div className="shell workspace">
     <header><a className="wordmark" href="/"><span className="mark">e</span> EchoSim</a>
-      <nav aria-label="账号导航">{identity && <><span>{identity.username}</span><button className="quiet" disabled={busy} onClick={() => void act(async () => { await request('/sessions/current', { method: 'DELETE', headers: headers() }); setIdentity(null); setAttempt(null); setTitle(''); move('/login'); })}>退出登录</button></>}</nav>
+      <nav aria-label="账号导航">{identity && <><a href="/settings/models">模型设置</a><span>{identity.username}</span><button className="quiet" disabled={busy} onClick={() => void act(async () => { await request('/sessions/current', { method: 'DELETE', headers: headers() }); setIdentity(null); setAttempt(null); setTitle(''); move('/login'); })}>退出登录</button></>}</nav>
     </header>
     <main>
       <p className="eyebrow">你的创作，从这里开始</p>
-      <h1>{path === '/login' ? '回到你的故事' : path === '/works' ? '我的作品' : '作品详情'}</h1>
+      <h1>{path === '/login' ? '回到你的故事' : path === '/works' ? '我的作品' : path === '/settings/models' ? '模型设置' : path.endsWith('/prepare') ? '故事准备' : path.endsWith('/simulation') ? '推演现场' : '作品详情'}</h1>
       <div role="status" aria-live="polite">{loading ? '正在加载…' : busy ? '正在提交…' : ''}</div>
       {error && <div className="notice" role="alert"><p>{error}</p>{!busy && !loading && <button className="quiet" onClick={() => { setError(''); setReload(x => x + 1); }}>重新加载</button>}</div>}
       {!loading && path === '/login' && <section className="panel login-panel">
@@ -122,6 +126,7 @@ export function Workspace() {
         </form>
         {quick && <div className="quick-login"><h2>先体验一下</h2><p className="muted">两个独立的创作空间，一键切换。</p><div className="actions">{['A', 'B'].map(target => <button className="secondary" disabled={busy} key={target} onClick={() => void login(undefined, target)}>体验账号 {target}</button>)}</div></div>}
       </section>}
+      {!loading && identity && path === '/settings/models' && <ModelSettings csrf={identity.csrf} />}
       {!loading && identity && path === '/works' && <>
         <section className="panel"><h2>开启一部新作品</h2><form onSubmit={event => void create(event)} noValidate>
           <label htmlFor="work-title">作品标题</label><input id="work-title" value={title} disabled={busy} onBlur={() => setTouched(true)} onChange={event => setTitle(event.target.value)} aria-describedby="title-error" />
@@ -136,7 +141,9 @@ export function Workspace() {
         </section>
         {quick && <button className="quiet" disabled={busy} onClick={() => move('/login')}>切换体验账号</button>}
       </>}
-      {!loading && identity && path.startsWith('/works/') && <><button className="quiet" onClick={() => move('/works')}>← 返回我的作品</button>{work && <section className="panel detail"><h2>{work.title}</h2><p className="muted">创建于 {new Date(work.created_at).toLocaleString('zh-CN')}</p><hr /><h3>故事准备尚未提供</h3><p>作品已保存。材料、角色推演与章节创作将在后续开放。</p></section>}</>}
+      {!loading && identity && path.startsWith('/works/') && <><button className="quiet" onClick={() => move('/works')}>← 返回我的作品</button>{work && <section className="panel detail"><h2>{work.title}</h2><p className="muted">创建于 {new Date(work.created_at).toLocaleString('zh-CN')}</p><hr /><a href={"/works/" + work.id + "/prepare"}>准备故事与角色 →</a></section>}</>}
+      {!loading && identity && work && path.endsWith('/prepare') && <StoryPreparation csrf={identity.csrf} workId={work.id} />}
+      {!loading && identity && work && path.endsWith('/simulation') && <Simulation csrf={identity.csrf} workId={work.id} />}
     </main><footer><span>EchoSim</span><span>每个故事，都有自己的起点。</span></footer>
   </div>;
 }

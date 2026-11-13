@@ -234,3 +234,15 @@ def test_safe_diagnostic_metadata(caplog):
     assert data["temperature"] == "provider-default"
     assert data["usage"] is None
     assert "private-marker" not in json.dumps(data)
+
+
+def test_generation_rejects_token_truncation_even_when_json_is_parseable(monkeypatch):
+    from echosim.adapters.model_connection import OpenCodeProvider
+
+    async def truncated(*args, **kwargs):
+        return {"choices": [{"finish_reason": "length", "message": {"content": "{}"}}]}
+
+    monkeypatch.setattr(OpenCodeProvider, "_request", truncated)
+    with pytest.raises(ModelFailure) as error:
+        asyncio.run(OpenCodeProvider().generate("synthetic", "model", []))
+    assert error.value.code == "MODEL_INVALID_RESPONSE"

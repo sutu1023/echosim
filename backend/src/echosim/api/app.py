@@ -12,8 +12,11 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException
 
+from echosim.api.model_config import register_model_config
 from echosim.api.model_connection import register_model_test
 from echosim.api.private_works import register_private
+from echosim.api.simulation import register_simulation
+from echosim.api.story import register_story
 from echosim.logging import emit
 from echosim.services.health import HealthService
 
@@ -40,6 +43,9 @@ def create_app(
     works=None,
     public_origin=None,
     quick_login_enabled=False,
+    model_config=None,
+    stories=None,
+    simulations=None,
 ) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -107,9 +113,18 @@ def create_app(
             },
         )
 
-    register_private(
+    current, write_user = register_private(
         app, accounts, works, env=app_env, quick_enabled=quick_login_enabled, origin=public_origin
     )
+
+    if model_config is not None:
+        register_model_config(app, model_config, current, write_user)
+
+    if stories is not None:
+        register_story(app, stories, current, write_user)
+
+    if simulations is not None:
+        register_simulation(app, simulations, current, write_user)
 
     enabled = app_env == "development" and model_test_enabled
     if enabled and model_test is not None:
@@ -124,6 +139,15 @@ def create_app(
 
         for route in ("/login", "/works", "/works/{work_id}"):
             app.add_api_route(route, index, methods=["GET"])
+
+        if simulations is not None:
+            app.add_api_route("/works/{work_id}/simulation", index, methods=["GET"])
+
+        if stories is not None:
+            app.add_api_route("/works/{work_id}/prepare", index, methods=["GET"])
+
+        if model_config is not None:
+            app.add_api_route("/settings/models", index, methods=["GET"])
 
         if enabled:
             app.add_api_route("/dev/model-test", index, methods=["GET"])

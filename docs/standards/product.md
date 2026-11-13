@@ -1,7 +1,7 @@
 # 产品设计规范
 
 - 使用 GLOSSARY.md 的领域词；同一概念不混用别称。检查：界面文案与词汇对照。
-- 规划路由：/works、/works/:id/prepare、/works/:id/simulation、/works/:id/chapters、/settings/models；当前实现 / 状态页、/login、/works、/works/:id；创作工作区仍待实现，未知路由 404。检查：路由测试。
+- 规划路由：/works、/works/:id/prepare、/works/:id/simulation、/works/:id/chapters、/settings/models；当前实现 / 状态页、/login、/works、/works/:id、/settings/models、/works/:id/prepare、/works/:id/simulation；章节工作区仍待实现，未知路由 404。检查：路由测试。
 - 异步视图明确加载、正常、错误、空状态；无业务数据时明确功能未提供，不造样例数据。状态页区分依赖降级与网络失败，支持重试。检查：前端组件状态测试。
 - 间距使用 4/8/12/16/24/32/48px，正文至少 16px；标题 24/32/48px；键盘可达、可见焦点、状态 aria-live。检查：样式与浏览器键盘检查。
 - 表单在失焦与提交时校验；提交期间禁止重复触发，错误贴近字段。任务状态规划 queued→running→succeeded/failed/stopped；停止请求先进入 stopping，终态不可恢复运行。检查：后续状态机用例。

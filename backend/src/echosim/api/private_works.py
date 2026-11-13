@@ -9,6 +9,12 @@ from echosim.domain.accounts import Fault
 
 COOKIE = "echosim_session"
 MESSAGES = {
+    "MODEL_CONFIGURATION_REQUIRED": "请先在模型设置中保存有效配置",
+    "MODEL_CREDENTIAL_UNAVAILABLE": "模型凭据不可用，请重新保存配置",
+    "CONFIGURATION_CONFLICT": "配置已更新，请重新加载后操作",
+    "CONFIRMATION_REQUIRED": "请先确认故事设定与角色",
+    "WORK_BUSY": "作品已有任务正在执行，请稍后重试",
+    "CANDIDATE_CONFLICT": "候选版本已变化，请重新加载后确认",
     "INVALID_REQUEST": "请求参数无效",
     "UNAUTHENTICATED": "请重新登录",
     "AUTHENTICATION_FAILED": "用户名或密码错误",
@@ -166,3 +172,5 @@ def register_private(app, accounts, works, *, env, quick_enabled, origin):
         if request.query_params:
             raise Fault("INVALID_REQUEST")
         return await works.get(user["user_id"], work_id)
+
+    return current, write_user

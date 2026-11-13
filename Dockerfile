@@ -11,7 +11,8 @@ COPY --from=uv /uv /uvx /bin/
 WORKDIR /app
 COPY backend/pyproject.toml backend/uv.lock ./
 COPY backend/src ./src
-RUN uv sync --frozen --no-dev --no-editable
+RUN --mount=type=cache,target=/root/.cache/uv \
+    UV_HTTP_TIMEOUT=180 uv sync --frozen --no-dev --no-editable
 
 FROM python:3.12-slim-bookworm AS runtime
 RUN groupadd --gid 10001 app && useradd --uid 10001 --gid app --no-create-home app

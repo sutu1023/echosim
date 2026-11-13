@@ -10,6 +10,7 @@ _FIELDS = (
     "status",
     "duration_ms",
     "dependency",
+    "task_processed",
     "model",
     "configuration_version",
     "prompt_version",

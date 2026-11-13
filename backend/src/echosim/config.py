@@ -12,6 +12,7 @@ class Settings(BaseSettings):
     model_connection_test_enabled: bool = False
     dev_quick_login_enabled: bool = False
     public_origin: str = ""
+    model_master_key: SecretStr = SecretStr("")
     app_version: str = Field(min_length=1, max_length=64, pattern=r"^[a-zA-Z0-9._-]+$")
     database_url: SecretStr
     port: int = Field(ge=1, le=65535)
