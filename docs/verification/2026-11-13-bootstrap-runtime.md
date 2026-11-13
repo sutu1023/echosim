@@ -25,4 +25,8 @@
 
 ## 持续集成
 
-待本变更推送后记录实际 check 结果；不以本地结果代替 CI。
+实现提交 `4c62702` 已推送至 `codex/2026-11-13-bootstrap-runtime`。
+运行地址：https://github.com/sutu1023/echosim/actions/runs/43423049671 。
+GitHub check 已成功完成：setup、make check、make audit、make smoke 全部通过。期间曾发生短暂 TLS 断连，恢复后已读取最终 success 结论。
+
+本地浏览器已验证 http://localhost:8081 显示小说创作状态页及“服务运行正常”。全部 Git 历史 blob 已通过密钥模式扫描，确认本机生成的数据库密码未进入历史。
