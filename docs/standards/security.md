@@ -7,3 +7,5 @@
 - 用户模型地址必须经过受控供应商域名白名单和解析后公网 IP 检查；禁止内网、回环、元数据地址和重定向绕过，每次连接重新校验。检查：未来模型配置 SSRF 场景。
 - 每次依赖变更与每周执行 make audit；高危/严重漏洞阻断发布，例外需写明影响、期限和缓解措施。新增依赖说明用途与替代取舍。检查：pip-audit、npm audit、CI 定期任务。
 - .env 和密钥文件不入库；.env.example 只放键名。检查：make check 的跟踪文件和密钥模式检查；发布前检查全部提交历史。
+
+本地 HTTP 会话例外：development/test 允许不设置 Secure，以便本地浏览器与离线接口验收；仍设置 HttpOnly、SameSite=Lax 并校验 Origin/CSRF。production 必须 Secure 与 HTTPS PUBLIC_ORIGIN，以 production cookie/配置测试验证。快捷登录仅 development 显式开启，production/test 后端 404。

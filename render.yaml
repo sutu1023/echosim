@@ -5,8 +5,11 @@ services:
     plan: starter
     region: singapore
     healthCheckPath: /health
+    preDeployCommand: python -m echosim.manage migrate
     autoDeployTrigger: "off"
     envVars:
+      - key: PUBLIC_ORIGIN
+        sync: false
       - key: APP_ENV
         value: production
       - key: APP_VERSION

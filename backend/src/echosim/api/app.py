@@ -13,6 +13,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException
 
 from echosim.api.model_connection import register_model_test
+from echosim.api.private_works import register_private
 from echosim.logging import emit
 from echosim.services.health import HealthService
 
@@ -35,6 +36,10 @@ def create_app(
     app_env: str = "production",
     model_test_enabled: bool = False,
     model_test=None,
+    accounts=None,
+    works=None,
+    public_origin=None,
+    quick_login_enabled=False,
 ) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -102,6 +107,10 @@ def create_app(
             },
         )
 
+    register_private(
+        app, accounts, works, env=app_env, quick_enabled=quick_login_enabled, origin=public_origin
+    )
+
     enabled = app_env == "development" and model_test_enabled
     if enabled and model_test is not None:
         register_model_test(app, model_test)
@@ -112,6 +121,9 @@ def create_app(
         @app.get("/")
         async def index():
             return FileResponse(static_dir / "index.html", headers={"Cache-Control": "no-cache"})
+
+        for route in ("/login", "/works", "/works/{work_id}"):
+            app.add_api_route(route, index, methods=["GET"])
 
         if enabled:
             app.add_api_route("/dev/model-test", index, methods=["GET"])

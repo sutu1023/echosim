@@ -23,7 +23,7 @@ export function App() {
         <p className="status-note">{state === 'error' ? '请检查服务是否启动，然后重试。' : state === 'ready' && health?.status === 'degraded' ? '服务已响应，数据库连接需要恢复。' : '这里显示应用与数据库的连接状态。'}</p>
         <button onClick={() => void refresh()} disabled={state === 'loading'}>{state === 'loading' ? '检查中…' : '重新检查'}<span aria-hidden="true"> ↗</span></button>
       </section>
-      <aside className="coming"><span className="number">01 — 起点</span><p>创作功能尚未开放</p><span>作品、角色推演与章节创作将逐步加入。当前版本用于验证运行环境。</span></aside>
+      <aside className="coming"><span className="number">01 — 起点</span><p>创作功能尚未开放</p><span>你现在可以创建和管理自己的作品。角色推演与章节创作将逐步加入。</span><p><a href="/works">进入我的作品 →</a></p></aside>
     </main>
     <footer><span>EchoSim</span><span>故事的下一种可能。</span></footer>
   </div>;

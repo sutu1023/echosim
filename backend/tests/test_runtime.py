@@ -91,7 +91,7 @@ def test_boundary_request_identifier_maximum():
     assert r.headers["x-request-id"] == "a" * 64
 
 
-@pytest.mark.parametrize("path", ["/missing", "/api/v1/works", "/api/v1/works/unknown"])
+@pytest.mark.parametrize("path", ["/missing", "/api/v1/unimplemented"])
 def test_failure_unknown_and_unavailable_business(path):
     with client() as c:
         r = c.get(path, headers={"Authorization": "Bearer arbitrary", "X-Request-ID": "fixed"})
@@ -244,3 +244,47 @@ def test_normal_worker_sigterm():
         if process.poll() is None:
             process.kill()
             process.communicate()
+
+
+def test_runtime_private_paths_reject_arbitrary_bearer():
+    with client() as c:
+        for path in ["/api/v1/works", "/api/v1/works/unknown"]:
+            r = c.get(path, headers={"Authorization": "Bearer arbitrary"})
+            assert r.status_code == 401
+            assert r.json()["error"]["code"] == "UNAUTHENTICATED"
+
+
+def test_api_requires_explicit_public_origin():
+    result = subprocess.run(
+        [sys.executable, "-m", "echosim.main"],
+        env={**os.environ, **ENV, "PUBLIC_ORIGIN": ""},
+        capture_output=True,
+        text=True,
+        timeout=5,
+        check=False,
+    )
+    assert result.returncode != 0
+    assert "PUBLIC_ORIGIN required" in result.stderr
+    assert "Traceback" not in result.stderr
+
+
+@pytest.mark.parametrize("origin", ["http://localhost/path", "http://name:pass@host", "not-a-url"])
+def test_invalid_public_origin(monkeypatch, origin):
+    for key, value in ENV.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.setenv("PUBLIC_ORIGIN", origin)
+    with pytest.raises(ValidationError):
+        Settings()
+
+
+def test_production_requires_https_origin():
+    result = subprocess.run(
+        [sys.executable, "-m", "echosim.main"],
+        env={**os.environ, **ENV, "APP_ENV": "production", "PUBLIC_ORIGIN": "http://localhost"},
+        capture_output=True,
+        text=True,
+        timeout=5,
+        check=False,
+    )
+    assert result.returncode != 0
+    assert "HTTPS in production" in result.stderr

@@ -18,6 +18,8 @@ with socket.socket() as sock:
 env = {
     **os.environ,
     "APP_ENV": "test",
+    "PUBLIC_ORIGIN": f"http://127.0.0.1:{port}",
+    "DEV_QUICK_LOGIN_ENABLED": "false",
     "APP_VERSION": "smoke",
     "PORT": str(port),
     "HEALTH_TIMEOUT_SECONDS": "1",
@@ -55,7 +57,11 @@ try:
     code, body = get()
     assert code == 200 and json.loads(body)["dependencies"]["database"] == "up"
     assert "EchoSim" in get("/")[1]
-    assert get("/api/v1/works")[0] == 404
+    assert get("/api/v1/works")[0] == 401
+    assert get("/api/v1/works/unknown")[0] == 401
+    assert get("/missing")[0] == 404
+    assert get("/login")[0] == 200
+    assert json.loads(get("/api/v1/capabilities")[1])["quick_login"] is False
     uid = compose("exec", "-T", "api", "id", "-u", capture=True).stdout.strip()
     assert uid == "10001", uid
     compose("stop", "db")
@@ -78,7 +84,7 @@ try:
     assert any(x["event"] == "worker_stopped" for x in rows)
     assert env["POSTGRES_PASSWORD"] not in logs
     print(
-        "PASS: real readiness, outage, recovery, frontend, closed business paths, non-root, SIGTERM"
+        "PASS: real readiness, outage, recovery, frontend, authenticated business boundaries, non-root, SIGTERM"
     )
 finally:
     compose("down", "--volumes", "--remove-orphans")

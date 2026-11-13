@@ -6,7 +6,7 @@
 ## Requirements
 
 ### Requirement: R1 Explicit runtime configuration
-The system SHALL reject missing, empty or invalid required configuration before serving requests. Required values are APP_ENV, APP_VERSION, DATABASE_URL, PORT, HEALTH_TIMEOUT_SECONDS and WORKER_POLL_SECONDS. Only development, test and production environments are valid; port is 1–65535; timeout is 1–10 seconds; worker interval is 1–60 seconds.
+The system SHALL reject missing, empty or invalid required configuration before serving requests. Required values are APP_ENV, APP_VERSION, DATABASE_URL, PORT, HEALTH_TIMEOUT_SECONDS and WORKER_POLL_SECONDS. The API additionally requires PUBLIC_ORIGIN, an exact HTTP(S) origin with HTTPS in production. Only development, test and production environments are valid; port is 1–65535; timeout is 1–10 seconds; worker interval is 1–60 seconds.
 
 #### Scenario: Valid configuration
 - **GIVEN** all required values are valid and the database is reachable
@@ -22,6 +22,10 @@ The system SHALL reject missing, empty or invalid required configuration before 
 - **GIVEN** PORT is 0 or DATABASE_URL is not a PostgreSQL connection URL
 - **WHEN** either process starts
 - **THEN** it exits nonzero with a safe configuration error
+
+#### Scenario: Invalid public origin
+- **WHEN** the API starts without PUBLIC_ORIGIN or production uses an HTTP origin
+- **THEN** startup fails safely without serving business requests or printing configuration values
 
 ### Requirement: R2 Observable readiness
 The system SHALL expose GET /health without authentication and return status, version, UTC time, request_id and dependencies.database. A successful database probe returns 200/ok/up; failure returns 503/degraded/down. A probe SHALL terminate within the configured timeout plus one second scheduling tolerance. Health responses SHALL NOT contain connection details or exception text.
@@ -42,17 +46,17 @@ The system SHALL expose GET /health without authentication and return status, ve
 - **THEN** status returns to 200 without an API restart
 
 ### Requirement: R3 Request boundaries and error contract
-The system SHALL return JSON errors with error.code, error.message and request_id. Unknown URLs including unimplemented business resources return 404/NOT_FOUND. Unsupported methods return 405/METHOD_NOT_ALLOWED. Unexpected failures return 500/INTERNAL_ERROR with a safe message and request identifier; details remain private. Invalid request identifiers SHALL be replaced with a generated identifier.
+系统 SHALL 返回含 error.code、error.message、request_id 的 JSON 错误。未知 URL 和未实现业务资源返回 404/NOT_FOUND；已实现私有 API 无有效会话返回 401，认证后不可访问的作品返回 404。不支持的方法返回 405/METHOD_NOT_ALLOWED；意外故障返回 500/INTERNAL_ERROR、安全提示与请求标识，不泄露内部细节。非法请求标识 SHALL 替换为生成的标识。
 
 #### Scenario: Resource does not exist
-- **GIVEN** the runtime is serving
+- **GIVEN** the runtime is serving and the caller has a valid session
 - **WHEN** GET /api/v1/works/unknown is requested
 - **THEN** it returns 404/NOT_FOUND without business data
 
 #### Scenario: No business access is exposed
-- **GIVEN** a caller supplies an arbitrary bearer token
+- **GIVEN** a caller supplies an arbitrary bearer token without a valid session
 - **WHEN** GET /api/v1/works is requested
-- **THEN** it returns the same 404 contract as an unknown resource without granting access
+- **THEN** it returns 401/UNAUTHENTICATED without granting access
 
 #### Scenario: Unsupported operation
 - **GIVEN** the runtime is serving
@@ -83,7 +87,7 @@ The system SHALL emit one JSON object per log line containing UTC timestamp, lev
 - **THEN** it emits worker_stopped and exits successfully within 5 seconds without waiting the full interval
 
 ### Requirement: R5 Runtime status page
-The system SHALL serve a Chinese EchoSim status page at / using the same origin as /health. It SHALL show loading, healthy, degraded and connection-error states, offer retry, and identify that creative capabilities are not yet available. It SHALL NOT present fabricated works or functional business controls.
+The system SHALL serve a Chinese EchoSim status page at / using the same origin as /health. It SHALL show loading, healthy, degraded and connection-error states, offer retry, and identify that creative capabilities are not yet available. It SHALL offer navigation to login or private works without fabricated data or controls for unimplemented creative capabilities.
 
 #### Scenario: Healthy page
 - **GIVEN** /health returns 200
@@ -94,3 +98,7 @@ The system SHALL serve a Chinese EchoSim status page at / using the same origin 
 - **GIVEN** /health returns 503 or cannot be reached
 - **WHEN** the page loads or the user retries
 - **THEN** it shows the matching degraded or connection-error state and an enabled retry control
+
+#### Scenario: Real business navigation
+- **WHEN** a visitor follows the work entry from the status page
+- **THEN** the app displays login or the authenticated work list, while story preparation, simulation and chapters remain marked unavailable

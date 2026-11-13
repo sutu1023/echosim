@@ -43,6 +43,8 @@ EchoSim 面向个人小说创作者，通过有来源和角色可见性约束的
 | M4 稳定性与规模 | 停止、重连、重试、并发与重复提交验证通过，公布实测上限。 |
 | M5 交付 | 公网闭环、可复跑门禁和定位明确的验证证据。 |
 
-当前实现 system-runtime 与仅开发环境启用的 model-connection-test；P01–P13 完整业务能力仍需各自变更与可执行 Scenario。范围变动先更新基线，不能用实现默默改变约定。
+当前实现 system-runtime、仅开发环境启用的 model-connection-test，以及已归档变更 user-auth/private-works 的账号会话与私有作品创建、列表、详情。P01 的材料/角色/任务/章节隔离及 P02–P13 完整业务能力仍需各自变更与可执行 Scenario。范围变动先更新基线，不能用实现默默改变约定。
 
 已完成变更 2026-11-13-model-connection-test 增加仅本地开发启用的临时模型连接诊断；不保存 KEY，不构成 P13 持久配置。公网验证暂缓，M0 仍未完成。
+
+2026-11-13-private-works 与前置 user-auth 联合交付：预置账号登录、七天会话、私有作品与持久创建幂等；开发环境可显式开启 A/B 一键登录。真实验证以 docs/verification/2026-11-13-private-works.md 为准；不代表 M0 或 M1 完成。

@@ -7,6 +7,7 @@ from pathlib import Path
 path = Path(__file__).resolve().parents[1] / ".env"
 content = (
     "APP_ENV=development\nAPP_VERSION=0.0.1\nPORT=8081\n"
+    "PUBLIC_ORIGIN=http://localhost:8081\nDEV_QUICK_LOGIN_ENABLED=false\n"
     "HEALTH_TIMEOUT_SECONDS=3\nWORKER_POLL_SECONDS=10\n"
     "POSTGRES_DB=echosim\nPOSTGRES_USER=echosim\n"
     f"POSTGRES_PASSWORD={secrets.token_hex(32)}\n"
