@@ -6,9 +6,19 @@ from echosim.services.story_generation import generate_candidate
 
 
 class StoryWorker:
-    def __init__(self, store, configurations, provider, simulation=None):
+    def __init__(
+        self,
+        store,
+        configurations,
+        provider,
+        simulation=None,
+        adoption=None,
+        graph=None,
+        chapters=None,
+    ):
         self.store, self.configurations, self.provider = store, configurations, provider
-        self.simulation = simulation
+        self.chapters = chapters
+        self.simulation, self.adoption, self.graph = simulation, adoption, graph
 
     async def tick(self):
         async with self.store.transaction() as db:
@@ -20,17 +30,37 @@ class StoryWorker:
         heartbeat = asyncio.create_task(self.heartbeat(task))
         try:
             config = await self.configurations.bound(task["user_id"], task["configuration_id"])
-            async with asyncio.timeout(240 if task["kind"] == "preparation" else 2700):
+            async with asyncio.timeout(
+                {
+                    "preparation": 240,
+                    "simulation": 2700,
+                    "adoption": 600,
+                    "graph": 240,
+                    "chapter": 360,
+                    "chapter_review": 600,
+                    "chapter_polish": 240,
+                }[task["kind"]]
+            ):
                 if task["kind"] == "preparation":
                     content = await generate_candidate(
-                        self.provider, config, task["input_data"], task["configuration_id"]
+                        self.provider,
+                        config,
+                        task["input_data"],
+                        task["configuration_id"],
+                        session=task["id"],
                     )
                     async with self.store.transaction() as db:
                         if await db.task_guard(task):
                             await db.story_publish(task, content)
                             await db.task_finish(task, "succeeded")
-                else:
+                elif task["kind"] == "simulation":
                     await self.simulation(task, config)
+                elif task["kind"] in ("chapter", "chapter_review", "chapter_polish"):
+                    await self.chapters(task, config)
+                elif task["kind"] == "graph":
+                    await self.graph(task, config)
+                elif task["kind"] == "adoption":
+                    await self.adoption(task, config)
         except (Fault, ModelFailure, TimeoutError) as exc:
             await self.fail(task, getattr(exc, "code", "TASK_TIMEOUT"))
         except Exception:

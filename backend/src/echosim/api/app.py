@@ -12,11 +12,14 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException
 
+from echosim.api.adoption import register_adoption
+from echosim.api.chapters import register_chapters
 from echosim.api.model_config import register_model_config
 from echosim.api.model_connection import register_model_test
 from echosim.api.private_works import register_private
 from echosim.api.simulation import register_simulation
 from echosim.api.story import register_story
+from echosim.api.story_graph import register_graph
 from echosim.logging import emit
 from echosim.services.health import HealthService
 
@@ -46,6 +49,9 @@ def create_app(
     model_config=None,
     stories=None,
     simulations=None,
+    adoptions=None,
+    chapters=None,
+    graph=None,
 ) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -123,6 +129,14 @@ def create_app(
     if stories is not None:
         register_story(app, stories, current, write_user)
 
+    if graph is not None:
+        register_graph(app, graph, current, write_user)
+
+    if chapters is not None:
+        register_chapters(app, chapters, current, write_user)
+    if adoptions is not None:
+        register_adoption(app, adoptions, write_user)
+
     if simulations is not None:
         register_simulation(app, simulations, current, write_user)
 
@@ -140,6 +154,8 @@ def create_app(
         for route in ("/login", "/works", "/works/{work_id}"):
             app.add_api_route(route, index, methods=["GET"])
 
+        if chapters is not None:
+            app.add_api_route("/works/{work_id}/chapters", index, methods=["GET"])
         if simulations is not None:
             app.add_api_route("/works/{work_id}/simulation", index, methods=["GET"])
 

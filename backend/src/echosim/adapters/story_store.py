@@ -110,6 +110,7 @@ class StoryQueries:
         )
 
     async def task_finish(self, task, state, error=None):
+        await self.pending_result(task, state)
         await self.execute(
             "UPDATE story_tasks SET state=%s,error_code=%s,updated_at=now() WHERE id=%s",
             (state, error, task["id"]),

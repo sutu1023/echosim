@@ -27,6 +27,7 @@ async def structured(
     temperature=0.7,
     prompt="creative-v1",
     sleep=asyncio.sleep,
+    session=None,
 ):
     for attempt in range(3):
         try:
@@ -39,6 +40,7 @@ async def structured(
                     temperature=temperature,
                     prompt_version=prompt,
                     configuration_version=version,
+                    session_id=session,
                 )
             return validate(json.loads(result["text"]))
         except (ValueError, KeyError, TypeError):
@@ -54,7 +56,7 @@ async def structured(
         await sleep(attempt + 1)
 
 
-async def generate_candidate(provider, config, payload, version, sleep=asyncio.sleep):
+async def generate_candidate(provider, config, payload, version, sleep=asyncio.sleep, session=None):
     return await structured(
         provider,
         config,
@@ -67,4 +69,5 @@ async def generate_candidate(provider, config, payload, version, sleep=asyncio.s
         tokens=8192,
         prompt="preparation-v2",
         sleep=sleep,
+        session=session,
     )

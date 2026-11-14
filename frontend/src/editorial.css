@@ -1,0 +1,61 @@
+:root {
+  --ink: #302921;
+  --accent: #953d30;
+  --line: #d4ccbf;
+  --paper: linear-gradient(145deg, #fffefa, #f7f3eb);
+  --relief: inset 0 1px white, 0 2px 3px #34281812, 0 12px 24px -16px #46351b70;
+  color: var(--ink);
+  background: #e8e4dc;
+}
+body {min-height: 100vh; background: radial-gradient(ellipse at top left, #faf7ef, transparent 70%), #e8e4dc}
+a {color: var(--accent); text-underline-offset: .2em}
+header {height: 72px; border-color: var(--line)}
+.mark {background: var(--accent); border-radius: 6px}
+main::after {display: none}
+button, .workspace .secondary {border-radius: 5px}
+button {background: var(--accent)}
+button:hover:not(:disabled) {background: #783027}
+.workspace .secondary, .workspace .quiet:hover {color: var(--ink); background: #ede6db}
+.workspace .quiet {color: var(--accent)}
+.workspace .secondary:hover:not(:disabled) {background: #e1d7c9}
+button:disabled {cursor: default}
+:is(input, textarea, select, a, button, summary):focus-visible {outline: 3px solid #a45138; outline-offset: 3px}
+.shell:not(.simulation-shell) {max-width: 1400px; overflow-wrap: anywhere}
+.shell:not(.simulation-shell) main, main.diagnostic {padding-block: clamp(24px,4vw,56px)}
+.shell:not(.simulation-shell) h1 {font: 680 clamp(32px,4vw,54px)/1.2 "PingFang SC",sans-serif; letter-spacing: -.04em}
+.desk-grid, .setting-columns {display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 24px; align-items: start}
+.desk-grid > *, .setting-columns > * {min-width: 0}
+.panel, .status-card, .preparation-desk .story-graph {
+  padding: clamp(20px,2.5vw,36px); border: 1px solid var(--line); border-radius: 8px;
+  background: var(--paper); box-shadow: var(--relief);
+}
+.desk-grid > .panel, .preparation-desk > .panel, .desk-grid > .story-graph, .status-card {max-width: none; margin: 0}
+.cover {
+  padding: clamp(24px,3vw,42px); background: linear-gradient(135deg,#683830,#302824); color: #fff7eb;
+  border-top: 4px solid #c66956; border-radius: 8px; box-shadow: 0 12px 24px -16px #46351b90;
+}
+.cover a,.cover .muted {color: #fff1de}
+.home-cover h1 {margin: 0 0 24px}
+.home-cover p {max-width: 24em}
+.home-cover a, .button-link {display: inline-block; margin-top: 16px}
+.home-shell .desk-grid {align-items: stretch}
+.status-card h2 {font-size: 20px}
+.quick-login {margin: 0}
+.login-desk:not(:has(.quick-login)) {grid-template-columns: minmax(0,620px)}
+.detail {margin: 16px 0 24px}
+.workspace .detail h2 {font-size: clamp(28px,3vw,40px)}
+.library-desk {grid-template-columns: minmax(0,5fr) minmax(0,7fr)}
+.work-card a {color: var(--accent)}
+.work-card:last-child {border: 0}
+.library-desk > button {justify-self: start}
+.preparation-desk > .panel {margin-top: 24px}
+.preparation-desk .story-graph {max-height: 65vh; overflow: auto}
+.setting-columns {margin-block: 24px}
+.setting-columns article.panel {padding: 16px 20px; margin-block: 12px}
+.setting-columns p {white-space: pre-wrap}
+.workspace input:not([type=checkbox]), .workspace textarea, .diagnostic input {background: #fffefa; border: 1px solid #ac9f8f; border-radius: 5px; box-shadow: inset 0 2px 4px #46351b0c}
+.diagnostic h1 {margin-top: 24px}
+@media(max-width: 800px) {
+  .desk-grid,.setting-columns,.library-desk {grid-template-columns: minmax(0,1fr); gap: 16px}
+  .preparation-desk .story-graph {max-height: none}
+}

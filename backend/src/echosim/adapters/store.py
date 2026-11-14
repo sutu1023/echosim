@@ -6,6 +6,9 @@ from uuid import uuid4
 from psycopg import AsyncConnection, Error
 from psycopg.rows import dict_row
 
+from echosim.adapters.canon_store import CanonQueries
+from echosim.adapters.chapter_store import ChapterQueries
+from echosim.adapters.graph_store import GraphQueries
 from echosim.adapters.model_config_store import ModelConfigQueries
 from echosim.adapters.simulation_store import SimulationQueries
 from echosim.adapters.story_store import StoryQueries
@@ -56,7 +59,9 @@ class PostgresStore:
             await db.execute("SELECT key FROM login_attempt_windows LIMIT 0")
 
 
-class Queries(ModelConfigQueries, StoryQueries, SimulationQueries):
+class Queries(
+    ModelConfigQueries, StoryQueries, SimulationQueries, CanonQueries, GraphQueries, ChapterQueries
+):
     def __init__(self, connection):
         self.connection = connection
 
@@ -82,6 +87,7 @@ class Queries(ModelConfigQueries, StoryQueries, SimulationQueries):
                 "configuration_id",
                 "fence",
                 "request_key",
+                "pending_simulation_id",
             ):
                 if key in row and row[key] is not None:
                     row[key] = str(row[key])

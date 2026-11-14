@@ -84,6 +84,9 @@ def test_rejected_action_never_enters_following_role_context():
         async def task_guard(self, task):
             return {"state": "running"}
 
+        async def simulation_progress(self, task, stage, ending=None):
+            pass
+
         async def simulation_append(self, task, sequence, content):
             self.accepted.append(content)
 
@@ -98,23 +101,23 @@ def test_rejected_action_never_enters_following_role_context():
 
         async def ask(self, task, config, prompt, context, validate, name, *args):
             assert "rejected-marker" not in json.dumps(context)
-            if name == "architect-v1":
-                return {"scene": "灯室", "order": ["1", "2", "3"]}
+            if name == "architect-v8":
+                return {"scene": "灯室", "next_actor": "1", "finished": False, "reason": "继续"}
             self.attempted += 1
-            return {
-                "actor_id": context["actor_id"],
-                "visibility": ["1", "2", "3"],
-                "action": "rejected-marker" if self.attempted == 1 else "观察灯座",
-            }
+            from test_narrative import event
+
+            return validate(
+                event(context["actor_id"], "rejected-marker" if self.attempted == 1 else "观察灯座")
+            )
 
         async def check(self, task, config, context, proposed):
-            return proposed.get("action") != "rejected-marker"
+            return "rejected-marker" not in json.dumps(proposed)
 
     run = Run(Stories(), None)
     asyncio.run(run.run({"input_data": {"story": story()}}, {}))
-    assert len(run.store.accepted) == 9
-    assert all(e["action"] != "rejected-marker" for e in run.store.accepted)
-    assert run.attempted == 10
+    assert len(run.store.accepted) == 24
+    assert "rejected-marker" not in json.dumps(run.store.accepted)
+    assert run.attempted == 25
 
 
 def test_worker_total_deadline_fails_and_releases_task(monkeypatch):

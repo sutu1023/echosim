@@ -29,14 +29,14 @@ export function ModelSettings({ csrf }: { csrf: string }) {
     } catch (e) { setError(e instanceof Error ? e.message : '验证失败'); setStatus('本次操作未更改已保存配置'); }
     finally { setKey(''); setTouched(false); setBusy(false); pending.current = false; }
   }
-  return <section className="panel"><h2>生成模型 · OpenCode Go</h2><p className="muted">保存后可用于故事准备和推演。</p>
+  return <section className="desk-grid"><div className="cover"><h2>生成模型 · OpenCode Go</h2><p className="muted">保存后可用于故事准备和推演。</p>
     <p>服务地址：{base}</p><p role="status" aria-live="polite">{status}</p>
     {error && <p role="alert">{error} <button disabled={busy} onClick={() => void load()}>重新加载配置</button></p>}
-    <form noValidate onSubmit={e => { e.preventDefault(); void submit(true); }}>
+    <a href="/works">返回我的作品</a></div><form className="panel" noValidate onSubmit={e => { e.preventDefault(); void submit(true); }}>
       <label htmlFor="model-name">模型名称</label><input id="model-name" value={model} disabled={busy} onBlur={() => setTouched(true)} onChange={e => setModel(e.target.value)} />
       <label htmlFor="model-key">供应商密钥</label><input id="model-key" type="password" autoComplete="off" value={key} disabled={busy} onBlur={() => setTouched(true)} onChange={e => setKey(e.target.value)} aria-describedby="model-error" />
       <p id="model-error" className="field-error">{touched && invalid ? '请填写模型名称和有效密钥' : '密钥加密保存，不显示原值；更新配置需要重新输入密钥。'}</p>
       <div className="actions"><button disabled={busy || !loaded}>验证并保存</button><button className="secondary" type="button" disabled={busy || !loaded} onClick={() => void submit(false)}>仅测试连接</button></div>
-    </form><a href="/works">返回我的作品</a>
+    </form>
   </section>;
 }

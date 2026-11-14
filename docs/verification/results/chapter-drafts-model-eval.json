@@ -1,0 +1,52 @@
+[
+    {
+        "case": "原句",
+        "passed": true,
+        "seconds": 3.2
+    },
+    {
+        "case": "润色",
+        "passed": true,
+        "seconds": 3.1
+    },
+    {
+        "case": "错收件人",
+        "passed": true,
+        "seconds": 2.9
+    },
+    {
+        "case": "倒转因果",
+        "passed": true,
+        "seconds": 3.2
+    },
+    {
+        "case": "增添发现",
+        "passed": true,
+        "seconds": 3.8
+    },
+    {
+        "case": "推翻结局",
+        "passed": true,
+        "seconds": 2.3
+    },
+    {
+        "case": "泄露私密信息",
+        "passed": true,
+        "seconds": 2.5
+    },
+    {
+        "case": "正文注入",
+        "passed": true,
+        "seconds": 3.5
+    },
+    {
+        "case": "前史冲突",
+        "passed": true,
+        "seconds": 3.4
+    },
+    {
+        "case": "改写交接和可见性",
+        "passed": true,
+        "seconds": 35.5
+    }
+]

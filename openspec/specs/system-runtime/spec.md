@@ -102,3 +102,14 @@ The system SHALL serve a Chinese EchoSim status page at / using the same origin 
 #### Scenario: Real business navigation
 - **WHEN** a visitor follows the work entry from the status page
 - **THEN** the app displays login or the authenticated work list, while story preparation, simulation and chapters remain marked unavailable
+
+### Requirement: Shared editorial layout
+The frontend SHALL use a shared paper surface, typographic hierarchy and accent for all existing screens, including the local diagnostic page.
+
+#### Scenario: Desktop navigation
+- **WHEN** a creator opens the home, login, works, preparation or settings screen
+- **THEN** related content and actions occupy aligned panels, with feedback adjacent to its task and work-specific titles readable.
+
+#### Scenario: Compact viewport
+- **WHEN** the viewport cannot accommodate the desktop columns
+- **THEN** panels stack and inputs, navigation, and long content remain reachable without horizontal page scrolling.

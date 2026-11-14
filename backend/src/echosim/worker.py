@@ -8,10 +8,14 @@ from echosim.adapters.store import PostgresStore
 from echosim.config import load_settings
 from echosim.domain.accounts import Fault
 from echosim.logging import configure_logging, emit
+from echosim.services.adoption import Adoptions
+from echosim.services.chapters import Chapters
 from echosim.services.health import HealthService
 from echosim.services.model_config import ModelConfigurations
 from echosim.services.simulation import Simulations
 from echosim.services.story import Stories
+from echosim.services.story_facts import StoryFacts
+from echosim.services.story_graph import StoryGraph
 from echosim.services.story_worker import StoryWorker
 
 
@@ -64,13 +68,20 @@ async def serve() -> None:
             store, Credentials(settings.model_master_key.get_secret_value()), provider
         )
         simulation = Simulations(Stories(store, configs), provider)
-        jobs = StoryWorker(store, configs, provider, simulation.run)
-    await run_worker(
-        health,
-        min(settings.worker_poll_seconds, 5) if jobs else settings.worker_poll_seconds,
-        stop,
-        jobs,
-    )
+        jobs = StoryWorker(
+            store,
+            configs,
+            provider,
+            simulation.run,
+            Adoptions(simulation.stories, StoryFacts(provider)).run,
+            StoryGraph(simulation.stories, StoryFacts(provider)).run,
+            Chapters(simulation.stories, StoryFacts(provider)).run,
+        )
+    if jobs:
+        async with provider:
+            await run_worker(health, min(settings.worker_poll_seconds, 5), stop, jobs)
+    else:
+        await run_worker(health, settings.worker_poll_seconds, stop)
 
 
 def main() -> None:

@@ -38,15 +38,15 @@ export function ModelTest() {
     } catch { setMessage('连接失败或等待超时，请检查服务后重试'); }
     finally { clearTimeout(timer); setKey(''); setPending(false); }
   }
-  return <main className="shell"><a href="/">EchoSim 首页</a><h1>模型连接测试</h1>
-    <p>仅本地开发测试，KEY 不保存，每次测试后清空。创作功能尚未开放。</p>
+  return <main className="shell diagnostic"><a href="/">EchoSim 首页</a><h1>模型连接测试</h1>
+    <div className="desk-grid"><section className="cover"><p>仅本地开发测试，KEY 不保存，每次测试后清空。</p>
     <p>OpenCode Go · deepseek-v4.1-flash</p>
     <p>https://opencode.ai/inference/go/openai/v1</p>
-    {enabled && <form onSubmit={e => void submit(e)}>
+    </section><section className="panel">{enabled && <form onSubmit={e => void submit(e)}>
       <label htmlFor="model-key">当次 API KEY</label>
       <input id="model-key" type="password" autoComplete="off" maxLength={4096} value={key} disabled={pending} onChange={e => setKey(e.target.value)} />
       <button disabled={pending || !key.trim()}>{pending ? '测试中…' : '测试连接'}</button>
     </form>}
     <p role="status" aria-live="polite">{message}</p>
-  </main>;
+  </section></div></main>;
 }

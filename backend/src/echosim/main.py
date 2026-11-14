@@ -12,11 +12,15 @@ from echosim.api.app import create_app
 from echosim.config import load_settings
 from echosim.logging import configure_logging
 from echosim.services.accounts import Accounts
+from echosim.services.adoption import Adoptions
+from echosim.services.chapters import Chapters
 from echosim.services.health import HealthService
 from echosim.services.model_config import ModelConfigurations
 from echosim.services.model_connection import ModelConnectionService
 from echosim.services.simulation import Simulations
 from echosim.services.story import Stories
+from echosim.services.story_facts import StoryFacts
+from echosim.services.story_graph import StoryGraph
 from echosim.services.works import Works
 
 
@@ -51,6 +55,9 @@ def main() -> None:
         accounts=Accounts(store, Passwords()),
         model_config=configurations,
         stories=stories,
+        graph=StoryGraph(stories, StoryFacts(OpenCodeProvider())),
+        chapters=Chapters(stories, StoryFacts(OpenCodeProvider())),
+        adoptions=Adoptions(stories, StoryFacts(OpenCodeProvider())),
         simulations=Simulations(stories, OpenCodeProvider()),
         works=Works(store),
         public_origin=settings.public_origin,

@@ -16,7 +16,7 @@ describe('runtime status', () => {
     render(<App />);
     expect(await screen.findByText('服务运行正常')).toBeInTheDocument();
     expect(screen.getByText('test-1')).toBeInTheDocument();
-    expect(screen.getByText('创作功能尚未开放')).toBeInTheDocument();
+    expect(screen.getByText('从一句创意开始')).toBeInTheDocument();
   });
   it('shows degraded state and can recover by retry', async () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce(response(503)).mockResolvedValue(response(200)));

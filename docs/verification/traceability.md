@@ -83,7 +83,7 @@ backend/tests 为离线单元/接口，backend/integration/test_postgres.py::tes
 
 已有 R1/R3/R5 场景沿用上表并按本轮增量更正业务入口契约；实际读屏语音、公网和备份恢复未验证。
 
-## 本轮创作链路
+## 上一轮已实现创作链路
 
 以下为新增 Scenario 的验证映射；真实证据未完成项不得视为已通过。
 
@@ -130,3 +130,91 @@ backend/tests 为离线单元/接口，backend/integration/test_postgres.py::tes
 | role-simulation / Duplicate or competing task | test_simulation.py；test_zzz_simulation.py；Simulation.test.tsx；2026-11-13-minimal-role-simulation.md 记录真实结果与限制 |
 | role-simulation / Crash or deadline | test_simulation.py；test_zzz_simulation.py；Simulation.test.tsx；2026-11-13-minimal-role-simulation.md 记录真实结果与限制 |
 | role-simulation / Joint delivery | test_simulation.py；test_zzz_simulation.py；Simulation.test.tsx；2026-11-13-minimal-role-simulation.md 记录真实结果与限制 |
+
+## 2026-11-14 三项实现追溯（自动检查通过，联合质量验收进行中）
+
+下表保留每个Scenario及任务链接。自动测试通过不替代真实模型与浏览器验收；未覆盖的子项仍待验证。规划检查见 [本轮规划验证](2026-11-14-simulation-planning.md)。
+
+| Change / Capability / Requirement / Scenario | 规划验证任务 | 状态 |
+| --- | --- | --- |
+| 2026-11-14-narrative-simulation / role-simulation / S1 / Full scene | [任务 2.1](../../openspec/changes/archive/2026-11-14-narrative-simulation/tasks.md) | 动态调度及24条上限通过，三篇固定场景验收见 2026-11-14-disclosure-review.md 与 v6 审阅 |
+| 2026-11-14-narrative-simulation / role-simulation / S1 / Missing confirmation or forged parameters | [任务 2.1](../../openspec/changes/archive/2026-11-14-narrative-simulation/tasks.md) | 自动验证：test_dynamic_exchange_and_bounded_endings、test_twenty_four_events_stop_replay_and_isolation；完整场景见三篇剧情验收 |
+| 2026-11-14-narrative-simulation / role-simulation / S1 / Bound history | [任务 2.1](../../openspec/changes/archive/2026-11-14-narrative-simulation/tasks.md) | 自动验证：test_dynamic_exchange_and_bounded_endings、test_twenty_four_events_stop_replay_and_isolation；完整场景见三篇剧情验收 |
+| 2026-11-14-narrative-simulation / role-simulation / S1 / Early resolution | [任务 2.1](../../openspec/changes/archive/2026-11-14-narrative-simulation/tasks.md) | test_narrative.py：提前收束不凑数；三篇真实任务均自然结束 |
+| 2026-11-14-narrative-simulation / role-simulation / S1 / Unresolved hard limit | [任务 2.1](../../openspec/changes/archive/2026-11-14-narrative-simulation/tasks.md) | test_zzz_simulation.py：24事件持久化、第25条数据库拒绝 |
+| 2026-11-14-narrative-simulation / role-simulation / S2 / Private knowledge | [任务 2.1–2.2](../../openspec/changes/archive/2026-11-14-narrative-simulation/tasks.md) | test_simulation.py/test_narrative.py：角色私密字段、拒绝文本、逐段可见性隔离；真实违规样例保留 |
+| 2026-11-14-narrative-simulation / role-simulation / S2 / Invalid architect output | [任务 2.1–2.2](../../openspec/changes/archive/2026-11-14-narrative-simulation/tasks.md) | 非法结构/协调不发布，语义冲突在同一事件时限内重新规划；test_narrative.py、真实审阅记录。 |
+| 2026-11-14-narrative-simulation / role-simulation / S2 / Natural exchange | [任务 2.1–2.2](../../openspec/changes/archive/2026-11-14-narrative-simulation/tasks.md) | 自动验证：test_dynamic_exchange_and_bounded_endings、test_twenty_four_events_stop_replay_and_isolation；完整场景见三篇剧情验收 |
+| 2026-11-14-narrative-simulation / role-simulation / S2 / Independent response | [任务 2.1–2.2](../../openspec/changes/archive/2026-11-14-narrative-simulation/tasks.md) | 自动验证：test_dynamic_exchange_and_bounded_endings、test_twenty_four_events_stop_replay_and_isolation；完整场景见三篇剧情验收 |
+| 2026-11-14-narrative-simulation / role-simulation / S3 / Progressive display | [任务 1.1、2.2](../../openspec/changes/archive/2026-11-14-narrative-simulation/tasks.md) | 自动验证：test_narrative.py、test_simulation.py；真实模型评测见 narrative-v12-fixed-short.json 和披露篇复评 |
+| 2026-11-14-narrative-simulation / role-simulation / S3 / Contradiction or malformed action | [任务 1.1、2.2](../../openspec/changes/archive/2026-11-14-narrative-simulation/tasks.md) | 自动验证：test_narrative.py、test_simulation.py；真实模型评测见 narrative-v12-fixed-short.json 和披露篇复评 |
+| 2026-11-14-narrative-simulation / role-simulation / S3 / Empty repetition | [任务 1.1、2.2](../../openspec/changes/archive/2026-11-14-narrative-simulation/tasks.md) | 自动验证：test_narrative.py、test_simulation.py；真实模型评测见 narrative-v12-fixed-short.json 和披露篇复评 |
+| 2026-11-14-narrative-simulation / role-simulation / S3 / Consequence of a disclosure | [任务 4.1](../../openspec/changes/archive/2026-11-14-narrative-simulation/tasks.md) | 同一固定场景，从公开披露追踪到另一角色自己的选择。知识边界另见 test_narrative.py。 |
+| 2026-11-14-narrative-simulation / role-simulation / S3 / Completed action and aftermath | [任务 4.1](../../openspec/changes/archive/2026-11-14-narrative-simulation/tasks.md) | v6 披露篇事件 2–3 是重复交付的失败样本，事件 12–18 是例行收尾的反例。复验检查取件原因、实际后果和末次事件。 |
+| 2026-11-14-narrative-simulation / role-simulation / S3 / Mixed private and public segments | [任务 1.1、2.2](../../openspec/changes/archive/2026-11-14-narrative-simulation/tasks.md) | 自动验证：test_narrative.py、test_simulation.py；真实模型评测见 narrative-v12-fixed-short.json 和披露篇复评 |
+| 2026-11-14-narrative-simulation / role-simulation / S7 / Joint delivery | [任务 4.1–4.2](../../openspec/changes/archive/2026-11-14-narrative-simulation/tasks.md) | 已验证24事件真实浏览器采纳/继续、停止放弃与跨账号404，三篇剧情已独立评分并达标 |
+| 2026-11-14-narrative-simulation / role-simulation / S7 / Full narrative review | [任务 4.1–4.2](../../openspec/changes/archive/2026-11-14-narrative-simulation/tasks.md) | 三篇独立评分通过，旧失败与复评证据见推演专项记录 |
+| 2026-11-14-narrative-simulation / role-simulation / S8 / Pending validation | [任务 3.1–3.3](../../openspec/changes/archive/2026-11-14-narrative-simulation/tasks.md) | 实现已接入；test_zzzz_adoption.py、test_story_facts.py、test_graph_api.py、AdoptionPanel.test.tsx；真实采纳与专项结果见 2026-11-14-simulation-adoption.md |
+| 2026-11-14-narrative-simulation / role-simulation / S8 / Ordered playback and reveal | [任务 3.1–3.3](../../openspec/changes/archive/2026-11-14-narrative-simulation/tasks.md) | NarrativePlayer.test.tsx：逐字顺序、立即显示、减少动画；Simulation.test.tsx：终态保留队列 |
+| 2026-11-14-narrative-simulation / role-simulation / S8 / Reading older content | [任务 3.1–3.3](../../openspec/changes/archive/2026-11-14-narrative-simulation/tasks.md) | NarrativePlayer.test.tsx与真实Chrome验证回看、逐字显示及可访问的完成提示。 |
+| 2026-11-14-narrative-simulation / role-simulation / S8 / Reconnect and replay | [任务 3.1–3.3](../../openspec/changes/archive/2026-11-14-narrative-simulation/tasks.md) | Simulation.test.tsx：SSE重复、轮询补偿、跨作品晚到；旧历史完整显示 |
+| 2026-11-14-narrative-simulation / role-simulation / S8 / Accessible and safe text | [任务 3.1–3.3](../../openspec/changes/archive/2026-11-14-narrative-simulation/tasks.md) | 实现已接入；test_zzzz_adoption.py、test_story_facts.py、test_graph_api.py、AdoptionPanel.test.tsx；真实采纳与专项结果见 2026-11-14-simulation-adoption.md |
+| 2026-11-14-narrative-simulation / role-simulation / S9 / Old history | [任务 1.1–1.2](../../openspec/changes/archive/2026-11-14-narrative-simulation/tasks.md) | test_zzz_simulation.py：九条旧事件读适配、ID/内容不变、迁移重放 |
+| 2026-11-14-simulation-adoption / role-simulation / S10 / Adopt and continue | [任务 3.3](../../openspec/changes/archive/2026-11-14-simulation-adoption/tasks.md) | test_zzzz_adoption.py：主线/记忆绑定；真实revision1后继续已观察，完整质量未通过 |
+| 2026-11-14-simulation-adoption / role-simulation / S10 / Discard and retry | [任务 3.3](../../openspec/changes/archive/2026-11-14-simulation-adoption/tasks.md) | 实现已接入；test_zzzz_adoption.py、test_story_facts.py、test_graph_api.py、AdoptionPanel.test.tsx；真实采纳与专项结果见 2026-11-14-simulation-adoption.md |
+| 2026-11-14-simulation-adoption / role-simulation / S10 / Revision snapshot | [任务 3.3](../../openspec/changes/archive/2026-11-14-simulation-adoption/tasks.md) | 实现已接入；test_zzzz_adoption.py、test_story_facts.py、test_graph_api.py、AdoptionPanel.test.tsx；真实采纳与专项结果见 2026-11-14-simulation-adoption.md |
+| 2026-11-14-simulation-adoption / role-simulation / S10 / Memory privacy | [任务 3.3](../../openspec/changes/archive/2026-11-14-simulation-adoption/tasks.md) | test_story_facts.py/test_simulation.py：主线事实与记忆按角色过滤，隐藏端点不泄漏 |
+| 2026-11-14-simulation-adoption / simulation-adoption / A1 / Pending decision | [任务 1.2](../../openspec/changes/archive/2026-11-14-simulation-adoption/tasks.md) | 实现已接入；test_zzzz_adoption.py、test_story_facts.py、test_graph_api.py、AdoptionPanel.test.tsx；真实采纳与专项结果见 2026-11-14-simulation-adoption.md |
+| 2026-11-14-simulation-adoption / simulation-adoption / A1 / Empty or failed task | [任务 1.2](../../openspec/changes/archive/2026-11-14-simulation-adoption/tasks.md) | 实现已接入；test_zzzz_adoption.py、test_story_facts.py、test_graph_api.py、AdoptionPanel.test.tsx；真实采纳与专项结果见 2026-11-14-simulation-adoption.md |
+| 2026-11-14-simulation-adoption / simulation-adoption / A2 / Successful or stopped adoption | [任务 1.3、4.1](../../openspec/changes/archive/2026-11-14-simulation-adoption/tasks.md) | 实现已接入；test_zzzz_adoption.py、test_story_facts.py、test_graph_api.py、AdoptionPanel.test.tsx；真实采纳与专项结果见 2026-11-14-simulation-adoption.md |
+| 2026-11-14-simulation-adoption / simulation-adoption / A2 / Discard then restart | [任务 1.3、4.1](../../openspec/changes/archive/2026-11-14-simulation-adoption/tasks.md) | 实现已接入；test_zzzz_adoption.py、test_story_facts.py、test_graph_api.py、AdoptionPanel.test.tsx；真实采纳与专项结果见 2026-11-14-simulation-adoption.md |
+| 2026-11-14-simulation-adoption / simulation-adoption / A2 / Forbidden choice | [任务 1.3、4.1](../../openspec/changes/archive/2026-11-14-simulation-adoption/tasks.md) | 实现已接入；test_zzzz_adoption.py、test_story_facts.py、test_graph_api.py、AdoptionPanel.test.tsx；真实采纳与专项结果见 2026-11-14-simulation-adoption.md |
+| 2026-11-14-simulation-adoption / simulation-adoption / A3 / Contradictory outcome | [任务 2.2–2.4](../../openspec/changes/archive/2026-11-14-simulation-adoption/tasks.md) | 实现已接入；test_zzzz_adoption.py、test_story_facts.py、test_graph_api.py、AdoptionPanel.test.tsx；真实采纳与专项结果见 2026-11-14-simulation-adoption.md |
+| 2026-11-14-simulation-adoption / simulation-adoption / A3 / Interrupted checking | [任务 2.2–2.4](../../openspec/changes/archive/2026-11-14-simulation-adoption/tasks.md) | 隔离数据库覆盖600秒超时恢复pending、丢租约及旧fence拒写。 |
+| 2026-11-14-simulation-adoption / simulation-adoption / A3 / Exclusive check | [任务 2.2–2.4](../../openspec/changes/archive/2026-11-14-simulation-adoption/tasks.md) | 实现已接入；test_zzzz_adoption.py、test_story_facts.py、test_graph_api.py、AdoptionPanel.test.tsx；真实采纳与专项结果见 2026-11-14-simulation-adoption.md |
+| 2026-11-14-simulation-adoption / simulation-adoption / A4 / Write failure | [任务 3.1–3.2](../../openspec/changes/archive/2026-11-14-simulation-adoption/tasks.md) | test_zzzz_adoption.py：快照、决定状态、head更新三个写点失败全部回滚 |
+| 2026-11-14-simulation-adoption / simulation-adoption / A4 / Concurrent or stale commits | [任务 3.1–3.2](../../openspec/changes/archive/2026-11-14-simulation-adoption/tasks.md) | test_zzzz_adoption.py：5并发同key、采纳/放弃竞争、旧revision拒绝、重建服务后重放 |
+| 2026-11-14-simulation-adoption / simulation-adoption / A4 / Snapshot consistency | [任务 3.1–3.2](../../openspec/changes/archive/2026-11-14-simulation-adoption/tasks.md) | test_zzzz_adoption.py：提交并发读取仅见完整旧/新主线 |
+| 2026-11-14-simulation-adoption / simulation-adoption / A5 / Transfer and identity | [任务 2.1、3.3](../../openspec/changes/archive/2026-11-14-simulation-adoption/tasks.md) | 实现已接入；test_zzzz_adoption.py、test_story_facts.py、test_graph_api.py、AdoptionPanel.test.tsx；真实采纳与专项结果见 2026-11-14-simulation-adoption.md |
+| 2026-11-14-simulation-adoption / simulation-adoption / A5 / Secret memory | [任务 2.1、3.3](../../openspec/changes/archive/2026-11-14-simulation-adoption/tasks.md) | 实现已接入；test_zzzz_adoption.py、test_story_facts.py、test_graph_api.py、AdoptionPanel.test.tsx；真实采纳与专项结果见 2026-11-14-simulation-adoption.md |
+| 2026-11-14-simulation-adoption / simulation-adoption / A5 / Uncertain relation | [任务 2.1、3.3](../../openspec/changes/archive/2026-11-14-simulation-adoption/tasks.md) | 实现已接入；test_zzzz_adoption.py、test_story_facts.py、test_graph_api.py、AdoptionPanel.test.tsx；真实采纳与专项结果见 2026-11-14-simulation-adoption.md |
+| 2026-11-14-simulation-adoption / simulation-adoption / A6 / Cross-user decisions | [任务 2.2、3.2](../../openspec/changes/archive/2026-11-14-simulation-adoption/tasks.md) | 实现已接入；test_zzzz_adoption.py、test_story_facts.py、test_graph_api.py、AdoptionPanel.test.tsx；真实采纳与专项结果见 2026-11-14-simulation-adoption.md |
+| 2026-11-14-simulation-adoption / simulation-adoption / A6 / Lost response | [任务 2.2、3.2](../../openspec/changes/archive/2026-11-14-simulation-adoption/tasks.md) | AdoptionPanel.test.tsx 及真实Chrome注入丢响应：重试使用相同key。 |
+| 2026-11-14-simulation-adoption / simulation-adoption / A7 / Decision UI restoration | [任务 1.1、4.1](../../openspec/changes/archive/2026-11-14-simulation-adoption/tasks.md) | 实现已接入；test_zzzz_adoption.py、test_story_facts.py、test_graph_api.py、AdoptionPanel.test.tsx；真实采纳与专项结果见 2026-11-14-simulation-adoption.md |
+| 2026-11-14-simulation-adoption / simulation-adoption / A7 / Pre-upgrade histories | [任务 1.1、4.1](../../openspec/changes/archive/2026-11-14-simulation-adoption/tasks.md) | 实现已接入；test_zzzz_adoption.py、test_story_facts.py、test_graph_api.py、AdoptionPanel.test.tsx；真实采纳与专项结果见 2026-11-14-simulation-adoption.md |
+| 2026-11-14-simulation-adoption / story-preparation / P2 / Failed rewrite | [任务 3.4](../../openspec/changes/archive/2026-11-14-simulation-adoption/tasks.md) | 实现已接入；test_zzzz_adoption.py、test_story_facts.py、test_graph_api.py、AdoptionPanel.test.tsx；真实采纳与专项结果见 2026-11-14-simulation-adoption.md |
+| 2026-11-14-simulation-adoption / story-preparation / P2 / Confirm exact version | [任务 3.4](../../openspec/changes/archive/2026-11-14-simulation-adoption/tasks.md) | 实现已接入；test_zzzz_adoption.py、test_story_facts.py、test_graph_api.py、AdoptionPanel.test.tsx；真实采纳与专项结果见 2026-11-14-simulation-adoption.md |
+| 2026-11-14-simulation-adoption / story-preparation / P2 / Stale confirmation | [任务 3.4](../../openspec/changes/archive/2026-11-14-simulation-adoption/tasks.md) | 实现已接入；test_zzzz_adoption.py、test_story_facts.py、test_graph_api.py、AdoptionPanel.test.tsx；真实采纳与专项结果见 2026-11-14-simulation-adoption.md |
+| 2026-11-14-simulation-adoption / story-preparation / P2 / Regenerate after confirmation | [任务 3.4](../../openspec/changes/archive/2026-11-14-simulation-adoption/tasks.md) | 实现已接入；test_zzzz_adoption.py、test_story_facts.py、test_graph_api.py、AdoptionPanel.test.tsx；真实采纳与专项结果见 2026-11-14-simulation-adoption.md |
+| 2026-11-14-simulation-adoption / story-preparation / P2 / Frozen preparation | [任务 3.4](../../openspec/changes/archive/2026-11-14-simulation-adoption/tasks.md) | test_zzzz_adoption.py+StoryPreparation.test.tsx：采纳后直接服务请求及UI拒绝修改，旧版本可读 |
+| 2026-11-14-simulation-adoption / story-preparation / P2 / Pending result prevents revision | [任务 3.4](../../openspec/changes/archive/2026-11-14-simulation-adoption/tasks.md) | 实现已接入；test_zzzz_adoption.py、test_story_facts.py、test_graph_api.py、AdoptionPanel.test.tsx；真实采纳与专项结果见 2026-11-14-simulation-adoption.md |
+| 2026-11-14-simulation-adoption / story-preparation / P3 / Concurrent submissions | [任务 1.2、2.3](../../openspec/changes/archive/2026-11-14-simulation-adoption/tasks.md) | 实现已接入；test_zzzz_adoption.py、test_story_facts.py、test_graph_api.py、AdoptionPanel.test.tsx；真实采纳与专项结果见 2026-11-14-simulation-adoption.md |
+| 2026-11-14-simulation-adoption / story-preparation / P3 / Lost response and page departure | [任务 1.2、2.3](../../openspec/changes/archive/2026-11-14-simulation-adoption/tasks.md) | 实现已接入；test_zzzz_adoption.py、test_story_facts.py、test_graph_api.py、AdoptionPanel.test.tsx；真实采纳与专项结果见 2026-11-14-simulation-adoption.md |
+| 2026-11-14-simulation-adoption / story-preparation / P3 / Worker restart | [任务 1.2、2.3](../../openspec/changes/archive/2026-11-14-simulation-adoption/tasks.md) | 实现已接入；test_zzzz_adoption.py、test_story_facts.py、test_graph_api.py、AdoptionPanel.test.tsx；真实采纳与专项结果见 2026-11-14-simulation-adoption.md |
+| 2026-11-14-story-graph / story-graph / G1 / Initial graph | [任务 1.1–1.3](../../openspec/changes/archive/2026-11-14-story-graph/tasks.md) | test_zzzz_adoption.py：重复确认只创建一任务；真实基线12实体9关系，见joint-simulation-graph.json |
+| 2026-11-14-story-graph / story-graph / G1 / Missing or failed baseline | [任务 1.1–1.3](../../openspec/changes/archive/2026-11-14-story-graph/tasks.md) | test_zzzz_adoption.py：失败阻止推演、重试、租约丢失旧fence不发布；StoryGraph.test.tsx：构建入口 |
+| 2026-11-14-story-graph / story-graph / G1 / Reconfirmation before canon | [任务 1.1–1.3](../../openspec/changes/archive/2026-11-14-story-graph/tasks.md) | 隔离数据库确认入队故障回滚、重复确认单任务、旧版本晚到被拒。 |
+| 2026-11-14-story-graph / story-graph / G2 / Key changes holder | [任务 1.2、2.2](../../openspec/changes/archive/2026-11-14-story-graph/tasks.md) | 实现已接入；test_zzzz_adoption.py、test_graph_api.py、StoryGraph.test.tsx；真实图谱更新与专项结果见 2026-11-14-story-graph.md |
+| 2026-11-14-story-graph / story-graph / G2 / Unsupported inference | [任务 1.2、2.2](../../openspec/changes/archive/2026-11-14-story-graph/tasks.md) | 固定真实16例覆盖疑问、推测、谎言、无依据关系、无效来源与注入。 |
+| 2026-11-14-story-graph / story-graph / G2 / Ambiguous identity | [任务 1.2、2.2](../../openspec/changes/archive/2026-11-14-story-graph/tasks.md) | 固定真实16例覆盖人物/物品同名与明确别名，见story-facts-pooled-v2.json。 |
+| 2026-11-14-story-graph / story-graph / G3 / Whole task then adoption | [任务 2.2、3.2](../../openspec/changes/archive/2026-11-14-story-graph/tasks.md) | 隔离库验证pending不变；真实停止后待采纳revision0，采纳后revision1，完整24事件的采纳及版本变化见 full-adoption-browser.json |
+| 2026-11-14-story-graph / story-graph / G3 / Stop failure and discard | [任务 2.2、3.2](../../openspec/changes/archive/2026-11-14-story-graph/tasks.md) | 真实浏览器停止与放弃后图谱版本1不变并可再次启动；见browser-playback-adoption-checks.txt。 |
+| 2026-11-14-story-graph / story-graph / G3 / Atomic publication failure | [任务 2.2、3.2](../../openspec/changes/archive/2026-11-14-story-graph/tasks.md) | test_zzzz_adoption.py：三个写点失败旧图不变，并发读取没有混合版本 |
+| 2026-11-14-story-graph / story-graph / G4 / Inspect evidence | [任务 3.1–3.3](../../openspec/changes/archive/2026-11-14-story-graph/tasks.md) | StoryGraph.test.tsx及真实浏览器：原文文本、安全渲染、面板焦点和关闭后返回；见截图 |
+| 2026-11-14-story-graph / story-graph / G4 / New revision fetch | [任务 3.1–3.3](../../openspec/changes/archive/2026-11-14-story-graph/tasks.md) | StoryGraph.test.tsx：同版本不替换、旧revision拒绝、读取失败保留旧图与重试 |
+| 2026-11-14-story-graph / story-graph / G4 / Keyboard and larger graph | [任务 3.1–3.3](../../openspec/changes/archive/2026-11-14-story-graph/tasks.md) | StoryGraph.test.tsx：100实体200边无截断、键盘平移/缩放/来源焦点；完整读屏人工验收待做 |
+| 2026-11-14-story-graph / story-graph / G5 / Other-user graph | [任务 2.1、2.3](../../openspec/changes/archive/2026-11-14-story-graph/tasks.md) | test_graph_api.py与真实隔离数据库：401/CSRF、跨用户与不存在同404 |
+| 2026-11-14-story-graph / story-graph / G5 / Creator sees a secret | [任务 2.1、2.3](../../openspec/changes/archive/2026-11-14-story-graph/tasks.md) | 实现已接入；test_zzzz_adoption.py、test_graph_api.py、StoryGraph.test.tsx；真实图谱更新与专项结果见 2026-11-14-story-graph.md |
+| 2026-11-14-story-graph / story-graph / G6 / Full creative loop | [任务 4.1–4.3](../../openspec/changes/archive/2026-11-14-story-graph/tasks.md) | 真实浏览器确认→完整24事件→采纳→revision1→继续成功。固定16项提取通过，见full-adoption-browser.json及story-facts-pooled-v2.json |
+
+推演现场三栏布局：长剧情独立滚动、窄屏叠放与缺失角色名称见 [前端布局验证](2026-11-14-simulation-layout.md)。
+
+全系统编辑式布局 — Desktop navigation、Compact viewport 的桌面及窄屏检查见 [验证记录](2026-11-14-system-editorial-layout.md)。
+
+### 2026-11-14-chapter-drafts
+
+| 场景 | 检查 |
+| --- | --- |
+| 成章资格、重连、导出、替换与并发保存、放弃只读、跨账号拒绝 | test_zzzzz_chapters.py、test_chapter_drafts.py 及[真实浏览器记录](2026-11-14-chapter-drafts.md) |
+| 修改稿收件人、冲突前史、角色可见性、过期预览 | test_zzzzz_chapters.py、AdoptionPanel.test.tsx 及[真实续演记录](2026-11-14-chapter-drafts.md) |
+| 回滚、重复确认与直接采纳 | test_zzzz_adoption.py、test_zzzzz_chapters.py |

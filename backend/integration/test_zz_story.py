@@ -82,6 +82,7 @@ def test_story_persistence_exclusivity_confirmation_and_fencing():
         assert (await service.history(owner, work))["head"]["confirmed_id"] is None
         await service.confirm(owner, work, first, first)
         await service.confirm(owner, work, first, first)
+        await worker.tick()  # The absent graph runner fails durably without publishing facts.
         second = await service.submit(
             owner, work, "preparation", str(uuid4()), {"idea": "改成雨夜", "base_version_id": first}
         )
@@ -90,6 +91,8 @@ def test_story_persistence_exclusivity_confirmation_and_fencing():
             await service.confirm(owner, work, first, first)
         assert (await service.history(owner, work))["head"]["confirmed_id"] == first
         await service.confirm(owner, work, second["id"], second["id"])
+
+        await worker.tick()
 
         class BrokenProvider:
             async def generate(self, *args, **kwargs):

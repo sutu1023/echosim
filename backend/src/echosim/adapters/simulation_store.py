@@ -18,6 +18,12 @@ class SimulationQueries:
             (uuid4(), task["user_id"], task["work_id"], task["id"], sequence, json.dumps(content)),
         )
 
+    async def simulation_progress(self, task, stage, ending=None):
+        await self.execute(
+            "UPDATE story_tasks SET progress=%s,updated_at=now() WHERE id=%s",
+            (json.dumps({"stage": stage, "ending_reason": ending}), task["id"]),
+        )
+
     async def simulation_stop(self, task):
         row = await self.one("SELECT state FROM story_tasks WHERE id=%s FOR UPDATE", (task["id"],))
         if row["state"] == "queued":

@@ -1,0 +1,1 @@
+{"model": "deepseek-v4.1-flash", "reasoning_effort": "low", "configuration_version": "093690bb-657e-4792-9b3f-211228ee59d5", "prompt_version": "simulation-validation-v5", "actor_prompt": "role-action-v8", "architect_prompt": "architect-v8", "results": [{"case": "goal-3", "passed": true, "accepted": true, "seconds": 23.91}]}

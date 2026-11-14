@@ -1,0 +1,54 @@
+{
+  "narrative-simulation": {
+    "application_added_or_replaced_nonblank_lines": 439,
+    "files": {
+      "backend/src/echosim/domain/narrative.py": 67,
+      "backend/src/echosim/services/narrative_prompts.py": 50,
+      "backend/src/echosim/services/simulation.py": 136,
+      "backend/src/echosim/adapters/model_connection.py": 89,
+      "backend/src/echosim/adapters/simulation_store.py": 5,
+      "backend/src/echosim/api/private_works.py": 6,
+      "backend/src/echosim/logging.py": 1,
+      "backend/src/echosim/services/story_generation.py": 4,
+      "frontend/src/NarrativePlayer.tsx": 44,
+      "frontend/src/Simulation.tsx": 27,
+      "frontend/src/App.tsx": 1,
+      "frontend/src/ModelTest.tsx": 1,
+      "frontend/src/style.css": 8
+    }
+  },
+  "simulation-adoption": {
+    "application_added_or_replaced_nonblank_lines": 487,
+    "files": {
+      "backend/src/echosim/adapters/canon_store.py": 77,
+      "backend/src/echosim/api/adoption.py": 31,
+      "backend/src/echosim/domain/story_facts.py": 82,
+      "backend/src/echosim/services/adoption.py": 87,
+      "backend/src/echosim/services/story_facts.py": 96,
+      "backend/src/echosim/services/story.py": 32,
+      "backend/src/echosim/services/story_worker.py": 17,
+      "backend/src/echosim/worker.py": 13,
+      "backend/src/echosim/adapters/store.py": 2,
+      "backend/src/echosim/api/app.py": 6,
+      "backend/src/echosim/main.py": 2,
+      "backend/src/echosim/adapters/story_store.py": 1,
+      "frontend/src/AdoptionPanel.tsx": 31,
+      "frontend/src/StoryPreparation.tsx": 10
+    }
+  },
+  "story-graph": {
+    "application_added_or_replaced_nonblank_lines": 182,
+    "files": {
+      "backend/src/echosim/adapters/graph_store.py": 25,
+      "backend/src/echosim/api/story_graph.py": 10,
+      "backend/src/echosim/services/story_graph.py": 79,
+      "frontend/src/StoryGraph.tsx": 68
+    }
+  },
+  "method": "Added/replaced nonblank physical application lines, excluding imports/comments; shared story/worker/API wiring counted entirely under adoption, role context filtering under narrative. SQL migration DDL, tests, evaluation scripts and documentation reported separately, not included in application count. Not a claim of quality completion.",
+  "migration_ddl_lines": {
+    "backend/src/echosim/migrations/005_narrative_simulation.sql": 3,
+    "backend/src/echosim/migrations/007_story_graph.sql": 12,
+    "backend/src/echosim/migrations/006_simulation_adoption.sql": 32
+  }
+}

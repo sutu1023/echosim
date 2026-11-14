@@ -17,6 +17,7 @@ _FIELDS = (
     "timeout_seconds",
     "max_tokens",
     "temperature",
+    "reasoning_effort",
     "usage",
     "error_code",
 )

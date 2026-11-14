@@ -1,0 +1,61 @@
+.simulation-shell {
+  --ink: #302921;
+  --accent: #953d30;
+  --line: #d4ccbf;
+  color: var(--ink);
+  max-width: 1540px;
+}
+body:has(.simulation-shell) {
+  background: radial-gradient(ellipse at top left, #faf7ef, transparent 70%), #e8e4dc;
+}
+.simulation-shell header {height: 72px}
+.simulation-shell .mark {background: var(--accent)}
+.simulation-shell a {color: inherit}
+.workspace.simulation-shell main {padding: 16px 0 24px; min-height: 0}
+.workspace.simulation-shell h1 {font-weight: 650; font-family: inherit; font-size: 24px; margin: 0 0 12px}
+.simulation-shell footer {display: none}
+.simulation-layout {display: grid; gap: 16px; overflow-wrap: anywhere}
+.simulation-reference, .simulation-tools {display: flex; flex-direction: column; gap: 16px}
+.simulation-cover, .simulation-layout .story-graph, .simulation-reader, .simulation-tools > section {
+  padding: 20px; border: 1px solid var(--line); border-radius: 8px;
+  background: linear-gradient(145deg, #fffefa, #f7f3eb);
+  box-shadow: inset 0 1px white, 0 2px 3px #34281812, 0 12px 24px -16px #46351b70;
+}
+.simulation-cover {background: linear-gradient(135deg,#683830,#302824); color: #fff7eb; border-top: 4px solid #c66956}
+.simulation-cover h2 {font-size: clamp(24px, 2.4vw, 40px); margin: 16px 0}
+.simulation-cover a {font-size: 14px}
+.simulation-layout .story-graph {margin: 0}
+.simulation-layout h3 {margin-top: 0}
+.simulation-layout .actions {gap: 8px}
+.simulation-layout button {padding: 8px 12px; border-radius: 5px}
+.simulation-layout button:not(.secondary,.quiet) {background: var(--accent)}
+.simulation-layout .secondary {background: #eee7dc; color: var(--ink)}
+.simulation-layout .story-graph svg {background: #efece4; box-shadow: inset 0 2px 8px #44352120}
+.simulation-layout .story-graph ul {padding-left: 20px; max-height: none; overflow: visible}
+.simulation-reader {padding: 0; background: #fffefa; box-shadow: 0 3px 0 -1px #dfd8cb, 0 5px 0 -2px #beb6a6, 0 14px 30px -16px #49382270}
+.reader-heading {padding: 16px 20px; display: flex; flex-wrap: wrap; align-items: center; gap: 8px; border-bottom: 1px solid var(--line)}
+.reader-heading h2 {margin: 0 auto 0 0}
+.reader-heading select {max-width: 100%; font: inherit}
+.simulation-reader > p, .simulation-reader .playback-controls:not(:empty) {margin: 12px 20px}
+.simulation-reader .playback-controls:empty {display: none}
+.simulation-reader .story-flow {border: 0; background: transparent; border-radius: 0; scrollbar-gutter: stable; overscroll-behavior: contain}
+.simulation-reader .story-segment {font-family: "Songti SC", serif; font-size: 18px}
+.simulation-reader .narration {color: var(--ink)}
+.simulation-reader .dialogue {background: #f6f1e9; border-color: #aa5947; border-radius: 0}
+.simulation-reader .dialogue strong {color: var(--accent); font-family: sans-serif}
+.simulation-tools > .panel {margin: 0}
+.simulation-cast {list-style: none; margin: 0; padding: 0}
+.simulation-cast li {padding: 8px 0; border-top: 1px solid var(--line)}
+@media (min-width: 960px) {
+  .simulation-shell {height: 100dvh; display: flex; flex-direction: column}
+  .simulation-shell header {flex: none}
+  .simulation-shell main {flex: 1; display: flex; flex-direction: column}
+  .simulation-layout {flex: 1; min-height: 0; grid-template-columns: minmax(0,1fr) minmax(0,2fr) minmax(0,1fr); grid-template-rows: minmax(0,1fr)}
+  .simulation-reference, .simulation-tools {overflow: auto; overscroll-behavior: contain; padding: 1px 2px 8px}
+  .simulation-reader, .simulation-reader .narrative-player {display: flex; flex-direction: column; min-height: 0}
+  .simulation-reader .narrative-player, .simulation-reader .story-flow {flex: 1; min-height: 0}
+  .simulation-reader .story-flow {max-height: none}
+}
+@media (max-width: 959px) {
+  .simulation-reader {grid-row: 1}
+}

@@ -246,3 +246,123 @@ def test_generation_rejects_token_truncation_even_when_json_is_parseable(monkeyp
     with pytest.raises(ModelFailure) as error:
         asyncio.run(OpenCodeProvider().generate("synthetic", "model", []))
     assert error.value.code == "MODEL_INVALID_RESPONSE"
+
+
+def test_generation_uses_task_session_and_explicit_low_reasoning(monkeypatch):
+    from uuid import uuid4
+
+    import httpx
+
+    import echosim.adapters.model_connection as module
+
+    original = httpx.AsyncClient
+    seen = []
+
+    def respond(request):
+        import json
+
+        seen.append((request.headers["x-opencode-session"], json.loads(request.content)))
+        return httpx.Response(
+            200, json={"choices": [{"finish_reason": "stop", "message": {"content": "ok"}}]}
+        )
+
+    monkeypatch.setattr(
+        module.httpx,
+        "AsyncClient",
+        lambda **kwargs: original(transport=httpx.MockTransport(respond)),
+    )
+    session = str(uuid4())
+
+    async def run():
+        provider = module.OpenCodeProvider()
+        for _ in range(2):
+            await provider.generate("synthetic", module.MODEL, [], session_id=session)
+        await provider.generate("synthetic", "custom-model", [], session_id=str(uuid4()))
+
+    asyncio.run(run())
+    assert seen[0][0] == seen[1][0] == session
+    assert seen[2][0] != session
+    assert seen[0][1]["reasoning_effort"] == "low"
+    assert "reasoning_effort" not in seen[2][1]
+
+
+def test_public_backend_falls_back_only_within_validated_addresses(monkeypatch):
+    import httpcore
+    from httpcore._backends.auto import AutoBackend
+
+    from echosim.adapters.model_connection import PublicBackend
+
+    async def run():
+        attempts = []
+
+        async def resolve(*args, **kwargs):
+            return [(2, 1, 6, "", ("8.8.8.8", 443)), (2, 1, 6, "", ("1.1.1.1", 443))]
+
+        async def connect(self, host, port, timeout, *args):
+            attempts.append(host)
+            assert timeout <= 5
+            if host == "8.8.8.8":
+                raise httpcore.ConnectError("synthetic unreachable address")
+            return "connected"
+
+        monkeypatch.setattr(asyncio.get_running_loop(), "getaddrinfo", resolve)
+        monkeypatch.setattr(AutoBackend, "connect_tcp", connect)
+        assert await PublicBackend().connect_tcp("opencode.ai", 443, 60) == "connected"
+        assert attempts == ["8.8.8.8", "1.1.1.1"]
+
+        async def poisoned(*args, **kwargs):
+            return [(2, 1, 6, "", ("8.8.8.8", 443)), (2, 1, 6, "", ("127.0.0.1", 443))]
+
+        monkeypatch.setattr(asyncio.get_running_loop(), "getaddrinfo", poisoned)
+        with pytest.raises(ModelFailure):
+            await PublicBackend().connect_tcp("opencode.ai", 443)
+        assert len(attempts) == 2
+
+    asyncio.run(run())
+
+
+def test_pool_reuses_client_without_forwarding_provider_cookies(monkeypatch):
+    import httpx
+
+    from echosim.adapters.model_connection import OpenCodeProvider
+
+    observed = []
+
+    def reply(request):
+        observed.append((request.headers["authorization"], request.headers.get("cookie")))
+        return httpx.Response(
+            200,
+            headers={"set-cookie": "upstream=private; Path=/"},
+            json={"choices": [{"message": {"content": "ok"}}]},
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(reply))
+    monkeypatch.setattr(OpenCodeProvider, "_new_client", staticmethod(lambda: client))
+
+    async def run():
+        async with OpenCodeProvider() as provider:
+            for key in ("first", "second"):
+                await provider.generate(key, "model", [])
+        assert client.is_closed
+
+    asyncio.run(run())
+    assert observed == [("Bearer first", None), ("Bearer second", None)]
+
+
+def test_stream_requires_complete_response_and_excludes_reasoning():
+    import json
+
+    from echosim.adapters.model_connection import complete_stream
+
+    frames = [
+        {"choices": [{"delta": {"reasoning_content": "private reasoning"}}]},
+        {"choices": [{"delta": {"content": "故事"}}]},
+        {"choices": [{"delta": {"content": "结束"}, "finish_reason": "stop"}]},
+        {"choices": [], "usage": {"total_tokens": 42}},
+    ]
+    body = b"".join(("data: " + json.dumps(frame) + "\n\n").encode() for frame in frames)
+    with pytest.raises(ModelFailure):
+        complete_stream(body)
+    result = complete_stream(body + b"data: [DONE]\n\n")
+    assert result["choices"] == [{"finish_reason": "stop", "message": {"content": "故事结束"}}]
+    assert result["usage"]["total_tokens"] == 42

@@ -1,16 +1,17 @@
+import { StoryGraph } from './StoryGraph';
 import { useEffect, useRef, useState } from 'react';
 import { request } from './Workspace';
 export type Story = { synopsis: string; world_rules: string; outline: string; characters: { id: string; name: string; identity: string; goal: string; background: string; public_information: string; private_knowledge: string }[] };
 type Version = { id: string; content: Story; created_at: string };
-export type Task = { id: string; state: string; kind: string; error_code: string | null };
-export const taskErrors: Record<string, string> = { MODEL_TIMEOUT: '模型响应超时，请重试', MODEL_INVALID_RESPONSE: '模型输出不完整，请重新生成', MODEL_AUTH_FAILED: '模型鉴权失败，请检查模型设置', MODEL_RATE_LIMITED: '模型额度不足或请求过于频繁', WORKER_LOST: '后台进程已中断，请重新发起任务', TASK_TIMEOUT: '任务超过时限', TASK_FAILED: '任务执行失败，请重试', STORY_CONFLICT: '生成内容与设定冲突，请重新推演' };
+export type Task = { id: string; state: string; kind: string; error_code: string | null; decision?: string; source_simulation_id?: string };
+export const taskErrors: Record<string, string> = { CHAPTER_CONFLICT: '正文与已确认的剧情冲突，请调整后重试', CHAPTER_STALE: '草稿版本已变化，请刷新后核对', MODEL_UPSTREAM_ERROR: '模型服务暂时不可用，请稍后重试', MODEL_TIMEOUT: '模型响应超时，请重试', MODEL_INVALID_RESPONSE: '模型输出不完整，请重新生成', MODEL_AUTH_FAILED: '模型鉴权失败，请检查模型设置', MODEL_RATE_LIMITED: '模型额度不足或请求过于频繁', WORKER_LOST: '后台进程已中断，请重新发起任务', TASK_TIMEOUT: '任务超过时限', TASK_FAILED: '任务执行失败，请重试', STORY_CONFLICT: '内容与事实冲突或来源不可靠，请重试或放弃', STORY_CAPACITY: '故事超过当前验证容量，未更新正式剧情' };
 export const states: Record<string, string> = { queued: '排队中', running: '生成中', stopping: '正在停止', stopped: '已停止', succeeded: '已完成', failed: '失败' };
 export function StoryContent({ story }: { story: Story }) {
-  return <><h3>概要</h3><p>{story.synopsis}</p><h3>世界规则</h3><p>{story.world_rules}</p><h3>简短大纲</h3><p>{story.outline}</p><h3>角色</h3>{story.characters.map(c => <article className="panel" key={c.id}><h3>{c.name} · {c.identity}</h3><p>目标：{c.goal}</p><p>背景：{c.background}</p><p>公开信息：{c.public_information}</p><p>角色私有知识：{c.private_knowledge}</p></article>)}</>;
+  return <div className="setting-columns"><section><h3>概要</h3><p>{story.synopsis}</p><h3>世界规则</h3><p>{story.world_rules}</p><h3>简短大纲</h3><p>{story.outline}</p></section><section><h3>角色</h3>{story.characters.map(c => <article className="panel" key={c.id}><h3>{c.name} · {c.identity}</h3><p>目标：{c.goal}</p><p>背景：{c.background}</p><p>公开信息：{c.public_information}</p><p>角色私有知识：{c.private_knowledge}</p></article>)}</section></div>;
 }
 export function StoryPreparation({ csrf, workId }: { csrf: string; workId: string }) {
   const [versions, setVersions] = useState<Version[]>([]);
-  const [head, setHead] = useState<{ candidate_id: string; confirmed_id: string } | null>(null);
+  const [head, setHead] = useState<{ candidate_id: string; confirmed_id: string; canon_revision?: number; pending_simulation_id?: string } | null>(null);
   const [tasks, setTasks] = useState<Task[]>([]);
   const [idea, setIdea] = useState('');
   const [error, setError] = useState('');
@@ -20,7 +21,9 @@ export function StoryPreparation({ csrf, workId }: { csrf: string; workId: strin
   const pending = useRef(false);
   const retry = useRef<{ input: string; key: string } | null>(null);
   const prefix = '/works/' + workId;
-  const active = tasks.some(t => ['queued', 'running', 'stopping'].includes(t.state));
+  const frozen = !!head?.canon_revision;
+  const unresolved = !!head?.pending_simulation_id;
+  const active = frozen || unresolved || tasks.some(t => ['queued', 'running', 'stopping'].includes(t.state));
   async function load() {
     try { const data = await request(prefix + '/preparations'); setVersions(data.versions); setHead(data.head); setTasks(data.tasks); setError(''); }
     catch (e) { setError(e instanceof Error ? e.message : '加载失败'); }
@@ -40,14 +43,17 @@ export function StoryPreparation({ csrf, workId }: { csrf: string; workId: strin
     } catch (e) { setError(e instanceof Error ? e.message : '请求失败'); }
     finally { setBusy(false); pending.current = false; }
   }
-  return <section><h2>故事准备</h2><p className="muted">输入一句创意，生成概要、规则、大纲与三名角色；确认后开始推演。</p>
-    <p role="status" aria-live="polite">{loading ? '正在加载…' : active ? '后台任务正在执行，离开页面不会中断' : head?.confirmed_id ? '已有确认设定' : '尚未确认设定'}</p>
+  return <section className="preparation-desk"><div className="desk-grid"><section className="panel"><h2>故事创意</h2><p className="muted">输入一句创意，生成概要、规则、大纲与三名角色；确认后开始推演。</p>
+    <p role="status" aria-live="polite">{loading ? '正在加载…' : frozen ? '正式剧情已采纳，设定已锁定' : unresolved ? '请先处理待采纳推演' : active ? '后台任务正在执行，离开页面不会中断' : head?.confirmed_id ? '已有确认设定' : '尚未确认设定'}</p>
+    {frozen && <p className="notice">已有正式剧情，故事设定已锁定。请从推演现场继续。</p>}
+    {unresolved && <p className="notice">请先在推演现场采纳或放弃待处理结果。</p>}
     {error && <p role="alert">{error}<button onClick={() => void load()}>重新加载</button></p>}
     <form onSubmit={e => { e.preventDefault(); void run(); }}><label htmlFor="story-idea">{selected ? '修改意见' : '一句故事创意'}</label><textarea id="story-idea" value={idea} disabled={busy || active} onBlur={() => setTouched(true)} onChange={e => setIdea(e.target.value)} />
       <p className="field-error">{touched && invalid ? '请输入 1–2000 个字符' : ''}</p><button disabled={busy || active || loading}>{selected ? '生成新的完整版本' : '生成故事与角色'}</button></form>
-    {selected && <section className="panel"><h2>{selected.id === head?.confirmed_id ? '已确认设定' : '候选设定 · 尚未确认'}</h2><p>以下内容为模型创作新增。</p><StoryContent story={selected.content} /><button disabled={busy || active || selected.id === head?.confirmed_id} onClick={() => void run(true)}>确认本版设定与三名角色</button></section>}
     {head?.confirmed_id && <a className="button-link" href={prefix + '/simulation'}>开始角色推演 →</a>}
-    <h3>生成记录</h3>{tasks.filter(t => t.kind === 'preparation').map(t => <p key={t.id}>{states[t.state]} {t.error_code ? '· ' + (taskErrors[t.error_code] || '任务未完成，请重试') : ''}</p>)}
+    </section><StoryGraph workId={workId} csrf={csrf} /></div>
+    {selected && <section className="panel"><h2>{selected.id === head?.confirmed_id ? '已确认设定' : '候选设定 · 尚未确认'}</h2><p>以下内容为模型创作新增。</p><StoryContent story={selected.content} /><button disabled={busy || active || selected.id === head?.confirmed_id} onClick={() => void run(true)}>确认本版设定与三名角色</button></section>}
+    <section className="panel"><h3>生成记录</h3>{tasks.filter(t => t.kind === 'preparation').map(t => <p key={t.id}>{states[t.state]} {t.error_code ? '· ' + (taskErrors[t.error_code] || '任务未完成，请重试') : ''}</p>)}
     {versions.filter(v => v.id !== selected?.id).map(v => <details key={v.id}><summary>历史版本 · {new Date(v.created_at).toLocaleString('zh-CN')}</summary><StoryContent story={v.content} /></details>)}
-  </section>;
+  </section></section>;
 }

@@ -1,0 +1,5 @@
+source keyboard, focus return, hidden metadata, baseline revision 1
+real playback, stop, discard: revision stayed at 1
+new simulation after discard accepted
+PASS Chromium with intercepted synthetic responses: pending during playback, lost response same key, stale revision conflict, inert HTML, old graph on fetch failure, retry and changed-node highlight, plain-text evidence
+PASS real browser B: A graph and missing work both 404 NOT_FOUND without content

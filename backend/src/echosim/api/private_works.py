@@ -9,6 +9,14 @@ from echosim.domain.accounts import Fault
 
 COOKIE = "echosim_session"
 MESSAGES = {
+    "CHAPTER_STALE": "草稿版本已变化，请重新加载并核对",
+    "CHAPTER_REVIEW_REQUIRED": "请先核对章节修改稿",
+    "GRAPH_NOT_READY": "初始图谱尚未就绪，请等待构建或重试",
+    "RESULT_PENDING": "请先采纳或放弃本次推演",
+    "RESULT_INELIGIBLE": "本次结果不可采纳或已处理",
+    "CANON_CONFLICT": "故事主线已变化，请刷新后操作",
+    "PREPARATION_FROZEN": "已有正式剧情，故事设定已锁定",
+    "STORY_CAPACITY": "故事内容超过当前验证容量，未继续调用模型",
     "MODEL_CONFIGURATION_REQUIRED": "请先在模型设置中保存有效配置",
     "MODEL_CREDENTIAL_UNAVAILABLE": "模型凭据不可用，请重新保存配置",
     "CONFIGURATION_CONFLICT": "配置已更新，请重新加载后操作",

@@ -22,38 +22,46 @@ The system SHALL accept a nonblank story idea of at most 2000 Unicode code point
 - **THEN** submission is rejected with an actionable configuration-required error and no task is accepted
 
 ### Requirement: P2 Revision and explicit confirmation
-The system SHALL preserve immutable candidate versions and allow natural-language whole-version revision. Only explicit confirmation of the current candidate SHALL change the current confirmed version. Creating or revising a candidate SHALL NOT implicitly confirm it or alter an earlier confirmation.
+The system SHALL preserve immutable candidate versions and allow natural-language whole-version revision before first adoption and while no unresolved simulation or story-mutating task exists. Only explicit confirmation of the current candidate SHALL change the confirmed version. First adoption SHALL freeze preparation generation, revision and reconfirmation; existing versions remain readable.
 
 #### Scenario: Failed rewrite
-- **WHEN** rewriting a candidate fails
-- **THEN** the prior candidate and confirmed version remain available and unchanged
+- **WHEN** an otherwise permitted candidate rewrite fails
+- **THEN** the prior candidate and confirmed version remain unchanged
 
 #### Scenario: Confirm exact version
-- **WHEN** the user confirms the current candidate by its version identifier
-- **THEN** the complete setting and all three characters become confirmed atomically; repeating confirmation of that version has no additional effect
+- **WHEN** before first adoption and without a pending result or active task the owner confirms the current candidate
+- **THEN** settings and all three characters become confirmed atomically and repeating that confirmation has no additional effect
 
 #### Scenario: Stale confirmation
-- **WHEN** the candidate has changed since the page loaded
-- **THEN** confirming the stale candidate returns 409 and requests a refresh instead of confirming unseen content
+- **WHEN** the candidate changed since the page loaded
+- **THEN** stale confirmation returns 409 and requests a refresh
 
 #### Scenario: Regenerate after confirmation
-- **WHEN** a confirmed work receives a successful new generation and subsequent confirmation
-- **THEN** new simulations use the new confirmation while existing simulations retain their original version and history
+- **WHEN** before first adoption, with no unresolved result or active task, a confirmed work receives a successful new generation and confirmation
+- **THEN** new simulations use the new settings and existing histories retain their original immutable versions
+
+#### Scenario: Frozen preparation
+- **WHEN** an owner requests generation, revision or confirmation after the first adoption
+- **THEN** the request returns 409 before model invocation, the UI explains that the main story has started and existing settings remain readable
+
+#### Scenario: Pending result prevents revision
+- **WHEN** an eligible simulation result still awaits adoption or discard
+- **THEN** preparation writes return 409 and the UI directs the owner to resolve that result first
 
 ### Requirement: P3 Durable exclusive tasks
-Submission SHALL atomically record task, immutable input and model version. At most one nonterminal story-mutating task SHALL exist per work across preparation and simulation. Same-user/work/operation idempotent replay SHALL return the original task; changed input with the same key SHALL return 409.
+Submission SHALL atomically record task, immutable input and model version. At most one nonterminal story-mutating task SHALL exist per work across preparation, simulation and adoption checking. Same-user/work/operation keyed replay SHALL return the original task; changed input with the same key SHALL return 409. Unresolved eligible simulation results SHALL additionally block new preparation and simulation tasks.
 
 #### Scenario: Concurrent submissions
-- **WHEN** requests for a work arrive concurrently
-- **THEN** identical keyed submissions resolve to one task and competing operations receive 409 without extra effects
+- **WHEN** preparation, simulation or adoption requests arrive concurrently for a work
+- **THEN** identical keyed requests return one task and competing operations receive 409 without extra effects
 
 #### Scenario: Lost response and page departure
-- **WHEN** the response is lost or the page closes
+- **WHEN** a response is lost or the page closes
 - **THEN** replay finds the same task and execution continues independently of the browser
 
 #### Scenario: Worker restart
-- **WHEN** a worker dies before claiming a queued task or while running a task
-- **THEN** queued work remains claimable; an abandoned running task becomes failed within the documented recovery bound and cannot later publish a result
+- **WHEN** a worker dies before claiming or while executing a task
+- **THEN** queued work remains claimable, abandoned running work fails within the documented recovery bound and stale workers cannot publish
 
 ### Requirement: P4 Protected observable history
 Every preparation version and task read/write SHALL enforce work ownership. Unauthenticated access SHALL return 401; other-user and absent resources SHALL return the same 404. Preparation UI SHALL show loading, empty, queued/running, complete and safe failure states and reload persisted history.

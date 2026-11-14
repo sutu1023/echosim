@@ -7,3 +7,12 @@ input:focus-visible { outline: 3px solid #78604b; outline-offset: 3px; }
 
 textarea { width: 100%; min-height: 120px; padding: 12px; font: inherit; border-radius: 8px; border: 1px solid #b6c1ba; box-sizing: border-box; }
 details { margin: 16px 0; }
+
+.story-flow{max-height:65vh;overflow:auto;scroll-behavior:auto;padding:16px;background:#fffefb;border:1px solid #dddfd4;border-radius:16px}.story-flow article{max-width:720px;margin:0 auto 24px}.story-segment{padding:8px 16px;margin:8px 0;overflow-wrap:anywhere}.story-segment p{margin:8px 0;white-space:pre-wrap;line-height:1.9}.story-segment.dialogue{border-left:4px solid #527461;background:#edf2e9;border-radius:0 12px 12px 0}.story-segment.narration{color:#58635b}.story-segment strong{color:#284e40;font-size:16px}.playback-controls{margin:16px 0}.sr-only{position:absolute;width:1px;height:1px;padding:0;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
+.story-graph { margin-top: 2rem; padding: 1rem; border: 1px solid #82928d; border-radius: 12px; }
+.story-graph svg { width: 100%; max-height: 440px; touch-action: none; background: #f6f5f0; }
+.story-graph text { font-size: 20px; fill: #253b39; paint-order: stroke; stroke: #f6f5f0; stroke-width: 3px; }
+.story-graph text.graph-edge-label { font-size: 14px; }
+.story-graph ul { max-height: 20rem; overflow: auto; }
+.workspace input[type=checkbox] { width: auto; display: inline; }
+
