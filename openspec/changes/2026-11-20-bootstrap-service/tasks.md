@@ -4,8 +4,8 @@
 
 - [x] 1.1 创建 `app/`、`web/`、`scripts/`、`docs/acceptance/`、`.github/workflows/`、`tests/` 目录及占位入口文件，运行 `find` 确认目录结构与设计一致
 - [x] 1.2 编写 `web/package.json`、`vite.config.ts`、`tsconfig.json`、`.nvmrc`（Node 22），安装 Vue 3 + TypeScript + Vite 并提交 `package-lock.json`，运行 `npm ci && npm run build` 确认生成 `web/dist/index.html`
-- [ ] 1.3 编写 `app/requirements.txt` 与 `app/requirements-dev.txt`，使用精确版本锁定 FastAPI、Uvicorn、SQLAlchemy、asyncpg、pydantic-settings 与测试用 httpx，在临时 venv 中 `pip install -r app/requirements-dev.txt` 并成功导入各包
-- [ ] 1.4 添加 `web/package.json` 的 `typecheck` 脚本（`vue-tsc --noEmit`）并运行通过，确认 TypeScript 严格模式无错误
+- [x] 1.3 编写 `app/requirements.txt` 与 `app/requirements-dev.txt`，使用精确版本锁定 FastAPI、Uvicorn、SQLAlchemy、asyncpg、pydantic-settings 与测试用 httpx，在临时 venv 中 `pip install -r app/requirements-dev.txt` 并成功导入各包
+- [x] 1.4 添加 `web/package.json` 的 `typecheck` 脚本（`vue-tsc --noEmit`）并运行通过，确认 TypeScript 严格模式无错误
 
 ## 2. 后端配置与健康检查
 
