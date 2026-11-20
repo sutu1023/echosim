@@ -8,9 +8,15 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import AsyncIterator
 
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
+from sqlalchemy.ext.asyncio import (
+    AsyncEngine,
+    AsyncSession,
+    async_sessionmaker,
+    create_async_engine,
+)
 
 from .config import settings
 
@@ -29,6 +35,15 @@ engine: AsyncEngine = create_async_engine(
         "command_timeout": COMMAND_TIMEOUT_SECONDS,
     },
 )
+
+
+SessionLocal = async_sessionmaker(engine, expire_on_commit=False)
+
+
+async def get_db() -> AsyncIterator[AsyncSession]:
+    """FastAPI 依赖：每个请求一个 AsyncSession，请求结束自动关闭。"""
+    async with SessionLocal() as session:
+        yield session
 
 
 async def select_one() -> None:

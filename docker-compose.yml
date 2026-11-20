@@ -28,6 +28,8 @@ services:
     environment:
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-echosim}:${POSTGRES_PASSWORD:-echosim_dev_password}@db:5432/${POSTGRES_DB:-echosim}
       HEALTH_DB_TIMEOUT_SECONDS: ${HEALTH_DB_TIMEOUT_SECONDS:-4}
+      SESSION_TTL_SECONDS: ${SESSION_TTL_SECONDS:-604800}
+      SESSION_COOKIE_SECURE: ${SESSION_COOKIE_SECURE:-false}
       WEB_DIST_DIR: /app/web/dist
     ports:
       - "127.0.0.1:${ECHOSIM_PORT:-8080}:8080"

@@ -1,0 +1,163 @@
+"""迁移器解析、顺序与事务语义的单元测试。"""
+
+from __future__ import annotations
+
+import tempfile
+import unittest
+from pathlib import Path
+
+from app.migrate import (
+    MigrationRunner,
+    discover_migrations,
+    pending_migrations,
+    split_sql_statements,
+)
+
+
+class FakeResult:
+    def __init__(self, rows: list[tuple[str]]) -> None:
+        self._rows = rows
+
+    def fetchall(self) -> list[tuple[str]]:
+        return self._rows
+
+
+class FakeTransaction:
+    async def __aenter__(self) -> "FakeTransaction":
+        return self
+
+    async def __aexit__(self, *_: object) -> None:
+        return None
+
+
+class FakeConnection:
+    """只实现迁移器用到的最小接口，用于断言顺序与失败路径。"""
+
+    def __init__(
+        self, applied: list[str] | None = None, fail_contains: str | None = None
+    ) -> None:
+        self.applied = set(applied or [])
+        self.fail_contains = fail_contains
+        self.executed: list[tuple[str, str]] = []
+
+    async def execute(self, clause: object, params: dict[str, str] | None = None):
+        sql = str(clause)
+        if "SELECT version FROM schema_migrations" in sql:
+            return FakeResult([(version,) for version in self.applied])
+        if "INSERT INTO schema_migrations" in sql:
+            version = (params or {})["version"]
+            self.applied.add(version)
+            self.executed.append(("migration", version))
+            return FakeResult([])
+        if self.fail_contains and self.fail_contains in sql:
+            raise RuntimeError("模拟 SQL 失败")
+        self.executed.append(("sql", sql))
+        return FakeResult([])
+
+    async def commit(self) -> None:
+        return None
+
+    def begin(self) -> FakeTransaction:
+        return FakeTransaction()
+
+
+class SqlSplitTests(unittest.TestCase):
+    def test_splits_statements_and_ignores_comments(self) -> None:
+        sql = """
+        -- 注释里的分号; 不应拆分
+        CREATE TABLE a (id int);
+        INSERT INTO a VALUES (1);
+        """
+
+        statements = split_sql_statements(sql)
+
+        self.assertEqual(len(statements), 2)
+        self.assertIn("CREATE TABLE a", statements[0])
+        self.assertNotIn("注释", statements[0])
+
+    def test_keeps_semicolons_inside_quotes_and_dollar_blocks(self) -> None:
+        sql = "INSERT INTO a VALUES ('x;y'); SELECT $$a;b$$; SELECT 'it''s;ok';"
+
+        statements = split_sql_statements(sql)
+
+        self.assertEqual(len(statements), 3)
+        self.assertIn("'x;y'", statements[0])
+        self.assertIn("$$a;b$$", statements[1])
+        self.assertIn("'it''s;ok'", statements[2])
+
+
+class MigrationOrderTests(unittest.TestCase):
+    def test_discovers_sql_files_in_name_order(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            (directory / "0002_b.sql").write_text("SELECT 2;", encoding="utf-8")
+            (directory / "0001_a.sql").write_text("SELECT 1;", encoding="utf-8")
+            (directory / "README.md").write_text("ignore", encoding="utf-8")
+
+            migrations = discover_migrations(directory)
+
+        self.assertEqual([m.version for m in migrations], ["0001_a", "0002_b"])
+
+    def test_pending_skips_applied_versions(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            (directory / "0001_a.sql").write_text("SELECT 1;", encoding="utf-8")
+            (directory / "0002_b.sql").write_text("SELECT 2;", encoding="utf-8")
+            migrations = discover_migrations(directory)
+
+        pending = pending_migrations(migrations, {"0001_a"})
+
+        self.assertEqual([m.version for m in pending], ["0002_b"])
+
+
+class MigrationRunnerTests(unittest.IsolatedAsyncioTestCase):
+    async def test_applies_in_order_and_records_versions(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            (directory / "0001_a.sql").write_text(
+                "CREATE TABLE a (id int);", encoding="utf-8"
+            )
+            (directory / "0002_b.sql").write_text(
+                "CREATE TABLE b (id int);", encoding="utf-8"
+            )
+            connection = FakeConnection()
+            applied = await MigrationRunner(connection).run(  # type: ignore[arg-type]
+                discover_migrations(directory)
+            )
+
+        self.assertEqual(applied, ["0001_a", "0002_b"])
+        self.assertEqual(
+            [entry for entry in connection.executed if entry[0] == "migration"],
+            [("migration", "0001_a"), ("migration", "0002_b")],
+        )
+
+    async def test_rerun_skips_already_applied(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            (directory / "0001_a.sql").write_text("SELECT 1;", encoding="utf-8")
+            connection = FakeConnection(applied=["0001_a"])
+
+            applied = await MigrationRunner(connection).run(  # type: ignore[arg-type]
+                discover_migrations(directory)
+            )
+
+        self.assertEqual(applied, [])
+
+    async def test_failed_migration_is_not_recorded(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            (directory / "0001_a.sql").write_text("SELECT 1;", encoding="utf-8")
+            (directory / "0002_b.sql").write_text("EXPLODE;", encoding="utf-8")
+            connection = FakeConnection(fail_contains="EXPLODE")
+
+            with self.assertRaises(RuntimeError):
+                await MigrationRunner(connection).run(  # type: ignore[arg-type]
+                    discover_migrations(directory)
+                )
+
+        self.assertIn("0001_a", connection.applied)
+        self.assertNotIn("0002_b", connection.applied)
+
+
+if __name__ == "__main__":
+    unittest.main()
