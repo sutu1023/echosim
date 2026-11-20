@@ -1,0 +1,6 @@
+# EchoSim 后端运行时依赖（精确版本锁定，Python 3.11）
+fastapi==0.165.0
+uvicorn[standard]==0.54.0
+sqlalchemy[asyncio]==2.1.9
+asyncpg==0.32.0
+pydantic-settings==2.16.3

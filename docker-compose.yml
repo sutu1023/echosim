@@ -1,0 +1,47 @@
+name: echosim
+
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-echosim}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-echosim_dev_password}
+      POSTGRES_DB: ${POSTGRES_DB:-echosim}
+    volumes:
+      - echosim-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+    restart: unless-stopped
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: echosim-skeleton:dev
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-echosim}:${POSTGRES_PASSWORD:-echosim_dev_password}@db:5432/${POSTGRES_DB:-echosim}
+      HEALTH_DB_TIMEOUT_SECONDS: ${HEALTH_DB_TIMEOUT_SECONDS:-4}
+      WEB_DIST_DIR: /app/web/dist
+    ports:
+      - "127.0.0.1:${ECHOSIM_PORT:-8080}:8080"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/livez', timeout=2)"
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+    restart: unless-stopped
+
+volumes:
+  echosim-pgdata:
