@@ -46,7 +46,7 @@
 - [x] 6.2 在 `verify.py` 中实现隔离路径场景并写入 `scenarios[]`：A 登录 → 创建唯一命名项目 → 列表包含 → 详情 200 → 停库前保存 Cookie → A 退出 → 旧 Cookie 私有接口 401 → A 重新登录后详情 200 → B 列表与历史不含该项目 → B 访问 A 项目 ID 与随机 UUID 状态码/响应体一致；同时实现“显式注入 Cookie 的全新客户端”服务端会话测试，并在场景名/报告中标注它不是浏览器重开测试
 - [x] 6.3 在 `verify.py` 的停库窗口追加鉴权边界断言：无 Cookie 的项目列表返回 401 且耗时不因数据库不可用而增加；携带 A 的 Cookie 返回 503、5 秒内返回、响应不清除 Cookie；恢复后同一 Cookie 返回 200。保留 Change 01 的 503/恢复/进程身份不重启与 SHA 断言
 - [x] 6.4 全量单元测试：`.venv/bin/python -m unittest discover -s tests -v` 全部通过，且需数据库的用例在未设置 `TEST_DATABASE_URL` 时显式 skip 并打印原因
-- [ ] 6.5 提交后在干净工作树上连续执行两次 `make verify`，两次退出码均为 0、`runtime/verify/last-run.json` 的 `tested_sha` 等于 `HEAD`、`dirty` 为 `false`；第二次不受第一次账号与项目残留影响，两次报告都包含隔离路径、停库鉴权边界与 Change 01 全部场景
+- [x] 6.5 提交后在干净工作树上连续执行两次 `make verify`，两次退出码均为 0、`runtime/verify/last-run.json` 的 `tested_sha` 等于 `HEAD`、`dirty` 为 `false`；第二次不受第一次账号与项目残留影响，两次报告都包含隔离路径、停库鉴权边界与 Change 01 全部场景
 
 ## 7. 文档、规格同步与人工走查准备
 
