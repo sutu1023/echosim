@@ -22,4 +22,4 @@
 ## 注意
 
 - 被测 SHA 必须是干净工作树上的提交；覆盖未提交改动或 `dirty: true` 的结果不能作为验收证据。
-- 没有可用的 CI 运行时，在记录中明确写“CI 待完成”，并同步维护 [`docs/PENDING-CI-ACCEPTANCE.md`](../PENDING-CI-ACCEPTANCE.md)。
+- 没有可用的 CI 运行时，在记录中明确写“CI 待完成”，不要把本地结果当作 CI 证据。

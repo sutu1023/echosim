@@ -101,7 +101,7 @@ PY
   - `tested_sha` 等于本次人工验收的被测 SHA；
   - `result` 为 `passed`；
   - `dirty` 为 `false`。
-- CI 不可用时（例如未配置远程），在记录中写“CI 待完成”，并同步维护 `docs/PENDING-CI-ACCEPTANCE.md`，不要把本地结果说成 CI 证据。
+- CI 不可用时（例如未配置远程），在记录中写“CI 待完成”，不要把本地结果说成 CI 证据；配置远程后补齐 CI 运行链接与产物 SHA。
 
 ## 7. 生成记录
 
