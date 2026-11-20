@@ -32,7 +32,7 @@
    python3 -c "import json; d=json.load(open('verify-report-<sha>/last-run.json')); print(d['tested_sha'], d['result'], d['dirty'])"
    ```
 
-4. 把 CI 运行链接与产物 SHA 补进 `docs/acceptance/` 对应记录（若尚无记录，按模板新建）。
+4. 把 CI 运行链接与产物 SHA 补进 `docs/acceptance/2026-11-20-02a46cb.md` 的“CI”与“证据”字段，并据此更新该记录的结论。
 
 ## 影响范围
 

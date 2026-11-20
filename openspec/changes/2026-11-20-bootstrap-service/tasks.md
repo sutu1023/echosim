@@ -59,7 +59,7 @@
 
 ## 9. 端到端集成验证
 
-- [ ] 9.1 提交全部改动后，在 `/tmp` 做一次干净克隆，按 README 从零执行 `make up` 与两次 `make verify`，确认浏览器/`curl` 可见 EchoSim、两次均通过、报告 SHA 等于克隆的 HEAD
+- [x] 9.1 提交全部改动后，在 `/tmp` 做一次干净克隆，按 README 从零执行 `make up` 与两次 `make verify`，确认浏览器/`curl` 可见 EchoSim、两次均通过、报告 SHA 等于克隆的 HEAD
 - [ ] 9.2 确认干净克隆结果与成功 CI 产物 SHA 相同，并在人工验收记录的“证据”中同时列出克隆 SHA、CI 运行链接与报告文件位置
-- [ ] 9.3 执行 `make down` 清理本地环境，确认 `127.0.0.1:8080` 已释放且无遗留项目容器
-- [ ] 9.4 运行 `openspec validate 2026-11-20-bootstrap-service --strict` 通过，并执行 `openspec status --change 2026-11-20-bootstrap-service` 确认所有必需产物为 `done`
+- [x] 9.3 执行 `make down` 清理本地环境，确认 `127.0.0.1:8080` 已释放且无遗留项目容器
+- [x] 9.4 运行 `openspec validate 2026-11-20-bootstrap-service --strict` 通过，并执行 `openspec status --change 2026-11-20-bootstrap-service` 确认所有必需产物为 `done`
