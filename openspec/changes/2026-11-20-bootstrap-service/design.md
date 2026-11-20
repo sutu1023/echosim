@@ -39,7 +39,7 @@
 - `GET /livez`：不访问数据库，进程可响应即 200，容器 `HEALTHCHECK` 使用它。
 - `GET /health`：每次请求执行真实 `SELECT 1`，数据库可用 200、不可用 503，供 Compose 等待后的显式验收与将来的编排就绪探针使用。
 
-原因：若容器健康检查直接用 `/health`，验收中“停库”会让应用容器进入 unhealthy，产生误导性状态，也让后续 `compose up --wait` 行为依赖数据库；用 `/livez` 保证“数据库故障 ≠ 进程死亡”，同时 `/health` 不被掩盖。`make verify` 仍然显式轮询 `/health`，`make up` 的成功不替代就绪验证。
+原因：若容器健康检查直接用 `/health`，验收中“停库”会让应用容器进入 unhealthy，产生误导性状态，也让后续 `compose up --wait` 行为依赖数据库；用 `/livez` 保证“数据库故障 ≠ 进程死亡”，同时 `/health` 不被掩盖。`make verify` 仍然显式轮询 `/health`，`make up` 的成功不替代就绪验证。每次 `/health` 请求确定一个请求 ID（复用合法 `X-Request-ID` 或生成随机值），通过响应头回显并写入探测失败日志，响应体契约保持不变。
 
 ### 3. SQLAlchemy async + asyncpg，短超时 + 连接池自愈
 
@@ -81,7 +81,7 @@
 7. 再次断言容器身份三项不变、首页仍为 200。
 8. 原子写入 `runtime/verify/last-run.json` 与带时间戳的历史副本；失败时同样写报告，并在 `finally` 中尽力把 `db` 恢复到运行状态。
 
-报告字段：`schema_version`、`result`（`passed`/`failed`）、`tested_sha`、`dirty`、`expected_sha`、`started_at`/`finished_at`（UTC ISO 8601）、`scenarios[]`（`id`、`status`、`duration_ms`、`detail`）、`app` 身份、`compose_project`。`EXPECTED_SHA` 环境变量存在时，`tested_sha` 必须与其相等，否则失败，这是 CI 与干净克隆对齐的关键。
+报告字段：`schema_version`、`result`（`passed`/`failed`）、`tested_sha`、`dirty`、`expected_sha`、`started_at`/`finished_at`（UTC ISO 8601）、`scenarios[]`（`id`、`status`、`duration_ms`、`detail`）、`app` 身份、`compose_project`。脚本对未预期异常也写入 `verify-crash` 失败报告，保证任何失败都有可下载产物。`EXPECTED_SHA` 环境变量存在时，`tested_sha` 必须与其相等，否则失败，这是 CI 与干净克隆对齐的关键。
 
 备选：Bash + `curl` + `jq`（依赖 `jq`，JSON 断言别扭）；备选：pytest + testcontainers（需要额外依赖与 Docker socket 挂载）。选择标准库脚本以贴合“干净克隆即可验收”。
 
@@ -95,7 +95,7 @@
 
 `.github/workflows/verify.yml`：`on: [push, pull_request, workflow_dispatch]`，`concurrency` 按 ref 取消旧运行，`timeout-minutes: 25`。步骤为 checkout → `EXPECTED_SHA=${{ github.sha }} make verify` → 读取 `runtime/verify/last-run.json` 断言 `tested_sha == github.sha && result == passed` → `actions/upload-artifact` 上传报告 → `if: always()` 执行 `make down`。
 
-`actions/checkout` 对 PR 检出合并提交，`github.sha` 即该次检出的 HEAD，因此“触发 SHA”“检出 HEAD”“报告 SHA”三者可比。备选：比较 PR head SHA。被否决，因为实际构建的是合并结果，报告应描述真正被测的提交。
+`actions/checkout` 对 PR 检出合并提交，`github.sha` 即该次检出的 HEAD，因此“触发 SHA”“检出 HEAD”“报告 SHA”三者可比。`workflow_dispatch` 额外提供期望 SHA 覆盖入口，用于确定性地演练失败路径；无论成功或失败都上传报告，产物缺失即判定配置错误。备选：比较 PR head SHA。被否决，因为实际构建的是合并结果，报告应描述真正被测的提交。
 
 ### 8. 工程规则与验收技能分层
 
