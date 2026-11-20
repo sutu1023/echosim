@@ -62,3 +62,20 @@
 - **THEN** 请求被允许并按数据库状态返回 200 或 503
 - **AND** 使用 `GET` 以外的方法请求该路径时返回 405
 - **AND** 探测过程不写入数据库、不修改任何持久化状态
+
+### Requirement: 健康检查请求可追踪
+
+`GET /health` SHALL 为每次请求确定一个请求 ID：合法的 `X-Request-ID` 请求头 MUST 被复用（长度 1–64，仅允许字母、数字、`.`、`_`、`:`、`-`），缺失或非法时 MUST 生成新的随机 ID。该 ID MUST 通过响应头 `X-Request-ID` 返回，并在数据库探测失败的服务端日志中记录；响应体契约不得因此改变。
+
+#### Scenario: 失败日志可按请求 ID 关联
+
+- **WHEN** 客户端携带 `X-Request-ID: accept-123` 请求 `GET /health` 且数据库不可用
+- **THEN** 响应头返回 `X-Request-ID: accept-123`
+- **AND** 服务端失败日志包含 `request_id=accept-123`
+- **AND** 响应体仍为 `{"status":"degraded","database":"unavailable"}`
+
+#### Scenario: 非法请求 ID 被替换
+
+- **WHEN** 客户端携带包含空白、非法字符或超长的 `X-Request-ID` 请求 `GET /health`
+- **THEN** 服务端不复用该值，生成新的随机 ID 并在响应头返回
+- **AND** 原始非法值不出现在响应头或日志中

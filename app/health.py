@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
 from .config import settings
@@ -19,17 +19,22 @@ HEALTHY_BODY = {"status": "ok", "database": "ok"}
 DEGRADED_BODY = {"status": "degraded", "database": "unavailable"}
 
 
-async def probe_database() -> bool:
+async def probe_database(request_id: str | None = None) -> bool:
     """执行一次数据库探测。
 
-    只在服务端日志记录异常类型，响应固定文案，绝不回显 DSN、凭据或主机名。
+    只在服务端日志记录异常类型，响应固定文案，绝不回显 DSN、凭据或主机名；
+    失败日志带上请求 ID，便于与客户端请求关联。
     """
     try:
         async with asyncio.timeout(settings.health_db_timeout_seconds):
             await select_one()
     except Exception as exc:  # noqa: BLE001 - 任何探测失败都必须降级而不是抛出
-        logger.warning("数据库探测失败: %s", type(exc).__name__)
-        logger.debug("数据库探测异常堆栈", exc_info=True)
+        logger.warning(
+            "数据库探测失败 request_id=%s: %s", request_id or "-", type(exc).__name__
+        )
+        logger.debug(
+            "数据库探测异常堆栈 request_id=%s", request_id or "-", exc_info=True
+        )
         return False
     return True
 
@@ -41,8 +46,9 @@ async def livez() -> JSONResponse:
 
 
 @router.get("/health")
-async def health() -> JSONResponse:
+async def health(request: Request) -> JSONResponse:
     """就绪信号：数据库可用 200，不可用或超时 503。"""
-    if await probe_database():
+    request_id = getattr(request.state, "request_id", None)
+    if await probe_database(request_id):
         return JSONResponse(HEALTHY_BODY, status_code=200)
     return JSONResponse(DEGRADED_BODY, status_code=503)

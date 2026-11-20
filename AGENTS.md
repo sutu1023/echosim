@@ -49,6 +49,7 @@ make verify   # 执行可重复验收，写入 runtime/verify/last-run.json
 - `GET /health` 是就绪信号：每次请求都**真实执行 `SELECT 1`**（不得缓存、不得固定返回），数据库可用返回 200 `{"status":"ok","database":"ok"}`，不可用或超时在 5 秒内返回 503 `{"status":"degraded","database":"unavailable"}`。
 - 数据库故障不得导致后端进程重启；恢复后同一进程的下一次 `/health` 必须重新返回 200。
 - 健康检查不得回显 DSN、凭据、堆栈或内部主机名；日志只记录异常类型。
+- 每次 `/health` 请求必须确定请求 ID：合法 `X-Request-ID`（1–64 位字母、数字、`.`、`_`、`:`、`-`）复用，缺失或非法时生成随机值；响应头回显该 ID，探测失败日志记录 `request_id`，响应体契约保持不变。
 - 探测路径只读：除 `SELECT 1` 外不得执行任何写操作或修改状态。
 
 ## 凭据与配置
@@ -62,6 +63,7 @@ make verify   # 执行可重复验收，写入 runtime/verify/last-run.json
 - 验收结论必须绑定被测 Git SHA；`runtime/verify/last-run.json` 的 `tested_sha` 必须等于执行时的 `HEAD`。
 - 工作树存在未忽略改动时 `make verify` 默认拒绝执行；仅在本地调试时可用 `ALLOW_DIRTY=1`，此时报告记录 `dirty: true`，**不得**作为干净克隆证据。
 - CI 必须调用与本地相同的 `make verify`，并断言报告 `tested_sha` 等于触发 SHA；不得在 CI 中重复实现验收逻辑。
+- CI 成功与失败运行都必须上传报告，产物缺失即视为配置错误；使用 `gh workflow run verify -f expected_sha=<错误 SHA>` 执行受控失败演练，验证失败路径与失败报告。
 - 人工验收记录只写 `docs/acceptance/`，`make verify` 与 CI 不得创建、修改或删除该目录内容。
 - 干净克隆、CI 产物与人工记录必须能通过同一个 SHA 对齐；报告与运行链接写入记录的“证据”字段。
 

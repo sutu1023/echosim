@@ -58,7 +58,18 @@ CI SHALL 在干净检出上执行与本地相同的 `make verify`，并校验报
 - **WHEN** 向仓库推送提交或在拉取请求上触发 `verify` 工作流
 - **THEN** 工作流在干净检出上执行 `make verify`，并读取 `runtime/verify/last-run.json`
 - **AND** 当报告 SHA 不等于本次触发 SHA 时工作流失败
-- **AND** 工作流成功时上传该报告作为可下载的构建产物，供与干净克隆结果比对
+- **AND** 工作流无论成功或失败都上传该报告作为可下载的构建产物，供与干净克隆结果比对
+
+### Requirement: 受控失败运行产出可下载报告
+
+CI SHALL 提供确定性的受控失败入口（手动触发并可覆盖期望 SHA），用于验证失败路径；受控失败运行时工作流 MUST 以失败结束，且 MUST 上传记录失败场景与原因的报告。
+
+#### Scenario: 期望 SHA 不一致的受控失败
+
+- **WHEN** 手动触发 `verify` 工作流并指定与检出 HEAD 不一致的期望 SHA
+- **THEN** 工作流以失败结束
+- **AND** 报告中 `result` 为 `failed`，并记录 SHA 不一致的具体原因
+- **AND** 该报告可作为构建产物下载
 
 ### Requirement: 人工验收单独记录
 

@@ -80,6 +80,51 @@ class HealthRouteTests(unittest.TestCase):
         # 存活探针不访问数据库：只有 /health 触发探测。
         probe.assert_awaited_once()
 
+    def test_health_echoes_valid_request_id(self) -> None:
+        probe = AsyncMock(return_value=None)
+        with patch("app.health.select_one", new=probe):
+            response = self.client.get("/health", headers={"X-Request-ID": "accept-123"})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.headers["x-request-id"], "accept-123")
+
+    def test_health_generates_request_id_when_missing(self) -> None:
+        probe = AsyncMock(return_value=None)
+        with patch("app.health.select_one", new=probe):
+            response = self.client.get("/health")
+
+        request_id = response.headers["x-request-id"]
+        self.assertRegex(request_id, r"^[0-9a-f]{32}$")
+
+    def test_health_replaces_invalid_request_id(self) -> None:
+        for invalid in ("bad id!!", "a" * 65, "id;rm -rf", ""):
+            with self.subTest(invalid=invalid):
+                probe = AsyncMock(return_value=None)
+                with patch("app.health.select_one", new=probe):
+                    response = self.client.get(
+                        "/health", headers={"X-Request-ID": invalid}
+                    )
+
+                request_id = response.headers["x-request-id"]
+                self.assertRegex(request_id, r"^[0-9a-f]{32}$")
+                if invalid:
+                    self.assertNotIn(invalid.strip(), request_id)
+
+    def test_probe_failure_log_contains_request_id(self) -> None:
+        probe = AsyncMock(side_effect=RuntimeError("database is down"))
+        with patch("app.health.select_one", new=probe):
+            with self.assertLogs("app.health", level="WARNING") as captured:
+                response = self.client.get(
+                    "/health", headers={"X-Request-ID": "req-42"}
+                )
+
+        self.assertEqual(response.status_code, 503)
+        self.assertIn("request_id=req-42", "\n".join(captured.output))
+        self.assertEqual(
+            response.json(), {"status": "degraded", "database": "unavailable"}
+        )
+
+
 
 class _RecordingConnection:
     """记录执行语句的假连接，用于断言探测只读。"""

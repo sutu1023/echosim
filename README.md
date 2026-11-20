@@ -34,6 +34,14 @@ curl -i http://127.0.0.1:8080/health
 
 数据库可用时返回 `200` 与 `{"status":"ok","database":"ok"}`；数据库不可用时返回 `503` 与 `{"status":"degraded","database":"unavailable"}`。
 
+每次请求都会带 `X-Request-ID` 响应头：合法的请求头会被复用，否则生成随机 ID。探测失败时服务端日志包含同一个 `request_id`，便于关联：
+
+```bash
+curl -s -D- -H 'X-Request-ID: accept-123' http://127.0.0.1:8080/health
+curl -s -o /dev/null -H 'X-Request-ID: accept-123' http://127.0.0.1:8080/health
+docker compose logs app | grep 'request_id=accept-123'
+```
+
 停止环境：
 
 ```bash
@@ -80,6 +88,14 @@ EXPECTED_SHA=$(git rev-parse HEAD) make verify
 ```
 
 - 机器可读报告字段包括 `result`、`tested_sha`、`dirty`、`started_at`/`finished_at`、逐场景 `scenarios[]` 与 `app` 容器身份。
+- CI 成功与失败运行都会上传 `verify-report-<sha>`；报告缺失会让工作流失败。可用手动触发执行受控失败演练：
+
+```bash
+gh workflow run verify --ref <branch> -f expected_sha=0000000000000000000000000000000000000000
+```
+
+  该运行会失败，并上传记录 SHA 不一致原因的失败报告，用于证明失败路径可观测。
+- `scripts/verify.py` 对未预期异常也会写入 `verify-crash` 失败报告，保证 CI 有产物可下载。
 
 CI 在干净检出上执行同一命令，并断言报告中的 `tested_sha` 等于触发提交 SHA；工作流名称 `verify`，报告作为构建产物上传。
 

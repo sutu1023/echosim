@@ -4,6 +4,11 @@ on:
   push:
   pull_request:
   workflow_dispatch:
+    inputs:
+      expected_sha:
+        description: "覆盖期望 SHA（受控失败演练用；留空则使用触发 SHA）"
+        required: false
+        default: ""
 
 concurrency:
   group: verify-${{ github.ref }}
@@ -24,13 +29,13 @@ jobs:
 
       - name: Run acceptance (same command as local)
         env:
-          EXPECTED_SHA: ${{ github.sha }}
+          EXPECTED_SHA: ${{ inputs.expected_sha || github.sha }}
         run: make verify
 
       - name: Assert report SHA and result
         if: always()
         env:
-          EXPECTED_SHA: ${{ github.sha }}
+          EXPECTED_SHA: ${{ inputs.expected_sha || github.sha }}
         run: |
           python3 - <<'PY'
           import json
@@ -66,7 +71,7 @@ jobs:
         with:
           name: verify-report-${{ github.sha }}
           path: runtime/verify/
-          if-no-files-found: warn
+          if-no-files-found: error
           retention-days: 30
 
       - name: Stop environment

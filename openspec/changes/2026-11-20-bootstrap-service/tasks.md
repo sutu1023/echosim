@@ -63,3 +63,10 @@
 - [x] 9.2 确认干净克隆结果与成功 CI 产物 SHA 相同，并在人工验收记录的“证据”中同时列出克隆 SHA、CI 运行链接与报告文件位置
 - [x] 9.3 执行 `make down` 清理本地环境，确认 `127.0.0.1:8080` 已释放且无遗留项目容器
 - [x] 9.4 运行 `openspec validate 2026-11-20-bootstrap-service --strict` 通过，并执行 `openspec status --change 2026-11-20-bootstrap-service` 确认所有必需产物为 `done`
+
+## 10. 收尾补强：请求 ID 与受控失败证据
+
+- [x] 10.1 为 `/health` 增加请求 ID：中间件复用合法 `X-Request-ID` 或生成随机值、响应头回显、失败日志记录 `request_id`，响应体契约不变；新增单元测试覆盖回显、非法值替换与日志关联，运行 `python3 -m unittest discover -s tests` 通过
+- [x] 10.2 为 CI 增加受控失败入口：`workflow_dispatch` 支持覆盖期望 SHA，成功与失败运行均上传报告并缺失即失败；`scripts/verify.py` 增加未预期异常兜底报告；用 actionlint 校验工作流
+- [ ] 10.3 在新候选 SHA 上重跑证据链：单元测试、连续两次 `make verify`、GitHub 干净克隆两次 verify、CI 成功运行、受控失败运行并下载校验失败报告
+- [ ] 10.4 按模板生成新 SHA 的人工验收记录（含新 CI 成功/失败运行、克隆 SHA 与报告位置），保留 `docs/acceptance/2026-11-20-e16ee09.md` 不动，并更新 README/AGENTS 说明

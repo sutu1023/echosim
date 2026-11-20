@@ -317,8 +317,18 @@ def run_acceptance(report: dict[str, Any]) -> bool:
 
 
 def restore_database() -> None:
-    """尽力把数据库恢复到运行状态，保证下一次验收可执行。"""
-    result = compose("start", "db")
+    """尽力把数据库恢复到运行状态，保证下一次验收可执行。
+
+    恢复失败不能阻断报告写入，因此这里吞掉超时与命令异常。
+    """
+    try:
+        result = compose("start", "db")
+    except subprocess.TimeoutExpired:
+        print("[verify] 恢复数据库：超时")
+        return
+    except Exception as exc:  # noqa: BLE001 - 恢复失败只提示，不阻断报告
+        print(f"[verify] 恢复数据库：异常 {type(exc).__name__}")
+        return
     status = "ok" if result.returncode == 0 else f"失败：{result.stderr.strip()}"
     print(f"[verify] 恢复数据库：{status}")
 
@@ -376,16 +386,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def main(argv: list[str] | None = None) -> int:
-    args = parse_args(argv)
-    allow_dirty = os.environ.get("ALLOW_DIRTY", "").strip().lower() in {"1", "true", "yes"}
-
-    report: dict[str, Any] = {
+def new_report(expected_sha: str | None) -> dict[str, Any]:
+    return {
         "schema_version": SCHEMA_VERSION,
         "result": "failed",
         "tested_sha": "",
         "dirty": False,
-        "expected_sha": args.expect_sha,
+        "expected_sha": expected_sha,
         "started_at": utc_now(),
         "finished_at": None,
         "exit_code": None,
@@ -395,6 +402,10 @@ def main(argv: list[str] | None = None) -> int:
         "degrade_seconds": None,
         "scenarios": [],
     }
+
+
+def run(report: dict[str, Any], args: argparse.Namespace) -> int:
+    allow_dirty = os.environ.get("ALLOW_DIRTY", "").strip().lower() in {"1", "true", "yes"}
 
     try:
         head = git_head()
@@ -462,6 +473,28 @@ def main(argv: list[str] | None = None) -> int:
         restore_database()
 
     return finalize(report, 0 if passed else 1)
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(argv)
+    report = new_report(args.expect_sha)
+
+    try:
+        return run(report, args)
+    except Exception as exc:  # noqa: BLE001 - 兜底：未预期异常也必须留下可下载报告
+        if report.get("finished_at") is not None:
+            raise
+        message = f"未预期异常：{type(exc).__name__}: {exc}"
+        print(f"[verify] {message}")
+        report["scenarios"].append(
+            {
+                "id": "verify-crash",
+                "status": "failed",
+                "duration_ms": 0,
+                "detail": message,
+            }
+        )
+        return finalize(report, 2)
 
 
 if __name__ == "__main__":
