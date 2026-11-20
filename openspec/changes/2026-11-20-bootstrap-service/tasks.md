@@ -38,9 +38,9 @@
 
 ## 6. 验收脚本
 
-- [ ] 6.1 实现 `scripts/verify.py` 基础框架：`--expect-sha`、`EXPECTED_SHA`、`ALLOW_DIRTY`、`--help`、读取 `git rev-parse HEAD`、脏工作树检测、UTC 时间与原子报告写入 `runtime/verify/last-run.json`，运行 `python3 scripts/verify.py --help` 与脏工作树用例（创建未忽略临时文件时非零退出并提示）通过
-- [ ] 6.2 实现验收场景：启动并等待首页含 `EchoSim`、`/health` 200、记录 app 容器 `Id/Pid/StartedAt/RestartCount`、停 `db` 后 503（≤5 秒）且 `/livez` 200、恢复 `db` 后 200、身份不变、首页仍 200；在 `finally` 中恢复数据库，运行 `make verify` 一次通过并人工核对报告逐场景 `passed`
-- [ ] 6.3 校验报告契约：断言 `runtime/verify/last-run.json` 含 `tested_sha`（等于 `git rev-parse HEAD`）、`dirty=false`、`result=passed`、起止时间、全部场景、停库耗时 ≤5 秒、退出码 0；用 `python3 -c` 编写一次性断言命令并执行通过
+- [x] 6.1 实现 `scripts/verify.py` 基础框架：`--expect-sha`、`EXPECTED_SHA`、`ALLOW_DIRTY`、`--help`、读取 `git rev-parse HEAD`、脏工作树检测、UTC 时间与原子报告写入 `runtime/verify/last-run.json`，运行 `python3 scripts/verify.py --help` 与脏工作树用例（创建未忽略临时文件时非零退出并提示）通过
+- [x] 6.2 实现验收场景：启动并等待首页含 `EchoSim`、`/health` 200、记录 app 容器 `Id/Pid/StartedAt/RestartCount`、停 `db` 后 503（≤5 秒）且 `/livez` 200、恢复 `db` 后 200、身份不变、首页仍 200；在 `finally` 中恢复数据库，运行 `make verify` 一次通过并人工核对报告逐场景 `passed`
+- [x] 6.3 校验报告契约：断言 `runtime/verify/last-run.json` 含 `tested_sha`（等于 `git rev-parse HEAD`）、`dirty=false`、`result=passed`、起止时间、全部场景、停库耗时 ≤5 秒、退出码 0；用 `python3 -c` 编写一次性断言命令并执行通过
 - [ ] 6.4 验证可重复性：连续执行两次 `make verify`，两次均退出 0、报告时间戳更新、第二次结束后首页 200 且数据库运行，无需人工清理
 - [ ] 6.5 验证失败路径与恢复：用 `EXPECTED_SHA=0000000000000000000000000000000000000000 make verify` 触发 SHA 不一致失败，确认非零退出、报告记录失败原因、`db` 仍为运行状态，随后正常 `make verify` 通过
 
