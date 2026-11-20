@@ -47,8 +47,8 @@
 ## 7. GitHub Actions
 
 - [x] 7.1 编写 `.github/workflows/verify.yml`：`push`/`pull_request`/`workflow_dispatch` 触发、checkout、`EXPECTED_SHA=${{ github.sha }} make verify`、断言报告 `tested_sha` 与 `result`、`always()` 上传 `runtime/verify/` 产物、`always()` 执行 `make down`；用 `python3` 或 `docker run rhysd/actionlint` 校验 YAML 语法与表达式无误
-- [ ] 7.2 确认 CI 与本地命令无分叉：对比工作流步骤与 `Makefile`/`scripts/verify.py`，确认未重复实现验收逻辑；在本地以 `EXPECTED_SHA=$(git rev-parse HEAD) make verify` 复现 CI 的调用方式并通过
-- [ ] 7.3 提交并推送后，确认 `verify` 检查成功且下载的产物中 `tested_sha` 与本次提交 SHA 相同；若无法推送，则在 `docs/acceptance/` 之外记录待验收事项并在交付说明中明确未完成项
+- [x] 7.2 确认 CI 与本地命令无分叉：对比工作流步骤与 `Makefile`/`scripts/verify.py`，确认未重复实现验收逻辑；在本地以 `EXPECTED_SHA=$(git rev-parse HEAD) make verify` 复现 CI 的调用方式并通过
+- [x] 7.3 提交并推送后，确认 `verify` 检查成功且下载的产物中 `tested_sha` 与本次提交 SHA 相同；若无法推送，则在 `docs/acceptance/` 之外记录待验收事项并在交付说明中明确未完成项
 
 ## 8. 工程规则与验收资产
 
