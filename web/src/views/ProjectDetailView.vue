@@ -3,6 +3,7 @@ import { onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { api, ApiError, describeError, type Project } from '../api'
 import { markLoggedOut } from '../session'
+import { defaultStage } from '../workbench/stages'
 
 const route = useRoute()
 const router = useRouter()
@@ -11,7 +12,10 @@ const loading = ref(true)
 const notFound = ref(false)
 const error = ref('')
 
-onMounted(async () => {
+async function load(): Promise<void> {
+  loading.value = true
+  notFound.value = false
+  error.value = ''
   try {
     const data = await api.get<{ project: Project }>(
       `/api/projects/${encodeURIComponent(String(route.params.id))}`,
@@ -34,6 +38,10 @@ onMounted(async () => {
   } finally {
     loading.value = false
   }
+}
+
+onMounted(() => {
+  void load()
 })
 </script>
 
@@ -43,18 +51,34 @@ onMounted(async () => {
     <template v-else-if="notFound">
       <h2>项目不存在</h2>
       <p class="muted">该链接无效，或项目不属于当前账户。</p>
-      <RouterLink to="/">返回项目列表</RouterLink>
+      <nav class="inline-nav">
+        <RouterLink to="/projects">返回项目列表</RouterLink>
+        <RouterLink to="/">返回控制台</RouterLink>
+      </nav>
     </template>
-    <p v-else-if="error" class="error" role="alert">{{ error }}</p>
+    <template v-else-if="error">
+      <p class="error" role="alert">{{ error }}</p>
+      <button type="button" class="ghost" @click="load">重试</button>
+      <nav class="inline-nav">
+        <RouterLink to="/projects">返回项目列表</RouterLink>
+      </nav>
+    </template>
     <template v-else-if="project">
-      <h2>{{ project.name }}</h2>
+      <div class="card-heading">
+        <h2>{{ project.name }}</h2>
+        <span class="pill">工作台外壳</span>
+      </div>
       <p v-if="project.description" class="detail">{{ project.description }}</p>
       <p class="muted">
         创建时间：{{ new Date(project.created_at).toLocaleString() }}
       </p>
       <nav class="inline-nav">
+        <RouterLink :to="`/projects/${project.id}/workbench/${defaultStage.slug}`">
+          进入工作台
+        </RouterLink>
         <RouterLink to="/history">查看历史</RouterLink>
-        <RouterLink to="/">返回项目列表</RouterLink>
+        <RouterLink to="/projects">返回项目列表</RouterLink>
+        <RouterLink to="/">返回控制台</RouterLink>
       </nav>
     </template>
   </section>
