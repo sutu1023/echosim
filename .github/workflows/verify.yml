@@ -1,0 +1,74 @@
+name: verify
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: verify-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run acceptance (same command as local)
+        env:
+          EXPECTED_SHA: ${{ github.sha }}
+        run: make verify
+
+      - name: Assert report SHA and result
+        if: always()
+        env:
+          EXPECTED_SHA: ${{ github.sha }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import pathlib
+          import sys
+
+          report_path = pathlib.Path("runtime/verify/last-run.json")
+          if not report_path.is_file():
+              sys.exit("缺少验收报告: %s" % report_path)
+
+          report = json.loads(report_path.read_text(encoding="utf-8"))
+          expected = os.environ["EXPECTED_SHA"]
+          tested = report.get("tested_sha")
+          result = report.get("result")
+
+          print(f"expected_sha={expected}")
+          print(f"tested_sha={tested}")
+          print(f"result={result}")
+          print(f"dirty={report.get('dirty')}")
+
+          if tested != expected:
+              sys.exit("报告 SHA 与触发 SHA 不一致")
+          if result != "passed":
+              sys.exit("验收结果不是 passed")
+          if report.get("dirty") is not False:
+              sys.exit("验收报告标记为脏工作树，不能作为干净检出证据")
+          PY
+
+      - name: Upload verification report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: verify-report-${{ github.sha }}
+          path: runtime/verify/
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Stop environment
+        if: always()
+        run: make down || true

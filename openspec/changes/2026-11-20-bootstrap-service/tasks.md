@@ -42,11 +42,11 @@
 - [x] 6.2 实现验收场景：启动并等待首页含 `EchoSim`、`/health` 200、记录 app 容器 `Id/Pid/StartedAt/RestartCount`、停 `db` 后 503（≤5 秒）且 `/livez` 200、恢复 `db` 后 200、身份不变、首页仍 200；在 `finally` 中恢复数据库，运行 `make verify` 一次通过并人工核对报告逐场景 `passed`
 - [x] 6.3 校验报告契约：断言 `runtime/verify/last-run.json` 含 `tested_sha`（等于 `git rev-parse HEAD`）、`dirty=false`、`result=passed`、起止时间、全部场景、停库耗时 ≤5 秒、退出码 0；用 `python3 -c` 编写一次性断言命令并执行通过
 - [x] 6.4 验证可重复性：连续执行两次 `make verify`，两次均退出 0、报告时间戳更新、第二次结束后首页 200 且数据库运行，无需人工清理
-- [ ] 6.5 验证失败路径与恢复：用 `EXPECTED_SHA=0000000000000000000000000000000000000000 make verify` 触发 SHA 不一致失败，确认非零退出、报告记录失败原因、`db` 仍为运行状态，随后正常 `make verify` 通过
+- [x] 6.5 验证失败路径与恢复：用 `EXPECTED_SHA=0000000000000000000000000000000000000000 make verify` 触发 SHA 不一致失败，确认非零退出、报告记录失败原因、`db` 仍为运行状态，随后正常 `make verify` 通过
 
 ## 7. GitHub Actions
 
-- [ ] 7.1 编写 `.github/workflows/verify.yml`：`push`/`pull_request`/`workflow_dispatch` 触发、checkout、`EXPECTED_SHA=${{ github.sha }} make verify`、断言报告 `tested_sha` 与 `result`、`always()` 上传 `runtime/verify/` 产物、`always()` 执行 `make down`；用 `python3` 或 `docker run rhysd/actionlint` 校验 YAML 语法与表达式无误
+- [x] 7.1 编写 `.github/workflows/verify.yml`：`push`/`pull_request`/`workflow_dispatch` 触发、checkout、`EXPECTED_SHA=${{ github.sha }} make verify`、断言报告 `tested_sha` 与 `result`、`always()` 上传 `runtime/verify/` 产物、`always()` 执行 `make down`；用 `python3` 或 `docker run rhysd/actionlint` 校验 YAML 语法与表达式无误
 - [ ] 7.2 确认 CI 与本地命令无分叉：对比工作流步骤与 `Makefile`/`scripts/verify.py`，确认未重复实现验收逻辑；在本地以 `EXPECTED_SHA=$(git rev-parse HEAD) make verify` 复现 CI 的调用方式并通过
 - [ ] 7.3 提交并推送后，确认 `verify` 检查成功且下载的产物中 `tested_sha` 与本次提交 SHA 相同；若无法推送，则在 `docs/acceptance/` 之外记录待验收事项并在交付说明中明确未完成项
 
