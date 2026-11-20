@@ -52,9 +52,9 @@
 
 ## 8. 工程规则与验收资产
 
-- [ ] 8.1 编写根 `AGENTS.md`：语言、栈与版本、目录约定、`make` 命令、同域/回环/健康语义、真实 `SELECT 1` 要求、禁止提交凭据、脏树与 SHA 验收规则、提交与文档要求；在 `README.md` 链接该文件，确认链接路径存在且规则覆盖上述要点
+- [x] 8.1 编写根 `AGENTS.md`：语言、栈与版本、目录约定、`make` 命令、同域/回环/健康语义、真实 `SELECT 1` 要求、禁止提交凭据、脏树与 SHA 验收规则、提交与文档要求；在 `README.md` 链接该文件，确认链接路径存在且规则覆盖上述要点
 - [ ] 8.2 编写 `docs/acceptance/README.md` 与 `TEMPLATE.md`，字段包含被测 SHA、分支、日期、验收人、环境、三个验收场景结果、CI 链接与证据；运行 `make verify` 前后对比 `docs/acceptance/` 文件哈希，确认自动化流程未写入该目录
-- [ ] 8.3 编写 `.pi/skills/echosim-acceptance/SKILL.md`：带 `name`/`description` frontmatter，步骤引用真实存在的 `make up`、`make verify`、`make down` 与 `docs/acceptance` 模板，说明如何用同一 SHA 对齐浏览器验收、两次 verify 与 CI 产物；对照现有 `.pi/skills/*/SKILL.md` 结构检查 frontmatter 与命令可执行
+- [x] 8.3 编写 `.pi/skills/echosim-acceptance/SKILL.md`：带 `name`/`description` frontmatter，步骤引用真实存在的 `make up`、`make verify`、`make down` 与 `docs/acceptance` 模板，说明如何用同一 SHA 对齐浏览器验收、两次 verify 与 CI 产物；对照现有 `.pi/skills/*/SKILL.md` 结构检查 frontmatter 与命令可执行
 - [ ] 8.4 使用该技能走查一次完整验收流程（浏览器打开首页、停库观察 503、恢复观察 200、连续两次 verify），按模板生成一份 `docs/acceptance/<date>-<sha7>.md`，确认记录中的 SHA 与报告、CI 一致且结论由验收人署名
 
 ## 9. 端到端集成验证
