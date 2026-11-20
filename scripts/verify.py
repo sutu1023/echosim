@@ -11,14 +11,17 @@
 from __future__ import annotations
 
 import argparse
+import http.cookiejar
 import json
 import os
+import secrets
 import subprocess
 import sys
 import tempfile
 import time
 import urllib.error
 import urllib.request
+import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -27,7 +30,7 @@ from typing import Any, Callable, Iterator
 REPO_ROOT = Path(__file__).resolve().parent.parent
 REPORT_DIR = REPO_ROOT / "runtime" / "verify"
 REPORT_PATH = REPORT_DIR / "last-run.json"
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 COMPOSE_TIMEOUT_SECONDS = 900
 RECOVERY_TIMEOUT_SECONDS = 60
@@ -55,20 +58,25 @@ def require(condition: bool, message: str) -> None:
 
 
 def command(
-    args: list[str], timeout: float = COMPOSE_TIMEOUT_SECONDS
+    args: list[str],
+    timeout: float = COMPOSE_TIMEOUT_SECONDS,
+    input_text: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         args,
         cwd=REPO_ROOT,
         text=True,
         capture_output=True,
+        input=input_text,
         timeout=timeout,
         check=False,
     )
 
 
-def compose(*args: str) -> subprocess.CompletedProcess[str]:
-    return command(["docker", "compose", *args])
+def compose(
+    *args: str, input_text: str | None = None
+) -> subprocess.CompletedProcess[str]:
+    return command(["docker", "compose", *args], input_text=input_text)
 
 
 def git_head() -> str:
@@ -97,6 +105,87 @@ def http_status(path: str, timeout: float = 5.0) -> tuple[int, str]:
 
 
 BASE_URL = "http://127.0.0.1:8080"
+
+SESSION_COOKIE = "echosim_session"
+ACCOUNT_A = "accept-a@echosim.local"
+ACCOUNT_B = "accept-b@echosim.local"
+ACCOUNT_PASSWORD_LENGTH = 24
+
+
+class HttpClient:
+    """带 Cookie 罐的验收客户端；只用于服务端 HTTP 行为验证。"""
+
+    def __init__(self, cookie_header: str | None = None) -> None:
+        self.jar = http.cookiejar.CookieJar()
+        self.opener = urllib.request.build_opener(
+            urllib.request.HTTPCookieProcessor(self.jar)
+        )
+        self.explicit_cookie = cookie_header
+
+    def request(
+        self,
+        method: str,
+        path: str,
+        payload: dict[str, object] | None = None,
+        headers: dict[str, str] | None = None,
+        timeout: float = 10.0,
+    ) -> tuple[int, dict[str, str], str]:
+        data = None
+        if payload is not None:
+            data = json.dumps(payload).encode("utf-8")
+        request = urllib.request.Request(BASE_URL + path, data=data, method=method)
+        request.add_header("Accept", "application/json")
+        if data is not None:
+            request.add_header("Content-Type", "application/json")
+        if self.explicit_cookie:
+            request.add_header("Cookie", self.explicit_cookie)
+        for name, value in (headers or {}).items():
+            request.add_header(name, value)
+        try:
+            with self.opener.open(request, timeout=timeout) as response:
+                return (
+                    response.status,
+                    {key.lower(): value for key, value in response.headers.items()},
+                    response.read().decode("utf-8", "replace"),
+                )
+        except urllib.error.HTTPError as exc:
+            return (
+                exc.code,
+                {key.lower(): value for key, value in exc.headers.items()},
+                exc.read().decode("utf-8", "replace"),
+            )
+        except Exception:  # noqa: BLE001 - 连接失败统一以状态码 0 表示
+            return 0, {}, ""
+
+    def cookie_value(self, name: str = SESSION_COOKIE) -> str | None:
+        for cookie in self.jar:
+            if cookie.name == name:
+                return cookie.value
+        return None
+
+    def get_json(self, path: str) -> tuple[int, dict[str, str], object | None]:
+        status, headers, body = self.request("GET", path)
+        try:
+            return status, headers, json.loads(body) if body else None
+        except json.JSONDecodeError:
+            return status, headers, None
+
+
+def raw_request(
+    method: str,
+    path: str,
+    *,
+    cookie_token: str | None = None,
+    payload: dict[str, object] | None = None,
+    timeout: float = 10.0,
+) -> tuple[int, dict[str, str], str]:
+    """不依赖 Cookie 罐的请求，用于复放旧 Cookie 与显式注入 Cookie。"""
+    cookie_header = (
+        f"{SESSION_COOKIE}={cookie_token}" if cookie_token is not None else None
+    )
+    return HttpClient(cookie_header=cookie_header).request(
+        method, path, payload=payload, timeout=timeout
+    )
 
 
 def set_loopback_port() -> str:
@@ -289,7 +378,237 @@ def scenario_homepage_after_recovery(entry: dict[str, Any]) -> None:
     entry["detail"] = "恢复后首页仍为 200 且包含 EchoSim"
 
 
+
+def ensure_account(email: str, password: str) -> None:
+    """幂等准备验收账号：存在时重设密码并撤销旧会话。"""
+    result = compose(
+        "exec",
+        "-T",
+        "app",
+        "python",
+        "-m",
+        "app.manage",
+        "create-user",
+        "--email",
+        email,
+        "--password-stdin",
+        "--update-password",
+        input_text=password + "\n",
+    )
+    require(
+        result.returncode == 0,
+        f"准备账号 {email} 失败："
+        + ((result.stderr or result.stdout).strip()[-400:] or "无输出"),
+    )
+
+
+def scenario_prepare_accounts(
+    entry: dict[str, Any], state: dict[str, Any], report: dict[str, Any]
+) -> None:
+    password = secrets.token_urlsafe(ACCOUNT_PASSWORD_LENGTH)
+    ensure_account(ACCOUNT_A, password)
+    ensure_account(ACCOUNT_B, password)
+    state["password"] = password
+    report["acceptance_accounts"] = [ACCOUNT_A, ACCOUNT_B]
+    entry["detail"] = f"已准备/更新两个验收账号：{ACCOUNT_A}、{ACCOUNT_B}（密码不写入报告）"
+
+
+def scenario_login_and_create(
+    entry: dict[str, Any], state: dict[str, Any], report: dict[str, Any]
+) -> None:
+    client = HttpClient()
+    status, _, body = client.request(
+        "POST",
+        "/api/auth/login",
+        payload={"email": ACCOUNT_A, "password": state["password"]},
+        headers={"Origin": BASE_URL},
+    )
+    require(status == 200, f"A 登录期望 200，实际 {status}：{body[:200]}")
+    token = client.cookie_value()
+    require(bool(token), "登录响应未设置会话 Cookie")
+
+    project_name = f"验收项目-{int(time.time())}-{secrets.token_hex(3)}"
+    status, _, body = client.request(
+        "POST",
+        "/api/projects",
+        payload={"name": project_name, "description": "隔离路径验收"},
+        headers={"Origin": BASE_URL},
+    )
+    require(status == 201, f"创建项目期望 201，实际 {status}：{body[:300]}")
+    project = json.loads(body)["project"]
+    require(project["name"] == project_name, "创建响应中的项目名与提交不一致")
+
+    status, _, list_payload = client.get_json("/api/projects")
+    require(status == 200, f"A 项目列表期望 200，实际 {status}")
+    names = [item["name"] for item in list_payload["projects"]]  # type: ignore[index]
+    require(project_name in names, "创建后刷新列表未看到新项目")
+
+    status, _, detail_payload = client.get_json(f"/api/projects/{project['id']}")
+    require(status == 200, f"A 项目详情期望 200，实际 {status}")
+    require(
+        detail_payload["project"]["name"] == project_name,  # type: ignore[index]
+        "项目详情返回的名称不一致",
+    )
+
+    state["client_a"] = client
+    state["token_a"] = token
+    state["project_id"] = project["id"]
+    state["project_name"] = project_name
+    report["isolation_project"] = {"id": project["id"], "name": project_name}
+    entry["detail"] = f"A 登录并创建项目 {project['id']}，列表与详情均可见"
+
+
+def scenario_session_cookie_replay(
+    entry: dict[str, Any], state: dict[str, Any]
+) -> None:
+    """服务端会话测试：显式注入 Cookie，不代表浏览器重开。"""
+    token = state["token_a"]
+    status, _, body = raw_request("GET", "/api/auth/session", cookie_token=token)
+    require(status == 200, f"显式 Cookie 会话查询期望 200，实际 {status}")
+    payload = json.loads(body)
+    require(payload["user"]["email"] == ACCOUNT_A, "会话查询返回了其他用户")
+
+    status, _, body = raw_request(
+        "GET", f"/api/projects/{state['project_id']}", cookie_token=token
+    )
+    require(status == 200, f"显式 Cookie 详情期望 200，实际 {status}")
+    require(
+        json.loads(body)["project"]["name"] == state["project_name"],
+        "显式 Cookie 详情返回了其他项目",
+    )
+    entry["detail"] = (
+        "服务端会话测试：仅凭显式注入的 Cookie 即可访问会话与项目（非浏览器重开走查）"
+    )
+
+
+def scenario_auth_anonymous_outage(entry: dict[str, Any]) -> None:
+    started = time.monotonic()
+    status, headers, body = raw_request("GET", "/api/projects", timeout=5.0)
+    elapsed = time.monotonic() - started
+    require(status == 401, f"停库且无 Cookie 时期望 401，实际 {status}")
+    require(elapsed <= 5.0, f"无 Cookie 的 401 耗时 {elapsed:.2f}s 超过 5 秒")
+    require("set-cookie" not in headers, "无 Cookie 的 401 不应下发 Cookie")
+    entry["detail"] = f"停库期间无 Cookie 直接 401（{elapsed * 1000:.0f}ms），未查询数据库"
+
+
+def scenario_auth_cookie_outage(entry: dict[str, Any], state: dict[str, Any]) -> None:
+    started = time.monotonic()
+    status, headers, body = raw_request(
+        "GET",
+        "/api/projects",
+        cookie_token=state["token_a"],
+        timeout=DEGRADE_TIMEOUT_SECONDS + 1.0,
+    )
+    elapsed = time.monotonic() - started
+    require(status == 503, f"停库且携带 Cookie 时期望 503，实际 {status}：{body[:200]}")
+    require(elapsed <= DEGRADE_TIMEOUT_SECONDS, f"停库鉴权降级耗时 {elapsed:.2f}s 超过 5 秒")
+    require(
+        "set-cookie" not in headers,
+        "停库 503 不应清除 Cookie，否则恢复后无法继续使用原会话",
+    )
+    entry["detail"] = f"停库期间携带 Cookie 在 {elapsed:.2f}s 返回 503，且未清除 Cookie"
+
+
+def scenario_session_after_recovery(
+    entry: dict[str, Any], state: dict[str, Any]
+) -> None:
+    token = state["token_a"]
+    status, _, body = raw_request("GET", "/api/projects", cookie_token=token)
+    require(status == 200, f"恢复后原 Cookie 列表期望 200，实际 {status}：{body[:200]}")
+    status, _, body = raw_request(
+        "GET", f"/api/projects/{state['project_id']}", cookie_token=token
+    )
+    require(status == 200, f"恢复后原 Cookie 详情期望 200，实际 {status}")
+    entry["detail"] = "数据库恢复后，停机前捕获的同一 Cookie 仍可访问列表与详情"
+
+
+def scenario_logout_invalidates(entry: dict[str, Any], state: dict[str, Any]) -> None:
+    client = state["client_a"]
+    status, _, body = client.request(
+        "POST", "/api/auth/logout", headers={"Origin": BASE_URL}
+    )
+    require(status == 204, f"A 退出期望 204，实际 {status}：{body[:200]}")
+
+    status, headers, body = raw_request(
+        "GET", "/api/auth/session", cookie_token=state["token_a"]
+    )
+    require(status == 401, f"退出后旧 Cookie 会话查询期望 401，实际 {status}")
+    require("Max-Age=0" in headers.get("set-cookie", ""), "401 未清除失效 Cookie")
+
+    status, _, _ = raw_request(
+        "GET", "/api/projects", cookie_token=state["token_a"]
+    )
+    require(status == 401, f"退出后旧 Cookie 项目列表期望 401，实际 {status}")
+    entry["detail"] = "A 退出后旧 Cookie 的会话查询与项目列表均返回 401"
+
+
+def scenario_user_b_isolation(
+    entry: dict[str, Any], state: dict[str, Any]
+) -> None:
+    client_b = HttpClient()
+    status, _, body = client_b.request(
+        "POST",
+        "/api/auth/login",
+        payload={"email": ACCOUNT_B, "password": state["password"]},
+        headers={"Origin": BASE_URL},
+    )
+    require(status == 200, f"B 登录期望 200，实际 {status}：{body[:200]}")
+
+    status, _, list_body = client_b.request("GET", "/api/projects")
+    require(status == 200, f"B 项目列表期望 200，实际 {status}")
+    require(
+        state["project_name"] not in list_body and state["project_id"] not in list_body,
+        "B 的项目列表泄露了 A 的项目",
+    )
+
+    status, _, history_body = client_b.request("GET", "/api/history")
+    require(status == 200, f"B 历史期望 200，实际 {status}")
+    require(
+        state["project_name"] not in history_body
+        and state["project_id"] not in history_body,
+        "B 的历史泄露了 A 的项目",
+    )
+
+    status_a, _, body_a = client_b.request(
+        "GET", f"/api/projects/{state['project_id']}"
+    )
+    status_missing, _, body_missing = client_b.request(
+        "GET", f"/api/projects/{uuid.uuid4()}"
+    )
+    status_invalid, _, body_invalid = client_b.request(
+        "GET", "/api/projects/not-a-uuid"
+    )
+    require(status_a == 404, f"B 访问 A 的项目期望 404，实际 {status_a}")
+    require(status_missing == 404, f"B 访问不存在项目期望 404，实际 {status_missing}")
+    require(status_invalid == 404, f"B 访问非法 ID 期望 404，实际 {status_invalid}")
+    require(body_a == body_missing == body_invalid, "他人项目与不存在项目的响应体不一致")
+    entry["detail"] = (
+        "B 的列表与历史不含 A 项目；B 访问 A 项目、随机 UUID 与非法 ID 均为相同 404"
+    )
+
+
+def scenario_relogin_keeps_project(
+    entry: dict[str, Any], state: dict[str, Any]
+) -> None:
+    client = HttpClient()
+    status, _, body = client.request(
+        "POST",
+        "/api/auth/login",
+        payload={"email": ACCOUNT_A, "password": state["password"]},
+        headers={"Origin": BASE_URL},
+    )
+    require(status == 200, f"A 重新登录期望 200，实际 {status}：{body[:200]}")
+    status, _, payload = client.get_json(f"/api/projects/{state['project_id']}")
+    require(status == 200, f"A 重新登录后详情期望 200，实际 {status}")
+    require(
+        payload["project"]["name"] == state["project_name"],  # type: ignore[index]
+        "重新登录后打开的项目名称不一致",
+    )
+    entry["detail"] = "A 重新登录后仍能打开退出前创建的原项目"
+
+
 def run_acceptance(report: dict[str, Any]) -> bool:
+    state: dict[str, Any] = {}
     try:
         with scenario(report, "compose-up"):
             scenario_compose_up()
@@ -303,10 +622,28 @@ def run_acceptance(report: dict[str, Any]) -> bool:
             scenario_health_ok()
         with scenario(report, "container-identity") as entry:
             scenario_identity(entry, report)
+        with scenario(report, "acceptance-accounts") as entry:
+            scenario_prepare_accounts(entry, state, report)
+        with scenario(report, "login-and-create-project") as entry:
+            scenario_login_and_create(entry, state, report)
+        with scenario(report, "session-cookie-replay") as entry:
+            scenario_session_cookie_replay(entry, state)
         with scenario(report, "database-stop-degrades") as entry:
             scenario_db_degrade(entry, report)
+        with scenario(report, "auth-anonymous-during-outage") as entry:
+            scenario_auth_anonymous_outage(entry)
+        with scenario(report, "auth-cookie-during-outage") as entry:
+            scenario_auth_cookie_outage(entry, state)
         with scenario(report, "database-recover-ready") as entry:
             scenario_db_recover(entry)
+        with scenario(report, "session-after-recovery") as entry:
+            scenario_session_after_recovery(entry, state)
+        with scenario(report, "logout-invalidates-session") as entry:
+            scenario_logout_invalidates(entry, state)
+        with scenario(report, "user-b-isolation") as entry:
+            scenario_user_b_isolation(entry, state)
+        with scenario(report, "relogin-keeps-project") as entry:
+            scenario_relogin_keeps_project(entry, state)
         with scenario(report, "container-identity-stable") as entry:
             scenario_identity_stable(entry, report)
         with scenario(report, "homepage-after-recovery") as entry:
@@ -400,6 +737,8 @@ def new_report(expected_sha: str | None) -> dict[str, Any]:
         "base_url": None,
         "app": None,
         "degrade_seconds": None,
+        "acceptance_accounts": [],
+        "isolation_project": None,
         "scenarios": [],
     }
 
