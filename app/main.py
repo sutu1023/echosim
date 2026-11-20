@@ -9,10 +9,17 @@ from pathlib import Path
 from uuid import uuid4
 
 from fastapi import FastAPI, Request, Response
+from fastapi.responses import JSONResponse
 
 from .config import settings
+from .cookies import clear_session_cookie
 from .db import dispose_engine
+from .errors import ProjectNotFound, ServiceUnavailable, Unauthenticated
 from .health import router as health_router
+from .middleware import enforce_same_origin
+from .routers.auth import router as auth_router
+from .routers.history import router as history_router
+from .routers.projects import router as projects_router
 from .static import register_static_routes
 
 REQUEST_ID_HEADER = "X-Request-ID"
@@ -49,6 +56,30 @@ def create_app(web_dist_dir: Path | None = None) -> FastAPI:
         response.headers[REQUEST_ID_HEADER] = request_id
         return response
 
+    app.middleware("http")(enforce_same_origin)
+
+    @app.exception_handler(Unauthenticated)
+    async def handle_unauthenticated(
+        _: Request, exc: Unauthenticated
+    ) -> JSONResponse:
+        response = JSONResponse({"detail": "未登录"}, status_code=401)
+        if exc.clear_cookie:
+            clear_session_cookie(response)
+        return response
+
+    @app.exception_handler(ServiceUnavailable)
+    async def handle_unavailable(_: Request, __: ServiceUnavailable) -> JSONResponse:
+        return JSONResponse({"detail": "服务暂时不可用"}, status_code=503)
+
+    @app.exception_handler(ProjectNotFound)
+    async def handle_project_not_found(
+        _: Request, __: ProjectNotFound
+    ) -> JSONResponse:
+        return JSONResponse({"detail": "项目不存在"}, status_code=404)
+
+    app.include_router(auth_router)
+    app.include_router(projects_router)
+    app.include_router(history_router)
     app.include_router(health_router)
     register_static_routes(app, web_dist_dir or settings.web_dist_dir)
     return app

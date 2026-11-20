@@ -19,6 +19,8 @@ class Settings(BaseSettings):
     - DATABASE_URL：SQLAlchemy async DSN，驱动固定为 asyncpg。
     - HEALTH_DB_TIMEOUT_SECONDS：`/health` 探测的整体超时上限，需保证 5 秒内返回 503。
     - WEB_DIST_DIR：前端构建产物目录，同时被静态托管与回退路由使用。
+    - SESSION_TTL_SECONDS：服务端会话绝对有效期上限，默认 7 天。
+    - SESSION_COOKIE_SECURE：是否为会话 Cookie 添加 `Secure`（本地 HTTP 默认关闭）。
     """
 
     model_config = SettingsConfigDict(case_sensitive=False, extra="ignore")
@@ -26,6 +28,8 @@ class Settings(BaseSettings):
     database_url: str = DEFAULT_DATABASE_URL
     health_db_timeout_seconds: float = 4.0
     web_dist_dir: Path = PROJECT_ROOT / "web" / "dist"
+    session_ttl_seconds: int = 7 * 24 * 60 * 60
+    session_cookie_secure: bool = False
 
 
 settings = Settings()
