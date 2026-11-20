@@ -1,0 +1,101 @@
+:root {
+  color-scheme: light dark;
+  font-family:
+    system-ui,
+    -apple-system,
+    'Segoe UI',
+    'Noto Sans SC',
+    sans-serif;
+  line-height: 1.6;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  background: #0f172a;
+  color: #e2e8f0;
+}
+
+.app {
+  max-width: 46rem;
+  margin: 0 auto;
+  padding: 4rem 1.5rem;
+}
+
+.hero h1 {
+  margin: 0;
+  font-size: clamp(2.5rem, 6vw, 4rem);
+  letter-spacing: 0.02em;
+}
+
+.tagline {
+  margin: 0.5rem 0 0;
+  color: #94a3b8;
+  font-size: 1.125rem;
+}
+
+.status {
+  margin-top: 3rem;
+  padding: 1.5rem;
+  border: 1px solid #1e293b;
+  border-radius: 0.75rem;
+  background: #111c33;
+}
+
+.status h2 {
+  margin: 0 0 0.75rem;
+  font-size: 1rem;
+  color: #94a3b8;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.status-line {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.75rem;
+  margin: 0;
+}
+
+.badge {
+  padding: 0.15rem 0.6rem;
+  border-radius: 999px;
+  font-weight: 600;
+  background: #334155;
+  color: #e2e8f0;
+}
+
+.badge[data-state='ok'] {
+  background: #14532d;
+  color: #bbf7d0;
+}
+
+.badge[data-state='degraded'] {
+  background: #78350f;
+  color: #fde68a;
+}
+
+.badge[data-state='unreachable'] {
+  background: #7f1d1d;
+  color: #fecaca;
+}
+
+.detail {
+  color: #cbd5e1;
+}
+
+button {
+  margin-top: 1rem;
+  padding: 0.5rem 1rem;
+  border: 1px solid #334155;
+  border-radius: 0.5rem;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+button:hover {
+  border-color: #64748b;
+}
