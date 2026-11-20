@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref } from 'vue'
-import { useRoute, useRouter } from 'vue-router'
+import { RouterLink, useRoute, useRouter } from 'vue-router'
 import { api, ApiError, type User } from '../api'
 import { markLoggedIn } from '../session'
 
@@ -13,7 +13,11 @@ const submitting = ref(false)
 
 function nextPath(): string {
   const next = route.query.next
-  return typeof next === 'string' && next.startsWith('/') ? next : '/'
+  return typeof next === 'string' &&
+    next.startsWith('/') &&
+    !next.startsWith('//')
+    ? next
+    : '/projects'
 }
 
 async function submit(): Promise<void> {
@@ -70,5 +74,8 @@ async function submit(): Promise<void> {
         {{ submitting ? '登录中…' : '登录' }}
       </button>
     </form>
+    <p class="muted auth-back">
+      <RouterLink to="/">返回公开控制台</RouterLink>
+    </p>
   </section>
 </template>

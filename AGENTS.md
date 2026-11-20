@@ -45,6 +45,7 @@ make user EMAIL=a@example.com  # 从标准输入读取密码，创建/更新账�
 
 - 不要绕开 `make up`/`make down` 手工拼装 `docker compose` 命令作为交付路径。
 - 单元测试：`.venv/bin/python -m unittest discover -s tests`（Python 3.11 虚拟环境）。
+- 前端回归：`cd web && npm test`（阶段链接查询参数）与 `npm run typecheck`、`npm run build`。
 
 ## 同域、回环与健康语义
 
@@ -56,6 +57,17 @@ make user EMAIL=a@example.com  # 从标准输入读取密码，创建/更新账�
 - 健康检查不得回显 DSN、凭据、堆栈或内部主机名；日志只记录异常类型。
 - 每次 `/health` 请求必须确定请求 ID：合法 `X-Request-ID`（1–64 位字母、数字、`.`、`_`、`:`、`-`）复用，缺失或非法时生成随机值；响应头回显该 ID，探测失败日志记录 `request_id`，响应体契约保持不变。
 - 探测路径只读：除 `SELECT 1` 外不得执行任何写操作或修改状态。
+
+## 控制台与工作台地址
+
+- `/` 是公开中文控制台；`/projects` 是私有“我的项目”列表与登录默认落点；`/projects/:id` 是私有项目详情；`/projects/:id/workbench/:stage` 是私有工作台阶段。不得把 `/` 重新用作项目列表或强制登录入口。
+- 五个阶段 slug 固定为 `evidence-graph`、`roles-environment`、`dual-platform-run`、`report`、`interaction`；控制台、工作台导航与空态链接必须从同一阶段注册表派生，不得各自硬编码顺序。
+- 私有工作台访问顺序固定为“身份 → 项目归属 → 阶段合法性”：匿名先跳登录并保留完整 `next`；他人项目、不存在项目与非法项目 ID 统一“项目不存在”；只有所有者才看到“阶段不存在”。
+- 阶段导航、缺少前置条件时的上一阶段链接、无阶段重定向与非法阶段页的有效阶段入口必须显式携带当前 `layout` 与 `lang`；布局/语言切换使用 `replace` 保留阶段，阶段导航与返回控制台使用 `push`。
+- 控制台系统状态只依据 `/health`；账户状态只依据会话查询；项目列表失败不得改写健康状态。只有会话明确 401 才按访客处理，会话 503 必须显示“暂时无法确认”、保留 Cookie 并提供重试。
+- 工作台外壳就绪与阶段业务结果分开：项目 200 后项目名、阶段高亮、工具条与布局可操作，阶段内容可为“还没有材料/缺少前置条件”；产品页面只展示真实 API 数据，测试夹具不得进入产品。
+- `make verify` 中的 `EchoSim` HTML 200 只证明 SPA 入口可达；布局、语言、截图与浏览器后退必须由人工走查记录，不能写成自动化通过结论。
+- 人工验收记录只在浏览器签收后写入 `docs/acceptance/`；签收前只准备截图与待签收清单，不归档、不合并。
 
 ## 身份、会话与项目隔离
 
@@ -81,6 +93,7 @@ make user EMAIL=a@example.com  # 从标准输入读取密码，创建/更新账�
 
 - 验收结论必须绑定被测 Git SHA；`runtime/verify/last-run.json` 的 `tested_sha` 必须等于执行时的 `HEAD`。
 - `make verify` 必须保留 Change 01 的故障恢复与进程身份场景，并包含 A/B 双账号隔离路径：登录、创建、列表、详情、停库鉴权边界、退出失效、他人不可见、重新登录仍可见；准备账号与命名项目必须幂等，连续两次执行都要通过。
+- `make verify` 还必须验证 `/`、`/projects` 与五条工作台阶段深链接返回 `EchoSim` HTML，并断言 `/api/*` 未被 SPA 回退吞掉；阶段链接的 `layout`/`lang` 保留由 `cd web && npm test` 覆盖。
 - 工作树存在未忽略改动时 `make verify` 默认拒绝执行；仅在本地调试时可用 `ALLOW_DIRTY=1`，此时报告记录 `dirty: true`，**不得**作为干净克隆证据。
 - CI 必须调用与本地相同的 `make verify`，并断言报告 `tested_sha` 等于触发 SHA；不得在 CI 中重复实现验收逻辑。
 - CI 成功与失败运行都必须上传报告，产物缺失即视为配置错误；使用 `gh workflow run verify -f expected_sha=<错误 SHA>` 执行受控失败演练，验证失败路径与失败报告。

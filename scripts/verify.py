@@ -458,6 +458,49 @@ def scenario_login_and_create(
     entry["detail"] = f"A 登录并创建项目 {project['id']}，列表与详情均可见"
 
 
+WORKBENCH_STAGES = (
+    "evidence-graph",
+    "roles-environment",
+    "dual-platform-run",
+    "report",
+    "interaction",
+)
+
+
+def scenario_shell_routes(entry: dict[str, Any], state: dict[str, Any]) -> None:
+    """只证明 SPA 入口可达，不宣称验证布局、语言或浏览器历史。"""
+    project_id = state["project_id"]
+    paths = ["/", "/projects"]
+    paths.extend(
+        f"/projects/{project_id}/workbench/{stage}" for stage in WORKBENCH_STAGES
+    )
+
+    for path in paths:
+        status, body = http_status(path)
+        require(status == 200, f"{path} 期望 200，实际 {status}")
+        require(HOMEPAGE_MARKER in body, f"{path} 返回的 HTML 未包含 EchoSim")
+        require(
+            "<!doctype html" in body.lower(),
+            f"{path} 未返回前端入口 HTML",
+        )
+
+    status, headers, body = raw_request("GET", "/api/projects")
+    require(status == 401, f"/api/projects 匿名期望 401，实际 {status}")
+    require(
+        headers.get("content-type", "").startswith("application/json"),
+        "/api/projects 被 SPA 回退吞成非 JSON 响应",
+    )
+    require(
+        json.loads(body) == {"detail": "未登录"},
+        "/api/projects 匿名响应体不符合既有契约",
+    )
+
+    entry["detail"] = (
+        "控制台 /、项目列表 /projects 与五条工作台阶段深链接均返回 EchoSim HTML；"
+        "/api/projects 仍为 JSON 401（仅证明 SPA 入口可达）"
+    )
+
+
 def scenario_session_cookie_replay(
     entry: dict[str, Any], state: dict[str, Any]
 ) -> None:
@@ -626,6 +669,8 @@ def run_acceptance(report: dict[str, Any]) -> bool:
             scenario_prepare_accounts(entry, state, report)
         with scenario(report, "login-and-create-project") as entry:
             scenario_login_and_create(entry, state, report)
+        with scenario(report, "shell-routes") as entry:
+            scenario_shell_routes(entry, state)
         with scenario(report, "session-cookie-replay") as entry:
             scenario_session_cookie_replay(entry, state)
         with scenario(report, "database-stop-degrades") as entry:

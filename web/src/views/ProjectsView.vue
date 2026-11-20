@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
-import { useRouter } from 'vue-router'
+import { nextTick, onMounted, ref } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import {
   api,
   ApiError,
@@ -9,6 +9,7 @@ import {
 } from '../api'
 import { markLoggedOut } from '../session'
 
+const route = useRoute()
 const router = useRouter()
 const projects = ref<Project[]>([])
 const loading = ref(true)
@@ -17,11 +18,16 @@ const name = ref('')
 const description = ref('')
 const creating = ref(false)
 const createError = ref('')
+const nameInput = ref<HTMLInputElement | null>(null)
+const createSection = ref<HTMLElement | null>(null)
 
 async function handle(caught: unknown): Promise<void> {
   if (caught instanceof ApiError && caught.status === 401) {
     markLoggedOut()
-    await router.replace({ name: 'login', query: { next: '/' } })
+    await router.replace({
+      name: 'login',
+      query: { next: route.fullPath },
+    })
     return
   }
   error.value = describeError(caught)
@@ -38,6 +44,15 @@ async function load(): Promise<void> {
   } finally {
     loading.value = false
   }
+}
+
+async function focusCreateIfRequested(): Promise<void> {
+  if (route.query.intent !== 'create') {
+    return
+  }
+  await nextTick()
+  createSection.value?.scrollIntoView({ block: 'center' })
+  nameInput.value?.focus()
 }
 
 async function create(): Promise<void> {
@@ -66,16 +81,23 @@ async function create(): Promise<void> {
   }
 }
 
-onMounted(() => {
-  void load()
+onMounted(async () => {
+  await load()
+  await focusCreateIfRequested()
 })
 </script>
 
 <template>
   <section class="card">
-    <h2>我的项目</h2>
-    <p v-if="error" class="error" role="alert">{{ error }}</p>
-    <p v-else-if="loading" class="muted">正在加载项目…</p>
+    <div class="card-heading">
+      <h2>我的项目</h2>
+      <RouterLink class="quiet-link" to="/">返回控制台</RouterLink>
+    </div>
+    <p v-if="loading" class="muted">正在加载项目…</p>
+    <template v-else-if="error">
+      <p class="error" role="alert">{{ error }}</p>
+      <button type="button" class="ghost" @click="load">重试</button>
+    </template>
     <p v-else-if="projects.length === 0" class="muted">
       还没有项目，先在下方创建一个。
     </p>
@@ -94,12 +116,13 @@ onMounted(() => {
     </ul>
   </section>
 
-  <section class="card">
+  <section ref="createSection" class="card">
     <h2>新建项目</h2>
     <form class="form" @submit.prevent="create">
       <label for="project-name">项目名称</label>
       <input
         id="project-name"
+        ref="nameInput"
         v-model="name"
         name="name"
         maxlength="80"
