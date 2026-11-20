@@ -12,7 +12,7 @@
 
 **Goals:**
 
-- 用一张会话表 + 不透明 Cookie 令牌提供可撤销、可持久、可跨进程重启的登录态。
+- 用一张会话表 + 不透明 Cookie 令牌提供可撤销、可跨进程重启的登录态，浏览器生命周期由会话 Cookie 语义决定。
 - 用单一服务层入口统一项目归属校验，并让“他人项目”和“不存在项目”在 HTTP 层不可区分。
 - 用最小自研 SQL 迁移器引入数据库结构与幂等升级路径，不引入重量级迁移框架。
 - 让新增用户路径可被 `make verify` 以真实 HTTP 回放，并继续绑定 SHA。
@@ -35,18 +35,26 @@
 - 备选：JWT（无状态、免查询）——放弃，因为无法“退出即失效”，且需要密钥配置。
 - 备选：Starlette `SessionMiddleware`（签名 Cookie 存状态）——放弃，因为会话内容在客户端，退出无法真正撤销。
 
-### 2. Cookie 属性与生命周期：持久 Cookie、绝对 7 天
+### 2. Cookie 属性与生命周期：浏览器会话 Cookie + 服务端 7 天上限
 
-Cookie 名 `echosim_session`，属性 `HttpOnly; SameSite=Lax; Path=/; Max-Age=<SESSION_TTL_SECONDS>`；本地 HTTP 下不设 `Secure`，由 `SESSION_COOKIE_SECURE` 显式开启。会话有效期从登录时刻起算，绝对 7 天，不做滑动续期。
+Cookie 名 `echosim_session`，属性 `HttpOnly; SameSite=Lax; Path=/`；**不设置 `Max-Age` 与 `Expires`**，因此它是浏览器会话 Cookie。本地 HTTP 下不设 `Secure`，由 `SESSION_COOKIE_SECURE` 显式开启。服务端会话的有效期从登录时刻起算，绝对上限 7 天（`SESSION_TTL_SECONDS`），不做滑动续期。
 
-**关闭并重开浏览器后的行为（显式约定）：**
+**三个动作的确定行为：**
 
-- 普通窗口：持久 Cookie 在 `Max-Age` 内由浏览器磁盘保存，重开浏览器后仍自动携带，用户保持登录；直到 7 天到期、主动退出或服务端删除会话。
-- 无痕/隐私窗口，或用户清除站点数据：浏览器关闭即丢弃 Cookie；重开后无 Cookie，私有接口返回 401，前端跳转登录页。服务端会话记录仍在，直到自然过期，不会因此产生新的访问能力。
+| 动作 | 浏览器是否带 Cookie | 预期结果 |
+| --- | --- | --- |
+| 刷新页面 | 带 | 会话查询 200，仍登录，无需重新输入凭据 |
+| 点击退出 | 响应清除 | 服务端删除会话；旧 Cookie 复放任意私有接口均 401 |
+| 完全退出并重开浏览器 | 不带（会话 Cookie 已被丢弃） | 私有页面 401 并跳转登录页，必须重新登录 |
+
+其他约定：
+
+- 浏览器“恢复上次会话”功能可能保留会话 Cookie；此时服务端仍以 `expires_at` 拒绝超过 7 天的会话。
+- 无痕/隐私窗口行为与普通窗口一致：关闭即丢弃 Cookie，重开需重新登录。
 - 同一浏览器再次登录会新建会话并删除本次请求携带的旧会话，避免会话固定。
 
-- 理由：验收要求“刷新后仍能看到”并需要可重复验证；持久 Cookie 让“关闭重开”有确定、可说明的行为。
-- 备选：会话 Cookie（关闭浏览器即失效）——放弃，行为对用户更差且与“重开仍可见”的验收叙事冲突。
+- 理由：会话 Cookie 让“关闭浏览器即退出”成为浏览器原生行为，减少服务端会话被长期持有；刷新与后端重启仍依赖服务端记录与同一 Cookie，可被自动化验收覆盖。
+- 备选：持久 Cookie（`Max-Age` 7 天）——放弃，关闭浏览器后仍保持登录，与本次确认的会话恢复语义不符。
 
 ### 3. 密码哈希使用标准库 scrypt
 
@@ -99,9 +107,18 @@ UUID 由数据库 `gen_random_uuid()` 生成（PostgreSQL 16 内置）。过期�
 - 后续材料、运行、报告服务必须调用该入口（或其扩展 `resolve_owned_child(parent_project, ...)`），不得自行拼 `owner_id` 条件；代码评审与测试以此为准。
 - 审计：服务端日志记录 `request_id`、`actor_id`、`project_id` 与失败原因（`not_found` / `not_owner`），但对外响应完全一致，便于排障又不泄露存在性。
 
-### 8. 鉴权依赖与错误映射
+### 8. 鉴权依赖与错误映射（含数据库停机优先级）
 
-`app/services/sessions.py` 提供 `load_session(token)`：令牌缺失/格式非法/查无记录/已过期 → `Unauthenticated`；数据库异常 → `ServiceUnavailable`。路由依赖统一捕获并映射为 401/503；401 响应附带 `Set-Cookie` 清除失效 Cookie。数据库异常只记录异常类型与 `request_id`，不记录 DSN。
+`app/services/sessions.py` 提供 `load_session(token)`：令牌格式非法/查无记录/已过期 → `Unauthenticated`；查询过程中的数据库异常 → `ServiceUnavailable`。
+
+鉴权依赖严格按以下顺序执行，顺序本身就是对外契约：
+
+1. 读取会话 Cookie。**缺失 → 立即 401，不打开数据库连接**，因此数据库停机时匿名请求仍是 401。
+2. 有 Cookie，但格式非法/查无记录/已过期 → 401，并 `Set-Cookie` 清除失效 Cookie。
+3. 有 Cookie，会话查询因数据库不可达失败 → 503 `{"detail":"服务暂时不可用"}`，**不下发清除 Cookie 的 `Set-Cookie`**，让恢复后同一 Cookie 继续可用。
+4. 查询成功且未过期 → 通过鉴权，进入业务逻辑。
+
+数据库异常只记录异常类型与 `request_id`，不记录 DSN；503 由路由层的统一异常处理生成，避免每个接口重复判断。登录本身必须访问数据库，因此登录在停库时直接 503 且不下发 Cookie。
 
 ### 9. 会话型写请求的来源校验
 
@@ -127,13 +144,14 @@ UUID 由数据库 `gen_random_uuid()` 生成（PostgreSQL 16 内置）。过期�
 
 ### 12. 验收脚本扩展
 
-`scripts/verify.py` 保持标准库实现，新增 `CookieJar` + `urllib` 的会话客户端：
+`scripts/verify.py` 保持标准库实现，新增 `CookieJar` + `urllib` 的会话客户端，并保留 Change 01 的故障恢复与 SHA 断言：
 
 1. 通过 `docker compose exec -T app python -m app.manage create-user ... --update-password` 幂等准备 `accept-a@echosim.local`、`accept-b@echosim.local`。
-2. 场景：A 登录 → 创建唯一命名项目 → 列表包含 → 详情 200 → 仅携带 Cookie 的新客户端仍 200（模拟重开浏览器）→ 退出 → 旧 Cookie 复放 401。
-3. 场景：B 登录 → 列表与历史均不含 A 项目名 → B 请求 A 项目 ID 与随机 UUID，断言状态码与响应体一致。
-4. 场景：A 重新登录 → 详情 200 且名称一致。
-5. 数据库降级场景复用既有停库流程，额外断言登录与项目接口在停库时返回 503 且不挂起。
+2. 停库前：A 登录 → 创建唯一命名项目 → 列表包含 → 详情 200。
+3. 停库期间：无 Cookie 请求项目列表得到 401（且不等数据库）；携带 A 的 Cookie 请求列表在 5 秒内得到 503，且响应没有清除 Cookie 的 `Set-Cookie`。
+4. 恢复后：同一 Cookie 请求列表与详情均为 200；随后 A 退出，旧 Cookie 复放私有接口 401；A 重新登录后详情仍 200。
+5. B 登录 → 列表与历史均不含 A 项目名 → B 请求 A 项目 ID 与随机 UUID，断言状态码与响应体一致。
+6. **服务端会话测试**：把 A 登录响应的 Cookie 显式注入一个全新 HTTP 客户端，断言会话查询与详情 200，证明会话不依赖客户端内存。**该测试不声称验证浏览器重开**；关闭重开浏览器由 README 的人工走查步骤覆盖并写入 `docs/acceptance/`。
 
 每个步骤写入 `scenarios[]`，`tested_sha`/`dirty` 逻辑不变；账号名带固定域后缀，项目名带时间戳/随机后缀以避免重复执行冲突。
 
@@ -145,7 +163,7 @@ UUID 由数据库 `gen_random_uuid()` 生成（PostgreSQL 16 内置）。过期�
 
 ## Risks / Trade-offs
 
-- [持久 Cookie 在共享电脑上延长暴露窗口] → 7 天绝对有效期、退出即撤销、README 明确说明；无痕窗口行为写清。
+- [浏览器会话恢复或共享电脑使 Cookie 存续时间超出预期] → 会话 Cookie 不设 `Max-Age`/`Expires`，服务端仍以 7 天绝对上限拒绝；退出即服务端撤销，README 说明无痕窗口与“恢复上次会话”的差异。
 - [本地 HTTP 不设 `Secure`，Cookie 可被同网段嗅探] → 服务仅绑定 `127.0.0.1`；配置项 `SESSION_COOKIE_SECURE` 为将来 HTTPS 预留，README 标注差异。
 - [SQL 迁移器无 down 与自动生成，schema 演进需手写] → 迁移文件必须可重复执行且带事务；本地回滚以 `make reset` 为准，并在 README 说明。
 - [自研 scrypt 参数固定，未来需要算法升级] → 哈希格式自带参数前缀，可在登录成功时透明重哈希；参数写入设计文档。
