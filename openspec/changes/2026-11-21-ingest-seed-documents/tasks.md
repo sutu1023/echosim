@@ -67,7 +67,7 @@
 
 ## 9. 集成验收与人工签收准备
 
-- [x] 9.1 提交后确认 `git status --porcelain` 为空，在干净提交上带 `EXPECTED_SHA=$(git rev-parse HEAD)` 连续两次执行 `make verify` 与两次 `make verify CHANGE=2026-11-21-ingest-seed-documents`，四次退出码为 0、`tested_sha` 均等于该 SHA、`dirty=false`；核对两份变更报告的场景数、`document_evidence` 与两次运行一致，并列出四份报告路径（本机：run-20261121T090937Z.json、run-20261121T091004Z.json、run-20261121T091108Z.json、run-20261121T091209Z.json，均 tested_sha=25115ce、dirty=false）
+- [x] 9.1 提交后确认 `git status --porcelain` 为空，在干净提交上带 `EXPECTED_SHA=$(git rev-parse HEAD)` 连续两次执行 `make verify` 与两次 `make verify CHANGE=2026-11-21-ingest-seed-documents`，四次退出码为 0、`tested_sha` 均等于该 SHA、`dirty=false`；核对两份变更报告的场景数、`document_evidence` 与两次运行一致，并列出四份报告路径（修复页面上传与页数文案后重跑：run-20261121T111701Z.json、run-20261121T111736Z.json、run-20261121T111803Z.json、run-20261121T111907Z.json，均 tested_sha=ca5e983、dirty=false）
 - [x] 9.2 运行 `cd web && npm test && npm run typecheck && npm run build` 与 `.venv/bin/python -m unittest discover -s tests`，确认全部通过且 `stage-links`、`job-log`、`job-panel-state` 等既有回归未被削弱
 - [x] 9.3 准备待人工验收清单（不写入 `docs/acceptance/`）：三页 PDF 在浏览器中总页数为 3、第 1 与第 3 页摘录跳回原件的实际页码；材料深链接的四项浏览器检查（所有者刷新/粘贴回同一材料、匿名登录后回原地址、B 打开时提示项目不存在、`layout`/`lang` 保留）；25 页私有样本的总页数与第 1/3 页落页；截图位置与同 SHA 报告路径；清单标注“未签收前不归档”
 - [ ] 9.4 由项目作者在自己的 Mac 浏览器上传 25 页私有样本并核对总页数与第 1、3 页跳转；样本只放在仓库外或已忽略的 `private-inputs/`，确认它与其正文没有出现在 `git status`、`runtime/`、报告中或任何提交里，验收结论只写入 `docs/acceptance/`
