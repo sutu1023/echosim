@@ -6,10 +6,10 @@ Change 03 交付的工作台外壳没有任何执行能力：所有请求都在 
 
 ## What Changes
 
-- 新增 `0002` 前向迁移：`jobs`（队列与控制记录）、`runs`（执行记录，与 job 1:1）、`run_events`（业务事件，主键 `(run_id, seq)`）、`job_steps`（每步提交的测试副作用，主键 `(run_id, step_index)`）。
+- 新增 `0002` 前向迁移：`jobs`（队列与控制记录）、`runs`（执行记录，与 job 1:1，持久化 `fail_at_step` 等创建参数）、`run_events`（业务事件，主键 `(run_id, seq)`）、`run_steps`（每步提交的测试副作用，主键 `(run_id, step_index)`）。
 - 新增独立 Compose `worker` 服务（同镜像、无对外端口、`python -m app.worker`），只从数据库领取任务，`app` 不再承担长任务执行。
 - 新增项目内任务接口：开始（HTTP 202 + `jobId`/`runId`）、列表、状态查询、取消、事件订阅（同域 SSE）、事件历史补发（JSON）、测试副作用计数。全部复用 `resolve_owned_project` 完成项目归属校验。
-- 定义任务状态机 `queued → running → succeeded | failed | canceled`，并覆盖“重复开始只产生一个有效任务”“取消与完成同时发生时以先提交的终态为准”“租约过期后由其他 worker 接手”。
+- 定义任务状态机 `queued → running → succeeded | failed | canceled`，并覆盖“重复开始只产生一个有效任务与一个 run”“取消与完成同时发生时以先提交的终态为准”“租约过期后由其他 worker 凭新租约令牌原子接手，旧令牌续租与写入被数据库拒绝”。
 - 定义统一事件字段 `runId`、`seq`、`type`、`stage`、`simulatedAt`、`payload`；`seq` 在同一 run 内从 1 递增；事件先落库再推送，SSE 以 `id: <runId>:<seq>` 作为重连游标，支持 `Last-Event-ID` 与 `after` 两种游标来源。
 - 在工作台加入“测试任务”面板（开始 / 取消 / 状态 / 日志 / 副作用计数），明确标注为连通性自检而非推演结果；区分 SSE 连接中断、worker 中断、任务失败、任务取消四种提示与恢复方式，且不改变当前项目、阶段、布局与语言。
 - `make verify` 增加 `CHANGE` 选择器：默认仍跑 Change 01–03 全部回归并新增任务底座基础场景；`make verify CHANGE=2026-11-21-track-background-jobs` 额外跑真实断线续传、worker 中断恢复、并发重复开始、受控失败与取消，并在报告记录 `jobId`、`runId` 与实际序号。

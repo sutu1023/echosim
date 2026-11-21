@@ -78,7 +78,13 @@ data: {"runId":"…","seq":4,"type":"progress","stage":"…","simulatedAt":"…"
 
 ### Requirement: 重连游标解析与非法游标
 
-订阅端 SHALL 按以下优先级确定补发起点：`Last-Event-ID` 请求头（合法时）优先于 `after` 查询参数，两者都缺失时从 `seq=1` 开始。合法游标 MUST 使服务端只补发 `seq` 大于游标的已提交事件，且不重复发送游标本身。非法游标 MUST 返回 400 与 JSON 错误体，不得建立事件流。
+游标 MUST 统一指“客户端已完整处理的最后一个连续 `seq`”。无游标时 MUST 视为 0 并从 `seq > 0` 开始补发。合法范围 MUST 为 `0 <= 游标 <= 当前最大 seq`：当前最大序号为 4 时，`after=4` 有效并等待第 5 条；`after=5` MUST 返回 400。`Last-Event-ID` 合法时 MUST 优先于 `after`，非法、格式错误、属于其他 run 或超出当前最大序号的值 MUST 返回 400 JSON。鉴权、项目归属与任务归属 MUST 先于游标校验。
+
+#### Scenario: 无游标从头补发
+
+- **WHEN** 客户端不携带 `Last-Event-ID` 也不携带 `after` 订阅一个已有 4 条事件的 run
+- **THEN** 服务端从 1 开始发送 1–4 的业务事件
+- **AND** 不重复发送任何 `seq`
 
 #### Scenario: 用 after=4 重连
 
@@ -86,17 +92,29 @@ data: {"runId":"…","seq":4,"type":"progress","stage":"…","simulatedAt":"…"
 - **THEN** 服务端只发送 `seq` 5–10 的业务事件，不重发 1–4
 - **AND** 客户端最终持有的序号集合为 1–10，每条一次
 
+#### Scenario: 游标等于当前最大序号时继续等待
+
+- **WHEN** 当前最大序号为 4，客户端以 `after=4` 订阅且 run 尚未终态
+- **THEN** 服务端不报错，先不补发任何事件并保持连接
+- **AND** 第 5 条事件提交后被推送给该连接
+
+#### Scenario: 超出当前最大序号的游标被拒绝
+
+- **WHEN** 当前最大序号为 4，客户端以 `after=5` 订阅
+- **THEN** 返回 400 与 JSON 错误体
+- **AND** 不建立 `text/event-stream`，也不返回任何事件帧
+
 #### Scenario: Last-Event-ID 优先于 after
 
 - **WHEN** 请求同时带有 `Last-Event-ID: <runId>:7` 与 `after=3`
 - **THEN** 服务端以 7 为游标，只补发 `seq` 大于 7 的事件
 - **AND** 不因查询参数回退到 3 而重复发送 4–7
 
-#### Scenario: 非法游标被拒绝
+#### Scenario: 非法游标被拒绝但归属优先
 
-- **WHEN** 客户端以非数字、负数、大于当前最大序号加一或属于其他 run 的 `Last-Event-ID`/`after` 订阅
-- **THEN** 返回 400 与 JSON 错误体
-- **AND** 响应不包含任何 `text/event-stream` 内容或事件数据
+- **WHEN** 用户 B 以非法游标订阅 A 的任务，而匿名客户端以非法游标订阅任一任务
+- **THEN** B 收到 404 `{"detail":"项目不存在"}`，匿名客户端收到 401，均不是 400
+- **AND** 同一非法游标由项目所有者使用时才返回 400
 
 ### Requirement: 历史补发与实时推送无缝衔接
 
@@ -116,13 +134,13 @@ data: {"runId":"…","seq":4,"type":"progress","stage":"…","simulatedAt":"…"
 
 ### Requirement: 前端按 runId 与 seq 去重
 
-前端 SHALL 使用同一套日志处理逻辑处理历史补发与实时推送：以 `(runId, seq)` 为唯一键，重复键 MUST 被丢弃，来自其他 `runId` 的事件 MUST 被忽略，渲染顺序 MUST 按 `seq` 升序。检测到序号缺口时 MUST 以非错误方式提示存在缺口并可触发重新补发，不得静默拼接成看似完整的日志。
+前端 SHALL 使用同一套日志处理逻辑处理历史补发与实时推送：以 `(runId, seq)` 为唯一键，重复键 MUST 被丢弃，来自其他 `runId` 的事件 MUST 被忽略。前端 MUST 维护“已完整处理的最后一个连续 `seq`”（从 1 开始，缺号即停）作为重连与重新同步的游标，而不是已收到的最大 `seq`；渲染顺序 MUST 按连续段升序。
 
 #### Scenario: 补发与实时重叠不重复显示
 
 - **WHEN** 前端先通过补发得到 1–4，随后实时帧又收到 3、4、5
 - **THEN** 日志中 3 与 4 各只显示一次，5 正常追加
-- **AND** 渲染顺序为 1、2、3、4、5
+- **AND** 渲染顺序为 1、2、3、4、5，游标推进到 5
 
 #### Scenario: 切换任务不混入旧 run
 
@@ -130,21 +148,22 @@ data: {"runId":"…","seq":4,"type":"progress","stage":"…","simulatedAt":"…"
 - **THEN** 日志只显示 Y 的 `runId` 事件
 - **AND** 迟到的 X 事件被忽略，不追加到 Y 的日志
 
-#### Scenario: 序号缺口可见
+#### Scenario: 缺口时以连续游标而非最大序号重连
 
-- **WHEN** 前端已显示到 `seq=4` 而下一个到达的是 `seq=6`
-- **THEN** 页面提示“检测到事件缺口”并提供重新同步
-- **AND** 不把 6 直接当作连续的第 5 条展示
+- **WHEN** 前端已有 1–4 而下一个到达的是 `seq=6`
+- **THEN** 游标仍为 4，补发起点仍为 `after=4`，6 暂存为待补齐
+- **AND** 收到 5 后形成连续日志 1–6，缺口提示消失
+- **AND** 若长时间未补齐，页面提示“检测到事件缺口”并提供重新同步
 
 ### Requirement: 终态后的订阅行为
 
 当 run 已处于终态时再次订阅，服务端 MUST 先补发游标之后的剩余事件（可能为空），随后立即发送 `stream-end` 并关闭连接，MUST NOT 保持长连接或发送心跳。客户端 MUST 在收到 `stream-end` 后关闭自身订阅，不再自动重连。
 
-#### Scenario: 重连到已终态任务
+#### Scenario: 终态后以最大序号重连立即结束
 
-- **WHEN** 客户端在任务 `succeeded` 之后以 `after=10` 订阅
-- **THEN** 服务端不补发业务事件，直接发送 `stream-end` 并关闭
-- **AND** 客户端不进入重连循环，页面显示该任务已结束
+- **WHEN** 客户端在任务 `succeeded` 之后以 `after=10`（等于当前最大序号）订阅
+- **THEN** 服务端不补发业务事件，立即发送 `stream-end` 并关闭
+- **AND** 连接不挂起等待第 11 条，客户端不进入重连循环
 
 #### Scenario: 断线期间任务已进入终态
 

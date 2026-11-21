@@ -57,7 +57,7 @@
 
 ### Requirement: jobId、runId 与项目的标识关系
 
-一个项目 SHALL 拥有多个任务，一个任务 MUST 对应唯一一个 run（1:1），一个 run MUST 拥有唯一的事件序号空间与步骤副作用记录。开始响应 MUST 同时返回 `jobId` 与 `runId`：`jobId` 代表队列与控制身份，`runId` 代表执行与事件身份。worker 接手 MUST 复用原 `runId`，使 `seq` 在同一 run 内继续递增；任务进入终态后再次开始 MUST 产生新的 `jobId` 与新的 `runId`，新 run 的 `seq` 从 1 重新开始。
+一个项目 SHALL 拥有多个任务，一个任务 MUST 对应唯一一个 run（1:1），一个 run MUST 拥有唯一的事件序号空间与步骤副作用记录。开始响应 MUST 同时返回 `jobId` 与 `runId`：`jobId` 代表队列与控制身份，`runId` 代表执行与事件身份。run MUST 持久化创建参数（总步数、阶段与受控失败步骤），使任何 worker 重新领取后仍读到同一组参数。worker 接手 MUST 复用原 `runId`，使 `seq` 在同一 run 内继续递增；任务进入终态后再次开始 MUST 产生新的 `jobId` 与新的 `runId`，新 run 的 `seq` 从 1 重新开始。
 
 #### Scenario: 标识关系可查询
 
@@ -79,7 +79,7 @@
 
 ### Requirement: 重复开始保护
 
-对同一项目、同一操作，当已存在 `queued` 或 `running` 的有效任务时，开始接口 MUST NOT 创建第二个有效任务，而 MUST 返回 200 与既有 `jobId`、`runId`，并标记为重复开始。该保护 MUST 在数据库层强制生效，使两个并发请求也只能产生一个有效任务；只有任务进入终态后才允许新的开始请求创建新任务。
+对同一项目、同一操作，当已存在 `queued` 或 `running` 的有效任务时，开始接口 MUST NOT 创建第二个有效任务，而 MUST 返回 200 与既有 `jobId`、`runId`，并标记为重复开始。两个并发请求 MUST 得到一个 202 与一个 200，并指向同一对 `jobId`/`runId`；持久化结果 MUST 只新增一个 job 行与一个 run 行，冲突分支 MUST NOT 留下孤立 run。只有任务进入终态后才允许新的开始请求创建新任务。
 
 #### Scenario: 快速双击同一操作
 
@@ -90,8 +90,8 @@
 #### Scenario: 两个并发请求只产生一个任务
 
 - **WHEN** 两个开始请求在同一项目上并发到达
-- **THEN** 两次响应都成功，但指向同一个 `jobId`，仅其中一个标记为新建
-- **AND** 持久化记录中该项目的有效任务恰好为 1 个，不存在第二个 `queued` 任务
+- **THEN** 恰好一个返回 202、一个返回 200，但指向同一对 `jobId`/`runId`
+- **AND** 持久化记录中该项目的有效任务恰好为 1 个，且 `jobs` 与 `runs` 各只新增 1 行，不存在孤立 run
 
 #### Scenario: 终态后允许重新开始
 
@@ -101,7 +101,7 @@
 
 ### Requirement: 领取、租约续期与过期接手
 
-worker SHALL 通过一次带行锁的原子更新领取任务，并同时写入租约持有者与租约到期时间；执行期间 MUST 周期性续期。未及时续期的 `running` 任务 MUST 在租约到期后被判定为“等待接手”，其状态 MUST 回到可领取状态且保留已提交步骤，由任一可用 worker 重新领取，`attempts` 计数 MUST 递增。
+worker SHALL 通过一次带行锁的原子更新领命任务，并同时写入租约持有者、本次领取的独立租约令牌与租约到期时间；执行期间 MUST 周期性续期。只有一个 worker 且它已停止时，系统 MUST NOT 依赖任何其他进程把数据库行改回 `queued`：持久状态可以保持为 `running`，查询 MUST 根据租约到期以数据库当前时间判定并返回 `awaitingTakeover=true`；任一可用 worker 的领取 MUST 原子接手“`queued` 或租约已过期的 `running`”，沿用 `jobId`、`runId` 并递增 `attempts`。
 
 #### Scenario: 租约在运行中持续续期
 
@@ -109,11 +109,12 @@ worker SHALL 通过一次带行锁的原子更新领取任务，并同时写入�
 - **THEN** 在其执行期间租约到期时间持续被推后，任务不会因超时被其他 worker 接管
 - **AND** `attempts` 保持为 1
 
-#### Scenario: worker 被杀后任务被接手
+#### Scenario: 唯一 worker 被杀后任务仍可被接手
 
-- **WHEN** 任务已提交至少 2 步、尚未进入终态时强制停止 worker
-- **THEN** 租约到期前任务仍为 `running`，到期后查询显示为等待接手状态
-- **AND** worker 恢复后由新的 `attempt` 领取，并跟踪到终态
+- **WHEN** 任务已提交至少 2 步、尚未进入终态时强制停止唯一的 worker
+- **THEN** 没有任何进程把该任务改回 `queued`，持久状态仍为 `running`
+- **AND** 租约到期后查询以数据库时间判定并返回 `awaitingTakeover=true`，同时保留 `jobId`、`runId` 与已提交步骤
+- **AND** worker 恢复后由新的 `attempt` 原子接手并跟踪到终态
 - **AND** 任务详情的 `attempts` 大于 1，可用于区分“从未开始”和“曾经中断”
 
 #### Scenario: 接手从中断处继续
@@ -122,17 +123,30 @@ worker SHALL 通过一次带行锁的原子更新领取任务，并同时写入�
 - **THEN** 接手 worker 从第 4 步开始执行
 - **AND** 第 1–3 步的副作用与事件不被重写、不重复追加
 
+#### Scenario: 两个同时存在的任务互不影响
+
+- **WHEN** 数据库中同时存在任务 A 与任务 B，A 的一次步骤事务提交成功
+- **THEN** A 的 `next_step`、事件与租约按预期推进
+- **AND** B 的 `next_step`、状态、`lease_token`、`lease_expires_at` 与 `attempts` 均保持原值
+
 ### Requirement: 步骤级幂等与旧 worker 不可重复提交
 
-每一步的业务写入 SHALL 在单个数据库事务内完成：先以租约持有者与未过期租约为条件锁住任务行，再以 `(runId, stepIndex)` 唯一约束写入步骤副作用，随后追加该步事件并推进已提交步骤号。若事务失败则全部回滚，使“已做过哪一步”始终可由数据库唯一判定。
+每一步的业务写入 SHALL 在单个数据库事务内完成：先以任务 ID 与本次领取的租约令牌为条件锁住任务行，用数据库当前时间判断租约未过期，再以 `(runId, stepIndex)` 唯一约束写入步骤副作用，随后追加该步事件并推进已提交步骤号。所有状态推进、续租、失败与完成写入 MUST 同时限定 `jobId` 与租约令牌，否则 MUST 不生效。若事务失败则全部回滚，使“已做过哪一步”始终可由数据库唯一判定。
 
-任何 worker 在手写事务前发现租约已不属于自己、或任务已进入终态时 MUST 立即停止且不写入任何数据；旧 worker 在中断后恢复也 MUST NOT 重复提交已由接手者完成的步骤。
+任何 worker 在手写事务前发现租约令牌已不属于自己、租约已过期或任务已进入终态时 MUST 立即停止且不写入任何数据；已过期的心跳 MUST NOT 续活旧租约；旧 worker 在中断后恢复也 MUST NOT 重复提交已由接手者完成的步骤。
 
 #### Scenario: 旧 worker 恢复后不能重复提交
 
-- **WHEN** worker 1 在第 3 步后失去租约，worker 2 已接手并提交到第 5 步，随后 worker 1 恢复并尝试继续
-- **THEN** worker 1 的步骤事务因租约条件不满足而失败，不写入副作用、不追加事件
-- **AND** 数据库中的副作用记录数、事件数与 `seq` 序列不因 worker 1 的恢复而变化
+- **WHEN** 第一次领取已将任务提交到第 3 步且租约到期，第二次领取已接手并提交到第 5 步，随后第一次领取的旧令牌尝试续租并写第 6 步
+- **THEN** 旧令牌的续租影响 0 行，第 6 步写入被拒绝且不产生副作用与事件
+- **AND** 任务的 `next_step`、事件序号集合与副作用计数均与接手前一致
+- **AND** 新持有者继续完成第 6–10 步，终态为成功
+
+#### Scenario: 过期心跳不能续活租约
+
+- **WHEN** 租约已过期后持有者才发出续租请求
+- **THEN** 续租语句因租约过期条件不满足而影响 0 行
+- **AND** 任务仍保持 `awaitingTakeover=true`，直到其它 worker 以新令牌接手
 
 #### Scenario: 同一步骤重复写入被忽略
 
@@ -164,14 +178,22 @@ worker SHALL 通过一次带行锁的原子更新领取任务，并同时写入�
 
 ### Requirement: 取消语义
 
-取消请求 SHALL 对 `queued` 任务立即生效并写终态；对 `running` 任务 MUST 在下一个步骤边界生效，已提交步骤保留，此后 MUST NOT 再追加进度或完成事件。取消生效 MUST 追加一条 `canceled` 终态事件，其 `seq` 为当前 run 的下一个序号。取消接口 MUST 幂等：重复取消或取消已终态任务返回 200 与当前状态，不产生额外事件。
+取消请求 SHALL 对 `queued` 任务立即生效并写终态；对 `running` 任务 MUST 在下一个步骤边界生效，已提交步骤保留，此后 MUST NOT 再追加进度或完成事件。取消生效 MUST 追加一条 `canceled` 终态事件，其 `seq` MUST 等于该 run 已持久化的最大 `seq` 加一（已提交 3 步时取消得到 `seq=4`）。取消接口 MUST 幂等：重复取消或取消已终态任务返回 200 与当前状态，不产生额外事件。
+
+取消与最后一步完成竞争时，系统 MUST 只保留一个终态：先提交者生效，后到者不改变状态与事件。
 
 #### Scenario: 运行中取消
 
-- **WHEN** 运行中的任务已提交 2 条进度事件后收到取消请求
-- **THEN** 任务在下一步边界进入 `canceled`，`canceled` 事件为第 3 条业务事件
+- **WHEN** 运行中的任务已提交 3 条进度事件后收到取消请求
+- **THEN** 任务在下一步边界进入 `canceled`，`canceled` 事件为 `seq=4`
 - **AND** 之后不再出现第 4 条进度事件，也不出现 `completed` 事件
-- **AND** 查询状态、事件流与页面日志一致报告“已取消”
+- **AND** 查询状态、终态事件与副作用计数三者一致（副作用数等于已提交步数）
+
+#### Scenario: 取消与最后一步竞争只留一个终态
+
+- **WHEN** 取消请求与最后一步提交几乎同时到达
+- **THEN** 数据库中恰好一条终态事件，且状态与事件类型一致
+- **AND** 若为 `succeeded` 则不存在 `canceled`，若为 `canceled` 则不存在 `completed`
 
 #### Scenario: 排队中取消
 
@@ -187,7 +209,7 @@ worker SHALL 通过一次带行锁的原子更新领取任务，并同时写入�
 
 ### Requirement: 受控失败
 
-测试任务 SHALL 支持仅用于验收的受控失败参数，使任务在指定步骤失败并进入 `failed` 终态。失败 MUST 追加一条 `failed` 终态事件且 MUST NOT 追加 `completed` 事件；失败任务 MUST NOT 被报告为成功。
+测试任务 SHALL 支持仅用于验收的受控失败参数，并 MUST 在创建任务时把该参数持久化到 run 记录，使独立 worker 重启后仍知道在哪一步失败。失败 MUST 追加一条 `failed` 终态事件且 MUST NOT 追加 `completed` 事件；失败任务 MUST NOT 被报告为成功，且 `failed` MUST NOT 再转换为任何其他状态。
 
 #### Scenario: 受控失败到终态
 
@@ -195,6 +217,12 @@ worker SHALL 通过一次带行锁的原子更新领取任务，并同时写入�
 - **THEN** 任务终态为 `failed`，终态事件 `type` 为 `failed` 且 `seq` 为 3
 - **AND** 事件中不存在 `completed`，查询状态与页面日志都不显示成功
 - **AND** 已提交副作用的步骤数少于总步数
+
+#### Scenario: 失败参数跨 worker 重启仍生效
+
+- **WHEN** 以 `failAtStep=3` 创建任务后立即停止 worker，随后重启并在新进程中领取
+- **THEN** 新 worker 仍从持久化参数读到第 3 步失败
+- **AND** 终态仍为 `failed`，终态事件仍为 `seq=3`
 
 ### Requirement: 非法输入不落库
 
