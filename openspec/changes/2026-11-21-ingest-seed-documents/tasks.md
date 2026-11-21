@@ -44,8 +44,8 @@
 
 - [x] 6.1 新增 `web/src/materials/` 纯逻辑：状态到中英文文案的映射、字节格式化、PDF `#page=` 链接拼装、文本区间切片与段落范围文案、失败原因到提示的映射，以及材料地址的查询参数拼装/解析（保留 `layout`/`lang`/`document`）；新增 `web/tests/material-source.test.mjs` 覆盖“第 3 页链接为 `#page=3`”“含 emoji 的区间切片与原文一致”“切换材料不丢 `layout`/`lang`”“失败原因不落到空态文案”，运行 `cd web && npm test` 通过
 - [x] 6.2 新增 `MaterialsPanel.vue`（上传、列表、状态、失败原因与重新上传、摘录分页、材料详情 `?document=` 切换）并接入 `ProjectDetailView.vue` 与 `WorkbenchView.vue` 第一阶段；上传与切换材料使用 `router.replace` 只改查询参数，保持项目、阶段、`layout`、`lang`；解析中每 2 秒轮询材料详情、终态后停止，轮询失败只提示“暂时无法刷新”；运行 `cd web && npm run typecheck && npm run build` 通过
-- [ ] 6.3（代码已完成，浏览器核对待作者签收）实现来源定位与材料深链接：PDF 分块渲染 `target="_blank" rel="noopener"` 的原件链接（地址取 `sourceUrl`），文本分块在同页 `<pre>` 渲染 `/source` 原文并用 `Range` + `scrollIntoView` 定位与高亮 `source_start/source_end`；在浏览器验证三页 PDF 的第 3 页链接地址以 `#page=3` 结尾、文本高亮取自未清洗原文且含 emoji 时不偏移、刷新或粘贴完整 `?document=` 地址回到同一材料、匿名打开后登录回到原地址、B 打开 A 的材料地址只看到“项目不存在”
-- [ ] 6.4（代码已完成，浏览器核对待作者签收）改造控制台材料入口（`ConsoleView.vue`）：访客点击进入 `/login?next=/projects`，已登录进入 `/projects`；文案改为支持 PDF/Markdown/TXT 与 20 MiB 上限；控制台不出现项目名、材料列表或上传控件；在浏览器分别以访客与已登录身份验证，并确认中英文切换后入口文案与去向不变
+- [x] 6.3 实现来源定位与材料深链接（作者已在 Mac Chrome 核对通过）：PDF 分块渲染 `target="_blank" rel="noopener"` 的原件链接（地址取 `sourceUrl`），文本分块在同页 `<pre>` 渲染 `/source` 原文并用 `Range` + `scrollIntoView` 定位与高亮 `source_start/source_end`；在浏览器验证三页 PDF 的第 3 页链接地址以 `#page=3` 结尾、文本高亮取自未清洗原文且含 emoji 时不偏移、刷新或粘贴完整 `?document=` 地址回到同一材料、匿名打开后登录回到原地址、B 打开 A 的材料地址只看到“项目不存在”
+- [x] 6.4 改造控制台材料入口（`ConsoleView.vue`，作者已在 Mac Chrome 核对通过）：访客点击进入 `/login?next=/projects`，已登录进入 `/projects`；文案改为支持 PDF/Markdown/TXT 与 20 MiB 上限；控制台不出现项目名、材料列表或上传控件；在浏览器分别以访客与已登录身份验证，并确认中英文切换后入口文案与去向不变
 - [x] 6.5 在 `web/src/i18n.ts` 补齐材料区中英文案：空态、排队中/解析中/就绪/失败、大小上限、被拒绝原因、服务不可用、摘录分页、查看原件/原文；运行 `cd web && npm run typecheck` 通过，并在浏览器以 `lang=en` 核对不出现中文残留（项目名与文件名除外）
 
 ## 7. 文档与工程规则
@@ -67,15 +67,15 @@
 
 ## 9. 集成验收与人工签收准备
 
-- [x] 9.1 提交后确认 `git status --porcelain` 为空，在干净提交上带 `EXPECTED_SHA=$(git rev-parse HEAD)` 连续两次执行 `make verify` 与两次 `make verify CHANGE=2026-11-21-ingest-seed-documents`，四次退出码为 0、`tested_sha` 均等于该 SHA、`dirty=false`；核对两份变更报告的场景数、`document_evidence` 与两次运行一致，并列出四份报告路径（修复页面上传与页数文案后重跑：run-20261121T111701Z.json、run-20261121T111736Z.json、run-20261121T111803Z.json、run-20261121T111907Z.json，均 tested_sha=ca5e983、dirty=false）
+- [x] 9.1 提交后确认 `git status --porcelain` 为空，在干净提交上带 `EXPECTED_SHA=$(git rev-parse HEAD)` 连续两次执行 `make verify` 与两次 `make verify CHANGE=2026-11-21-ingest-seed-documents`，四次退出码为 0、`tested_sha` 均等于该 SHA、`dirty=false`；核对两份变更报告的场景数、`document_evidence` 与两次运行一致，并列出四份报告路径（历史失败原因修复后重跑：run-20261121T113843Z.json、run-20261121T113914Z.json、run-20261121T113941Z.json、run-20261121T114052Z.json，均 tested_sha=083f438、dirty=false）
 - [x] 9.2 运行 `cd web && npm test && npm run typecheck && npm run build` 与 `.venv/bin/python -m unittest discover -s tests`，确认全部通过且 `stage-links`、`job-log`、`job-panel-state` 等既有回归未被削弱
 - [x] 9.3 准备待人工验收清单（不写入 `docs/acceptance/`）：三页 PDF 在浏览器中总页数为 3、第 1 与第 3 页摘录跳回原件的实际页码；材料深链接的四项浏览器检查（所有者刷新/粘贴回同一材料、匿名登录后回原地址、B 打开时提示项目不存在、`layout`/`lang` 保留）；25 页私有样本的总页数与第 1/3 页落页；截图位置与同 SHA 报告路径；清单标注“未签收前不归档”
 - [ ] 9.4 由项目作者在自己的 Mac 浏览器上传 25 页私有样本并核对总页数与第 1、3 页跳转；样本只放在仓库外或已忽略的 `private-inputs/`，确认它与其正文没有出现在 `git status`、`runtime/`、报告中或任何提交里，验收结论只写入 `docs/acceptance/`
 
 ## 10. 历史失败原因与配置变化
 
-- [ ] 10.1 新增 `app/migrations/0004_document_failure_detail.sql`（`documents.failure_detail jsonb NOT NULL DEFAULT '{}'`）；`tests/test_migrate.py` 断言 0004 被发现且包含该列；在已有数据卷上连续两次 `make migrate`，第二次输出“无待应用迁移”
-- [ ] 10.2 `worker` 在 `too_many_pages` 失败时写入 `failure_detail = {"pages": 实际页数, "limit": 解析时上限}`，材料响应返回 `failure.detail`，取消路径清空为 `{}`；`tests/test_documents_routes.py` 断言详情暴露 `failure.detail`
-- [ ] 10.3 前端区分两种文案：上传前提示使用当前 `limits.maxPages`；已失败材料使用 `failure.detail` 的解析时页数与上限，缺详情时显示不含上限数字的原因；`web/tests/material-source.test.mjs` 覆盖中英文的“3 页上限历史值”与“旧记录无数字”
-- [ ] 10.4 `scripts/verify.py` 增加 `document-failure-history` 场景：上限 3 时 4 页失败 → 恢复 2000 → 列表与详情仍返回解析时上限 3、实际页数 4，当前 `limits.maxPages=2000`
-- [ ] 10.5 更新 README、AGENTS 与规约；在干净提交上带 `EXPECTED_SHA` 连续两次执行默认 `make verify` 与两次 `CHANGE=2026-11-21-ingest-seed-documents`，四次退出码为 0、`tested_sha` 一致、`dirty=false`
+- [x] 10.1 新增 `app/migrations/0004_document_failure_detail.sql`（`documents.failure_detail jsonb NOT NULL DEFAULT '{}'`）；`tests/test_migrate.py` 断言 0004 被发现且包含该列；在已有数据卷上连续两次 `make migrate`，第二次输出“无待应用迁移”
+- [x] 10.2 `worker` 在 `too_many_pages` 失败时写入 `failure_detail = {"pages": 实际页数, "limit": 解析时上限}`，材料响应返回 `failure.detail`，取消路径清空为 `{}`；`tests/test_documents_routes.py` 断言详情暴露 `failure.detail`
+- [x] 10.3 前端区分两种文案：上传前提示使用当前 `limits.maxPages`；已失败材料使用 `failure.detail` 的解析时页数与上限，缺详情时显示不含上限数字的原因；`web/tests/material-source.test.mjs` 覆盖中英文的“3 页上限历史值”与“旧记录无数字”
+- [x] 10.4 `scripts/verify.py` 增加 `document-failure-history` 场景：上限 3 时 4 页失败 → 恢复 2000 → 列表与详情仍返回解析时上限 3、实际页数 4，当前 `limits.maxPages=2000`
+- [x] 10.5 更新 README、AGENTS 与规约；在干净提交上带 `EXPECTED_SHA` 连续两次执行默认 `make verify` 与两次 `CHANGE=2026-11-21-ingest-seed-documents`，四次退出码为 0、`tested_sha` 一致、`dirty=false`
