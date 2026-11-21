@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import http.cookiejar
 import json
 import os
@@ -177,14 +178,15 @@ def raw_request(
     *,
     cookie_token: str | None = None,
     payload: dict[str, object] | None = None,
+    headers: dict[str, str] | None = None,
     timeout: float = 10.0,
 ) -> tuple[int, dict[str, str], str]:
-    """不依赖 Cookie 罐的请求，用于复放旧 Cookie 与显式注入 Cookie。"""
+    """不依赖 Cookie 罐的请求，用于复放旧 Cookie 与显式注入 Cookie/请求头。"""
     cookie_header = (
         f"{SESSION_COOKIE}={cookie_token}" if cookie_token is not None else None
     )
     return HttpClient(cookie_header=cookie_header).request(
-        method, path, payload=payload, timeout=timeout
+        method, path, payload=payload, headers=headers, timeout=timeout
     )
 
 
@@ -641,6 +643,10 @@ def scenario_relogin_keeps_project(
         headers={"Origin": BASE_URL},
     )
     require(status == 200, f"A 重新登录期望 200，实际 {status}：{body[:200]}")
+    refreshed = client.cookie_value()
+    require(bool(refreshed), "重新登录未设置会话 Cookie")
+    state["token_a"] = refreshed
+    state["client_a"] = client
     status, _, payload = client.get_json(f"/api/projects/{state['project_id']}")
     require(status == 200, f"A 重新登录后详情期望 200，实际 {status}")
     require(
@@ -650,7 +656,891 @@ def scenario_relogin_keeps_project(
     entry["detail"] = "A 重新登录后仍能打开退出前创建的原项目"
 
 
-def run_acceptance(report: dict[str, Any]) -> bool:
+CHANGE_ID = "2026-11-21-track-background-jobs"
+KNOWN_CHANGES = {CHANGE_ID}
+VERIFY_STEP_DELAY_MS = "800"
+JOB_TIMEOUT_SECONDS = 90.0
+JOB_EVENT_TIMEOUT_SECONDS = 60.0
+
+
+def job_path(project_id: str, job_id: str | None = None) -> str:
+    base = f"/api/projects/{project_id}/jobs"
+    return base if job_id is None else f"{base}/{job_id}"
+
+
+def api_call(
+    method: str,
+    path: str,
+    token: str,
+    payload: dict[str, object] | None = None,
+    headers: dict[str, str] | None = None,
+    timeout: float = 15.0,
+) -> tuple[int, dict[str, str], object | None]:
+    status, response_headers, body = raw_request(
+        method,
+        path,
+        cookie_token=token,
+        payload=payload,
+        headers=headers,
+        timeout=timeout,
+    )
+    try:
+        data = json.loads(body) if body else None
+    except json.JSONDecodeError:
+        data = None
+    return status, response_headers, data
+
+
+def start_test_job(
+    token: str,
+    project_id: str,
+    *,
+    stage: str = "dual-platform-run",
+    fail_at_step: int | None = None,
+) -> tuple[int, dict[str, object]]:
+    payload: dict[str, object] = {"operation": "test-simulation", "stage": stage}
+    if fail_at_step is not None:
+        payload["failAtStep"] = fail_at_step
+    status, _, body = api_call("POST", job_path(project_id), token, payload=payload)
+    require(isinstance(body, dict), f"开始任务响应不是 JSON：{body}")
+    return status, body
+
+
+def fetch_job(token: str, project_id: str, job_id: str) -> dict[str, object]:
+    status, _, body = api_call("GET", job_path(project_id, job_id), token)
+    require(status == 200, f"任务详情期望 200，实际 {status}：{body}")
+    require(isinstance(body, dict) and "job" in body, f"任务详情缺少 job：{body}")
+    return body["job"]  # type: ignore[index]
+
+
+def fetch_job_events(
+    token: str, project_id: str, job_id: str, after: int = 0
+) -> dict[str, object]:
+    status, _, body = api_call(
+        "GET", f"{job_path(project_id, job_id)}/events?format=json&after={after}", token
+    )
+    require(status == 200, f"事件历史期望 200，实际 {status}：{body}")
+    require(isinstance(body, dict), f"事件历史不是对象：{body}")
+    return body
+
+
+def fetch_effects(token: str, project_id: str, job_id: str) -> dict[str, object]:
+    status, _, body = api_call("GET", f"{job_path(project_id, job_id)}/effects", token)
+    require(status == 200, f"副作用查询期望 200，实际 {status}：{body}")
+    require(isinstance(body, dict), f"副作用响应不是对象：{body}")
+    return body
+
+
+def event_seqs(events: dict[str, object]) -> list[int]:
+    items = events.get("events") or []
+    return [int(item["seq"]) for item in items]  # type: ignore[index]
+
+
+def event_types(events: dict[str, object]) -> list[str]:
+    items = events.get("events") or []
+    return [str(item["type"]) for item in items]  # type: ignore[index]
+
+
+def wait_job(
+    token: str,
+    project_id: str,
+    job_id: str,
+    predicate: Callable[[dict[str, object]], bool],
+    *,
+    timeout: float = JOB_TIMEOUT_SECONDS,
+) -> dict[str, object]:
+    def probe() -> dict[str, object] | None:
+        try:
+            job = fetch_job(token, project_id, job_id)
+        except AssertionError:
+            return None
+        return job if predicate(job) else None
+
+    result = wait_for(probe, timeout=timeout, interval=0.2)
+    require(result is not None, f"任务 {job_id} 未在 {timeout}s 内满足条件")
+    return result  # type: ignore[return-value]
+
+
+def sse_open(
+    path: str,
+    token: str,
+    *,
+    headers: dict[str, str] | None = None,
+    timeout: float = JOB_EVENT_TIMEOUT_SECONDS,
+):
+    request = urllib.request.Request(BASE_URL + path)
+    request.add_header("Accept", "text/event-stream")
+    request.add_header("Cookie", f"{SESSION_COOKIE}={token}")
+    for name, value in (headers or {}).items():
+        request.add_header(name, value)
+    return urllib.request.urlopen(request, timeout=timeout)
+
+
+def read_sse(
+    response, *, until_seq: int | None = None, deadline: float = JOB_EVENT_TIMEOUT_SECONDS
+) -> tuple[list[int], dict[str, object] | None]:
+    """逐帧读取 SSE；只在完整帧（含结尾空行）之后才更新结果。"""
+    seqs: list[int] = []
+    event_name = ""
+    data_lines: list[str] = []
+    started = time.monotonic()
+    while time.monotonic() - started < deadline:
+        raw = response.readline()
+        if not raw:
+            break
+        line = raw.decode("utf-8").rstrip("\r\n")
+        if line.startswith(":") or line.startswith("retry:"):
+            continue
+        if line.startswith("id:"):
+            continue
+        if line.startswith("event:"):
+            event_name = line.split(":", 1)[1].strip()
+            continue
+        if line.startswith("data:"):
+            data_lines.append(line.split(":", 1)[1].strip())
+            continue
+        if line != "":
+            continue
+        payload_text = "".join(data_lines)
+        if event_name == "run-event" and payload_text:
+            payload = json.loads(payload_text)
+            seqs.append(int(payload["seq"]))
+            finished = until_seq is not None and seqs[-1] >= until_seq
+            event_name, data_lines = "", []
+            if finished:
+                return seqs, None
+            continue
+        if event_name == "stream-end":
+            payload = json.loads(payload_text) if payload_text else {}
+            return seqs, payload
+        event_name, data_lines = "", []
+    return seqs, None
+
+
+def collect_sse(
+    path: str,
+    token: str,
+    *,
+    until_seq: int | None = None,
+    headers: dict[str, str] | None = None,
+    deadline: float = JOB_EVENT_TIMEOUT_SECONDS,
+) -> tuple[list[int], dict[str, object] | None]:
+    response = sse_open(path, token, headers=headers)
+    try:
+        return read_sse(response, until_seq=until_seq, deadline=deadline)
+    finally:
+        response.close()
+
+
+def run_probe(
+    mode: str,
+    *,
+    project_id: str | None = None,
+    job_id: str | None = None,
+    trials: int | None = None,
+) -> dict[str, Any]:
+    args = ["exec", "-T", "app", "python", "-m", "app.lease_probe", "--mode", mode]
+    if project_id:
+        args += ["--project-id", project_id]
+    if job_id:
+        args += ["--job-id", job_id]
+    if trials:
+        args += ["--trials", str(trials)]
+    result = compose(*args)
+    output = (result.stderr or result.stdout).strip()[-600:]
+    require(result.returncode == 0, f"探针 {mode} 失败：{output}")
+    lines = [line for line in result.stdout.splitlines() if line.strip()]
+    require(bool(lines), f"探针 {mode} 没有 JSON 输出")
+    try:
+        return json.loads(lines[-1])
+    except json.JSONDecodeError as exc:
+        raise AssertionError(f"探针 {mode} 输出不是 JSON：{lines[-1][:300]}") from exc
+
+
+def record_job_evidence(
+    report: dict[str, Any], scenario_id: str, **fields: object
+) -> None:
+    report["job_evidence"].append({"scenario": scenario_id, **fields})
+
+
+def scenario_job_start(
+    entry: dict[str, Any], state: dict[str, Any], report: dict[str, Any]
+) -> None:
+    token, project_id = state["token_a"], state["project_id"]
+    status, body = start_test_job(token, project_id)
+    require(status == 202, f"开始任务期望 202，实际 {status}：{body}")
+    job = body["job"]  # type: ignore[index]
+    require(job["deduplicated"] is False, "新建任务应标记 deduplicated=false")
+    require(bool(job.get("jobId")) and bool(job.get("runId")), "开始响应缺少标识")
+    require(int(job["totalSteps"]) == 10, "测试任务总步数应为 10")
+
+    detail = fetch_job(token, project_id, str(job["jobId"]))
+    require(detail["runId"] == job["runId"], "详情 runId 与开始响应不一致")
+
+    state["job_id"] = str(job["jobId"])
+    state["run_id"] = str(job["runId"])
+    record_job_evidence(
+        report,
+        "job-start-202",
+        job_id=state["job_id"],
+        run_id=state["run_id"],
+    )
+    entry["detail"] = f"202 新建 jobId={state['job_id']} runId={state['run_id']}"
+
+
+def scenario_job_terminal_success(
+    entry: dict[str, Any], state: dict[str, Any], report: dict[str, Any]
+) -> None:
+    token, project_id = state["token_a"], state["project_id"]
+    job_id = state["job_id"]
+    job = wait_job(
+        token,
+        project_id,
+        job_id,
+        lambda item: item["status"] in ("succeeded", "failed", "canceled"),
+    )
+    require(job["status"] == "succeeded", f"确定性任务应成功，实际 {job['status']}")
+    require(int(job["stepsApplied"]) == 10, "成功任务应提交 10 步")
+
+    events = fetch_job_events(token, project_id, job_id)
+    require(
+        event_seqs(events) == list(range(1, 11)),
+        f"事件序号应为 1–10，实际 {event_seqs(events)}",
+    )
+    require(
+        event_types(events) == ["progress"] * 9 + ["completed"],
+        f"事件类型不符合确定性任务契约：{event_types(events)}",
+    )
+    effects = fetch_effects(token, project_id, job_id)
+    require(int(effects["total"]) == 10, f"副作用总数应为 10，实际 {effects['total']}")
+    require(int(effects["distinctSteps"]) == 10, "副作用步骤数应为 10")
+    require(effects["steps"] == list(range(1, 11)), "副作用步骤序号应为 1–10")
+    require(effects["duplicated"] is False, "副作用不应重复")
+
+    record_job_evidence(
+        report,
+        "job-terminal-success",
+        job_id=job_id,
+        run_id=state["run_id"],
+        seqs=event_seqs(events),
+        effects_total=int(effects["total"]),
+    )
+    entry["detail"] = (
+        f"任务成功，事件 1–10，副作用 {effects['total']} 条且步骤唯一"
+    )
+
+
+def scenario_job_access_boundaries(
+    entry: dict[str, Any], state: dict[str, Any], report: dict[str, Any]
+) -> None:
+    project_id, job_id = state["project_id"], state["job_id"]
+    anonymous_calls = [
+        ("POST", job_path(project_id), {"operation": "test-simulation", "stage": "report"}),
+        ("GET", job_path(project_id), None),
+        ("GET", job_path(project_id, job_id), None),
+        ("POST", f"{job_path(project_id, job_id)}/cancel", None),
+        ("GET", f"{job_path(project_id, job_id)}/effects", None),
+        ("GET", f"{job_path(project_id, job_id)}/events", None),
+    ]
+    for method, path, payload in anonymous_calls:
+        status, headers, body = raw_request(method, path, payload=payload)
+        require(status == 401, f"匿名 {method} {path} 期望 401，实际 {status}")
+        require(
+            "text/event-stream" not in headers.get("content-type", ""),
+            f"匿名 {path} 不应建立事件流",
+        )
+        require(body == '{"detail":"未登录"}', f"匿名 {path} 响应体不符合契约")
+
+    client_b = HttpClient()
+    login_status, _, login_body = client_b.request(
+        "POST",
+        "/api/auth/login",
+        payload={"email": ACCOUNT_B, "password": state["password"]},
+        headers={"Origin": BASE_URL},
+    )
+    require(login_status == 200, f"B 登录期望 200，实际 {login_status}：{login_body[:200]}")
+
+    status_a, _, body_a = client_b.request("GET", job_path(project_id, job_id))
+    status_missing, _, body_missing = client_b.request(
+        "GET", job_path(str(uuid.uuid4()), job_id)
+    )
+    status_events, headers_events, body_events = client_b.request(
+        "GET", f"{job_path(project_id, job_id)}/events"
+    )
+    require(status_a == 404, f"B 访问 A 的任务期望 404，实际 {status_a}")
+    require(status_missing == 404, f"B 访问不存在项目期望 404，实际 {status_missing}")
+    require(body_a == body_missing == '{"detail":"项目不存在"}', "他人项目与不存在项目响应体不同")
+    require(status_events == 404, f"B 订阅 A 的事件流期望 404，实际 {status_events}")
+    require(
+        "text/event-stream" not in headers_events.get("content-type", ""),
+        "B 不应拿到事件流响应",
+    )
+    require(body_events == body_a, "B 的事件流 404 响应体与项目 404 不一致")
+    entry["detail"] = (
+        "匿名任务接口全部 401 且非事件流；B 的任务/事件/取消与不存在项目同为 404"
+    )
+
+
+def scenario_job_outage_boundary(
+    entry: dict[str, Any], state: dict[str, Any]
+) -> None:
+    project_id, job_id = state["project_id"], state["job_id"]
+    started = time.monotonic()
+    status, headers, _ = raw_request("GET", job_path(project_id, job_id), timeout=5.0)
+    elapsed_anonymous = time.monotonic() - started
+    require(status == 401, f"停库且无 Cookie 期望 401，实际 {status}")
+    require(elapsed_anonymous <= 5.0, "停库匿名 401 超过 5 秒")
+
+    started = time.monotonic()
+    status, headers, body = raw_request(
+        "GET", job_path(project_id, job_id), cookie_token=state["token_a"], timeout=6.0
+    )
+    elapsed = time.monotonic() - started
+    require(status == 503, f"停库且携带 Cookie 期望 503，实际 {status}：{body[:200]}")
+    require(elapsed <= DEGRADE_TIMEOUT_SECONDS, f"停库任务查询耗时 {elapsed:.2f}s 超过 5 秒")
+    require("set-cookie" not in headers, "停库 503 不应清除 Cookie")
+    entry["detail"] = (
+        f"停库期间任务接口匿名 401（{elapsed_anonymous * 1000:.0f}ms）、"
+        f"携带 Cookie 在 {elapsed:.2f}s 返回 503 且未清 Cookie"
+    )
+
+
+def scenario_worker_isolation(
+    entry: dict[str, Any], report: dict[str, Any]
+) -> None:
+    before = read_identity()
+    stopped = compose("stop", "worker")
+    require(stopped.returncode == 0, f"停止 worker 失败：{stopped.stderr.strip()}")
+    health_status, health_body = http_status("/health")
+    livez_status, livez_body = http_status("/livez")
+    after = read_identity()
+    started = compose("start", "worker")
+    require(started.returncode == 0, f"启动 worker 失败：{started.stderr.strip()}")
+
+    require(health_status == 200, f"停 worker 时 /health 期望 200，实际 {health_status}")
+    require("database" in health_body, "停 worker 时 /health 响应体异常")
+    require(livez_status == 200, f"停 worker 时 /livez 期望 200，实际 {livez_status}")
+    for key in ("id", "pid", "started_at", "restart_count"):
+        require(
+            before.get(key) == after.get(key),
+            f"停 worker 导致 app 身份变化：{key} {before.get(key)!r} -> {after.get(key)!r}",
+        )
+    entry["detail"] = (
+        "只停 worker 时 /health 200、/livez 200，app 容器身份不变（已恢复 worker）"
+    )
+
+
+def scenario_job_two_jobs(
+    entry: dict[str, Any], state: dict[str, Any], report: dict[str, Any]
+) -> None:
+    result = run_probe("two-jobs", project_id=state["project_id"])
+    require(result.get("a_step_outcome") == "progress", f"探针 A 未推进一步：{result}")
+    require(result.get("b_unchanged") is True, f"推进 A 改动了 B：{result}")
+    record_job_evidence(
+        report,
+        "job-two-jobs-isolation",
+        a_next_step=result.get("a_next_step"),
+        b_unchanged=result.get("b_unchanged"),
+    )
+    entry["detail"] = "真实 PostgreSQL：A 推进一步后 B 的进度/状态/租约令牌均未变"
+
+
+def scenario_job_duplicate_start(
+    entry: dict[str, Any], state: dict[str, Any], report: dict[str, Any]
+) -> None:
+    token, project_id = state["token_a"], state["project_id"]
+    stopped = compose("stop", "worker")
+    require(stopped.returncode == 0, f"停止 worker 失败：{stopped.stderr.strip()}")
+    try:
+        before = run_probe("counts", project_id=project_id)
+
+        def post() -> tuple[int, dict[str, Any]]:
+            status, _, body = raw_request(
+                "POST",
+                job_path(project_id),
+                cookie_token=token,
+                payload={"operation": "test-simulation", "stage": "dual-platform-run"},
+                timeout=20.0,
+            )
+            return status, json.loads(body) if body else {}
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+            results = list(pool.map(lambda _: post(), range(2)))
+
+        statuses = sorted(item[0] for item in results)
+        require(statuses == [200, 202], f"并发开始期望 200/202，实际 {statuses}")
+        jobs = [item[1]["job"] for item in results]
+        require(
+            jobs[0]["jobId"] == jobs[1]["jobId"] and jobs[0]["runId"] == jobs[1]["runId"],
+            "并发开始返回了不同任务",
+        )
+        dedupe_flags = sorted(bool(job["deduplicated"]) for job in jobs)
+        require(dedupe_flags == [False, True], f"重复开始标记异常：{dedupe_flags}")
+
+        after = run_probe("counts", project_id=project_id)
+        added_jobs = int(after["jobs"]) - int(before["jobs"])
+        added_runs = int(after["runs"]) - int(before["runs"])
+        require(added_jobs == 1, f"并发开始新增 jobs={added_jobs}，期望 1")
+        require(added_runs == 1, f"并发开始新增 runs={added_runs}，期望 1（不得留下孤立 run）")
+
+        job_id = str(jobs[0]["jobId"])
+        cancel_status, _, cancel_body = api_call(
+            "POST", f"{job_path(project_id, job_id)}/cancel", token
+        )
+        require(cancel_status == 200, f"清理取消期望 200，实际 {cancel_status}")
+        require(
+            isinstance(cancel_body, dict) and cancel_body["cancelApplied"] is True,
+            "排队中的任务应能立即取消",
+        )
+        record_job_evidence(
+            report,
+            "job-duplicate-start-concurrent",
+            job_id=job_id,
+            run_id=str(jobs[0]["runId"]),
+            jobs_added=added_jobs,
+            runs_added=added_runs,
+            deduplicated_flags=dedupe_flags,
+        )
+        entry["detail"] = (
+            f"并发开始一个 202 + 一个 200，jobs 与 runs 各新增 1（jobId={job_id}）"
+        )
+    finally:
+        started = compose("start", "worker")
+        require(started.returncode == 0, f"恢复 worker 失败：{started.stderr.strip()}")
+
+
+def scenario_job_resume(
+    entry: dict[str, Any], state: dict[str, Any], report: dict[str, Any]
+) -> None:
+    token, project_id = state["token_a"], state["project_id"]
+    status, body = start_test_job(token, project_id)
+    require(status == 202, f"断线场景开始任务期望 202，实际 {status}：{body}")
+    job = body["job"]  # type: ignore[index]
+    job_id, run_id = str(job["jobId"]), str(job["runId"])
+    events_path = f"{job_path(project_id, job_id)}/events"
+
+    first_seqs, _ = collect_sse(f"{events_path}?after=0", token, until_seq=4)
+    require(first_seqs == [1, 2, 3, 4], f"第一段 SSE 序号应为 1–4，实际 {first_seqs}")
+    time.sleep(0.5)
+
+    second_seqs, end = collect_sse(f"{events_path}?after=4", token)
+    require(end is not None, "重连后未收到 stream-end")
+    require(int(end.get("lastSeq", 0)) == 10, f"stream-end lastSeq 应为 10：{end}")
+    require(second_seqs == list(range(5, 11)), f"第二段应为 5–10，实际 {second_seqs}")
+
+    combined = first_seqs + second_seqs
+    require(combined == list(range(1, 11)), f"拼接后应为 1–10 且各一次，实际 {combined}")
+
+    history = fetch_job_events(token, project_id, job_id, after=4)
+    require(event_seqs(history) == list(range(5, 11)), "JSON 历史与 SSE 第二段不一致")
+    full = fetch_job_events(token, project_id, job_id, after=0)
+    require(event_seqs(full) == list(range(1, 11)), "JSON 历史全量序号异常")
+
+    state["resume_job_id"] = job_id
+    state["resume_run_id"] = run_id
+    record_job_evidence(
+        report,
+        "job-resume-after-disconnect",
+        job_id=job_id,
+        run_id=run_id,
+        first_segment_seqs=first_seqs,
+        second_segment_seqs=second_seqs,
+        resumed_from=4,
+        combined_seqs=combined,
+    )
+    entry["detail"] = (
+        f"第一段 1–4，第二段 5–10，拼接 1–10；jobId={job_id} runId={run_id}"
+    )
+
+
+def scenario_job_cursor_precedence(
+    entry: dict[str, Any], state: dict[str, Any], report: dict[str, Any]
+) -> None:
+    token, project_id = state["token_a"], state["project_id"]
+    job_id, run_id = state["resume_job_id"], state["resume_run_id"]
+    events_path = f"{job_path(project_id, job_id)}/events"
+
+    seqs, end = collect_sse(
+        f"{events_path}?after=4",
+        token,
+        headers={"Last-Event-ID": f"{run_id}:7"},
+    )
+    require(seqs == [8, 9, 10], f"Last-Event-ID 应优先于 after，实际序号 {seqs}")
+    require(end is not None and int(end.get("lastSeq", 0)) == 10, f"stream-end 异常：{end}")
+    record_job_evidence(
+        report,
+        "job-last-event-id-priority",
+        job_id=job_id,
+        run_id=run_id,
+        last_event_id=7,
+        after=4,
+        seqs=seqs,
+    )
+    entry["detail"] = "Last-Event-ID=7 与 after=4 同时存在时只补发 8–10"
+
+
+def scenario_job_terminal_reconnect(
+    entry: dict[str, Any], state: dict[str, Any], report: dict[str, Any]
+) -> None:
+    token, project_id = state["token_a"], state["project_id"]
+    job_id = state["resume_job_id"]
+    events_path = f"{job_path(project_id, job_id)}/events"
+
+    started = time.monotonic()
+    seqs, end = collect_sse(f"{events_path}?after=10", token, deadline=10.0)
+    elapsed = time.monotonic() - started
+    require(seqs == [], f"after=10 不应补发业务事件，实际 {seqs}")
+    require(end is not None, "终态任务 after=10 未立即收到 stream-end")
+    require(int(end.get("lastSeq", 0)) == 10, f"stream-end lastSeq 异常：{end}")
+    require(elapsed <= 2.0, f"终态重连接近挂起：{elapsed:.2f}s")
+
+    status, headers, body = api_call(
+        "GET", f"{events_path}?after=11", token
+    )
+    require(status == 400, f"after=11 期望 400，实际 {status}")
+    require(body == {"detail": "游标无效"}, f"非法游标响应体异常：{body}")
+    require("text/event-stream" not in headers.get("content-type", ""), "非法游标不应建立事件流")
+
+    record_job_evidence(
+        report,
+        "job-terminal-reconnect",
+        job_id=job_id,
+        run_id=state["resume_run_id"],
+        reconnect_seconds=round(elapsed, 3),
+        invalid_cursor_status=status,
+    )
+    entry["detail"] = (
+        f"终态 after=10 在 {elapsed:.2f}s 内收到 stream-end；after=11 返回 400 JSON"
+    )
+
+
+def scenario_job_worker_takeover(
+    entry: dict[str, Any], state: dict[str, Any], report: dict[str, Any]
+) -> None:
+    token, project_id = state["token_a"], state["project_id"]
+    status, body = start_test_job(token, project_id)
+    require(status == 202, f"中断恢复开始任务期望 202，实际 {status}：{body}")
+    job = body["job"]  # type: ignore[index]
+    job_id, run_id = str(job["jobId"]), str(job["runId"])
+
+    wait_job(token, project_id, job_id, lambda item: int(item["stepsApplied"]) >= 2, timeout=40.0)
+    stopped = compose("stop", "worker")
+    require(stopped.returncode == 0, f"停止 worker 失败：{stopped.stderr.strip()}")
+    try:
+        snapshot = fetch_job(token, project_id, job_id)
+        steps_at_stop = int(snapshot["stepsApplied"])
+        attempts_before = int(snapshot["attempts"])
+        require(snapshot["status"] == "running", "中断后持久状态应保持 running")
+
+        takeover = wait_job(
+            token,
+            project_id,
+            job_id,
+            lambda item: bool(item["awaitingTakeover"]),
+            timeout=15.0,
+        )
+        require(takeover["status"] == "running", "等待接手期间状态不应变化")
+    finally:
+        started_worker = compose("start", "worker")
+        require(started_worker.returncode == 0, f"恢复 worker 失败：{started_worker.stderr.strip()}")
+
+    final = wait_job(
+        token,
+        project_id,
+        job_id,
+        lambda item: item["status"] in ("succeeded", "failed", "canceled"),
+        timeout=JOB_TIMEOUT_SECONDS,
+    )
+    require(final["status"] == "succeeded", f"接手后任务应成功，实际 {final['status']}")
+    require(
+        int(final["attempts"]) > attempts_before,
+        f"接手应增加 attempts：{attempts_before} -> {final['attempts']}",
+    )
+    events = fetch_job_events(token, project_id, job_id)
+    require(event_seqs(events) == list(range(1, 11)), f"接手后事件序号异常：{event_seqs(events)}")
+    effects = fetch_effects(token, project_id, job_id)
+    require(int(effects["total"]) == 10, f"接手后副作用总数应为 10，实际 {effects['total']}")
+    require(int(effects["distinctSteps"]) == 10, "接手后副作用步骤应唯一")
+    require(effects["steps"] == list(range(1, 11)), "接手后副作用序号应为 1–10")
+
+    record_job_evidence(
+        report,
+        "job-worker-crash-takeover",
+        job_id=job_id,
+        run_id=run_id,
+        steps_at_stop=steps_at_stop,
+        attempts_before=attempts_before,
+        attempts_after=int(final["attempts"]),
+        seqs=event_seqs(events),
+        effects_total=int(effects["total"]),
+    )
+    entry["detail"] = (
+        f"停止于第 {steps_at_stop} 步，attempts {attempts_before}→{final['attempts']}，"
+        "最终副作用 10 条且步骤唯一"
+    )
+
+
+def scenario_job_lease_probe(
+    entry: dict[str, Any], state: dict[str, Any], report: dict[str, Any]
+) -> None:
+    token, project_id = state["token_a"], state["project_id"]
+    stopped = compose("stop", "worker")
+    require(stopped.returncode == 0, f"停止 worker 失败：{stopped.stderr.strip()}")
+    try:
+        status, body = start_test_job(token, project_id)
+        require(status == 202, f"旧令牌场景开始任务期望 202，实际 {status}：{body}")
+        job = body["job"]  # type: ignore[index]
+        job_id, run_id = str(job["jobId"]), str(job["runId"])
+        result = run_probe("takeover", job_id=job_id)
+        require(
+            result.get("first_segment") == ["progress", "progress", "progress"],
+            f"第一次领取应提交 1–3 步：{result}",
+        )
+        require(
+            result.get("second_segment") == ["progress", "progress"],
+            f"第二次领取应提交 4–5 步：{result}",
+        )
+        require(int(result.get("steps_at_handover", 0)) == 5, f"接手时应为第 5 步：{result}")
+        require(result.get("old_heartbeat_ok") is False, "旧令牌续租必须被拒绝")
+        require(result.get("old_step_outcome") == "lost", "旧令牌写第 6 步必须被拒绝")
+        require(result.get("unchanged_after_old_token") is True, "旧令牌写入了数据")
+        require(int(result.get("attempts", 0)) == 2, f"应经历两次领取：{result}")
+        require(result.get("final_status") == "succeeded", f"接手后应成功：{result}")
+        require(
+            result.get("final_seqs") == list(range(1, 11)),
+            f"最终事件序号应为 1–10：{result.get('final_seqs')}",
+        )
+        require(int(result.get("final_effects", 0)) == 10, "最终副作用应为 10")
+
+        record_job_evidence(
+            report,
+            "job-lease-probe-takeover",
+            job_id=job_id,
+            run_id=run_id,
+            steps_at_handover=int(result["steps_at_handover"]),
+            old_heartbeat_ok=result.get("old_heartbeat_ok"),
+            old_step_outcome=result.get("old_step_outcome"),
+            attempts=int(result["attempts"]),
+            seqs=result.get("final_seqs"),
+        )
+        entry["detail"] = (
+            "真实 PostgreSQL：旧令牌续租 false、写第 6 步 lost，进度/事件/副作用未变"
+        )
+    finally:
+        started_worker = compose("start", "worker")
+        require(started_worker.returncode == 0, f"恢复 worker 失败：{started_worker.stderr.strip()}")
+
+
+def scenario_job_lease_lock_wait(
+    entry: dict[str, Any], state: dict[str, Any], report: dict[str, Any]
+) -> None:
+    """请求在租约到期前开始、在行锁等待中跨过到期点：不得续租，也不得写入。"""
+    stopped = compose("stop", "worker")
+    require(stopped.returncode == 0, f"停止 worker 失败：{stopped.stderr.strip()}")
+    try:
+        result = run_probe("lease-wait", project_id=state["project_id"])
+    finally:
+        started_worker = compose("start", "worker")
+        require(started_worker.returncode == 0, f"恢复 worker 失败：{started_worker.stderr.strip()}")
+
+    cases = result.get("cases") or []
+    require(len(cases) == 2, f"锁等待回归应覆盖 heartbeat 与 commit_step：{result}")
+    for case in cases:
+        require(case["blocked_on_row"] is True, f"未观察到行锁等待：{case}")
+        require(
+            case["actual"] == case["expected"],
+            f"{case['operation']} 期望 {case['expected']}，实际 {case['actual']}",
+        )
+        require(int(case["steps"]) == 0, f"{case['operation']} 写入了步骤：{case}")
+        require(int(case["events"]) == 0, f"{case['operation']} 写入了事件：{case}")
+        require(case["expiry_extended"] is False, f"{case['operation']} 延长了租约：{case}")
+    require(result.get("ok") is True, f"锁等待回归失败：{result}")
+
+    record_job_evidence(
+        report,
+        "job-lease-lock-wait",
+        cases=[
+            {
+                "operation": case["operation"],
+                "actual": case["actual"],
+                "blocked_on_row": case["blocked_on_row"],
+                "expiry_extended": case["expiry_extended"],
+                "steps": case["steps"],
+                "events": case["events"],
+            }
+            for case in cases
+        ],
+    )
+    entry["detail"] = (
+        "真实 PostgreSQL：到期前开始、锁等待跨过到期点后 heartbeat=false、"
+        "commit_step=lost，租约未延长且无步骤/事件写入"
+    )
+
+
+def scenario_job_cancel(
+    entry: dict[str, Any], state: dict[str, Any], report: dict[str, Any]
+) -> None:
+    token, project_id = state["token_a"], state["project_id"]
+    status, body = start_test_job(token, project_id)
+    require(status == 202, f"取消场景开始任务期望 202，实际 {status}：{body}")
+    job = body["job"]  # type: ignore[index]
+    job_id, run_id = str(job["jobId"]), str(job["runId"])
+
+    running = wait_job(
+        token, project_id, job_id, lambda item: int(item["stepsApplied"]) >= 3, timeout=40.0
+    )
+    steps_at_cancel = int(running["stepsApplied"])
+
+    status, _, cancel_body = api_call(
+        "POST", f"{job_path(project_id, job_id)}/cancel", token
+    )
+    require(status == 200, f"取消期望 200，实际 {status}：{cancel_body}")
+    require(isinstance(cancel_body, dict), "取消响应不是对象")
+    require(cancel_body["cancelApplied"] is True, "运行中取消应生效")
+    require(cancel_body["job"]["status"] == "canceled", "取消后状态应为 canceled")
+
+    wait_job(token, project_id, job_id, lambda item: item["status"] == "canceled", timeout=20.0)
+    events = fetch_job_events(token, project_id, job_id)
+    types = event_types(events)
+    seqs = event_seqs(events)
+    require("completed" not in types, "取消后不应出现 completed")
+    require(types[-1] == "canceled", f"终态事件应为 canceled：{types}")
+    require(
+        seqs[-1] == steps_at_cancel + 1,
+        f"canceled 序号应为 {steps_at_cancel + 1}，实际 {seqs[-1]}",
+    )
+    effects = fetch_effects(token, project_id, job_id)
+    require(
+        int(effects["total"]) == steps_at_cancel,
+        f"取消后副作用数应等于已提交步数 {steps_at_cancel}，实际 {effects['total']}",
+    )
+
+    status_again, _, again = api_call(
+        "POST", f"{job_path(project_id, job_id)}/cancel", token
+    )
+    require(status_again == 200, "重复取消应返回 200")
+    require(isinstance(again, dict) and again["cancelApplied"] is False, "重复取消不应生效")
+    require(event_seqs(fetch_job_events(token, project_id, job_id)) == seqs, "重复取消追加了事件")
+
+    record_job_evidence(
+        report,
+        "job-cancel-running",
+        job_id=job_id,
+        run_id=run_id,
+        steps_at_cancel=steps_at_cancel,
+        canceled_seq=seqs[-1],
+        seqs=seqs,
+        effects_total=int(effects["total"]),
+    )
+    entry["detail"] = (
+        f"第 {steps_at_cancel} 步后取消，canceled seq={seqs[-1]}，无 completed，副作用一致"
+    )
+
+
+def scenario_job_fail(
+    entry: dict[str, Any], state: dict[str, Any], report: dict[str, Any]
+) -> None:
+    token, project_id = state["token_a"], state["project_id"]
+    stopped = compose("stop", "worker")
+    require(stopped.returncode == 0, f"停止 worker 失败：{stopped.stderr.strip()}")
+    try:
+        status, body = start_test_job(token, project_id, fail_at_step=3)
+        require(status == 202, f"受控失败开始任务期望 202，实际 {status}：{body}")
+        job = body["job"]  # type: ignore[index]
+        job_id, run_id = str(job["jobId"]), str(job["runId"])
+    finally:
+        started_worker = compose("start", "worker")
+        require(started_worker.returncode == 0, f"恢复 worker 失败：{started_worker.stderr.strip()}")
+
+    final = wait_job(
+        token,
+        project_id,
+        job_id,
+        lambda item: item["status"] in ("succeeded", "failed", "canceled"),
+    )
+    require(final["status"] == "failed", f"受控失败终态应为 failed，实际 {final['status']}")
+    require(int(final["stepsApplied"]) == 2, f"失败前应提交 2 步，实际 {final['stepsApplied']}")
+
+    events = fetch_job_events(token, project_id, job_id)
+    types = event_types(events)
+    require("completed" not in types, "失败任务不应出现 completed")
+    require(types[-1] == "failed", f"终态事件应为 failed：{types}")
+    require(event_seqs(events)[-1] == 3, f"failed 事件应为 seq=3：{event_seqs(events)}")
+    effects = fetch_effects(token, project_id, job_id)
+    require(int(effects["total"]) == 2, f"失败前只应提交 2 条副作用，实际 {effects['total']}")
+
+    record_job_evidence(
+        report,
+        "job-fail-controlled",
+        job_id=job_id,
+        run_id=run_id,
+        seqs=event_seqs(events),
+        effects_total=int(effects["total"]),
+    )
+    entry["detail"] = "failAtStep=3 持久化后生效：failed seq=3、无 completed、副作用 2 条"
+
+
+def scenario_job_restart_after_terminal(
+    entry: dict[str, Any], state: dict[str, Any], report: dict[str, Any]
+) -> None:
+    token, project_id = state["token_a"], state["project_id"]
+    previous_job, previous_run = state["job_id"], state["run_id"]
+    status, body = start_test_job(token, project_id)
+    require(status == 202, f"终态后重新开始期望 202，实际 {status}：{body}")
+    job = body["job"]  # type: ignore[index]
+    job_id, run_id = str(job["jobId"]), str(job["runId"])
+    require(job_id != previous_job, "重新开始应产生新的 jobId")
+    require(run_id != previous_run, "重新开始应产生新的 runId")
+
+    def has_event(item: dict[str, object]) -> bool:
+        return int(item["stepsApplied"]) >= 1
+
+    wait_job(token, project_id, job_id, has_event, timeout=30.0)
+    events = fetch_job_events(token, project_id, job_id)
+    require(event_seqs(events)[:1] == [1], f"新 run 的 seq 应从 1 开始：{event_seqs(events)}")
+
+    cleanup_status, _, cleanup = api_call(
+        "POST", f"{job_path(project_id, job_id)}/cancel", token
+    )
+    require(cleanup_status == 200, f"清理取消期望 200，实际 {cleanup_status}")
+    require(isinstance(cleanup, dict), "清理取消响应不是对象")
+
+    record_job_evidence(
+        report,
+        "job-restart-after-terminal",
+        job_id=job_id,
+        run_id=run_id,
+        previous_job_id=previous_job,
+        previous_run_id=previous_run,
+        first_seq=event_seqs(events)[0],
+    )
+    entry["detail"] = f"终态后新任务 jobId={job_id} runId={run_id}，seq 从 1 开始"
+
+
+def scenario_job_cancel_race(
+    entry: dict[str, Any], state: dict[str, Any], report: dict[str, Any]
+) -> None:
+    result = run_probe("cancel-race", project_id=state["project_id"], trials=5)
+    require(result.get("ok") is True, f"取消/完成竞态失败：{result}")
+    trials = result.get("trials") or []
+    require(len(trials) == 5, f"竞态应执行 5 次，实际 {len(trials)}")
+    for trial in trials:
+        require(trial["single_terminal"] is True, f"出现多个终态：{trial}")
+        require(trial["consistent"] is True, f"状态与事件不一致：{trial}")
+    record_job_evidence(
+        report,
+        "job-cancel-final-race",
+        trials=[trial["status"] for trial in trials],
+        single_terminal=True,
+    )
+    entry["detail"] = (
+        "真实 PostgreSQL 竞态 5 次：每次只有一个终态，状态与事件一致（"
+        + ", ".join(str(trial["status"]) for trial in trials)
+        + "）"
+    )
+
+
+def run_acceptance(report: dict[str, Any], change: str | None = None) -> bool:
     state: dict[str, Any] = {}
     try:
         with scenario(report, "compose-up"):
@@ -673,12 +1563,22 @@ def run_acceptance(report: dict[str, Any]) -> bool:
             scenario_shell_routes(entry, state)
         with scenario(report, "session-cookie-replay") as entry:
             scenario_session_cookie_replay(entry, state)
+        with scenario(report, "job-start-202") as entry:
+            scenario_job_start(entry, state, report)
+        with scenario(report, "job-terminal-success") as entry:
+            scenario_job_terminal_success(entry, state, report)
+        with scenario(report, "job-access-boundaries") as entry:
+            scenario_job_access_boundaries(entry, state, report)
+        with scenario(report, "worker-isolation") as entry:
+            scenario_worker_isolation(entry, report)
         with scenario(report, "database-stop-degrades") as entry:
             scenario_db_degrade(entry, report)
         with scenario(report, "auth-anonymous-during-outage") as entry:
             scenario_auth_anonymous_outage(entry)
         with scenario(report, "auth-cookie-during-outage") as entry:
             scenario_auth_cookie_outage(entry, state)
+        with scenario(report, "job-outage-boundary") as entry:
+            scenario_job_outage_boundary(entry, state)
         with scenario(report, "database-recover-ready") as entry:
             scenario_db_recover(entry)
         with scenario(report, "session-after-recovery") as entry:
@@ -693,6 +1593,31 @@ def run_acceptance(report: dict[str, Any]) -> bool:
             scenario_identity_stable(entry, report)
         with scenario(report, "homepage-after-recovery") as entry:
             scenario_homepage_after_recovery(entry)
+        if change == CHANGE_ID:
+            with scenario(report, "job-two-jobs-isolation") as entry:
+                scenario_job_two_jobs(entry, state, report)
+            with scenario(report, "job-duplicate-start-concurrent") as entry:
+                scenario_job_duplicate_start(entry, state, report)
+            with scenario(report, "job-resume-after-disconnect") as entry:
+                scenario_job_resume(entry, state, report)
+            with scenario(report, "job-last-event-id-priority") as entry:
+                scenario_job_cursor_precedence(entry, state, report)
+            with scenario(report, "job-terminal-reconnect") as entry:
+                scenario_job_terminal_reconnect(entry, state, report)
+            with scenario(report, "job-worker-crash-takeover") as entry:
+                scenario_job_worker_takeover(entry, state, report)
+            with scenario(report, "job-lease-probe-takeover") as entry:
+                scenario_job_lease_probe(entry, state, report)
+            with scenario(report, "job-lease-lock-wait") as entry:
+                scenario_job_lease_lock_wait(entry, state, report)
+            with scenario(report, "job-cancel-running") as entry:
+                scenario_job_cancel(entry, state, report)
+            with scenario(report, "job-fail-controlled") as entry:
+                scenario_job_fail(entry, state, report)
+            with scenario(report, "job-restart-after-terminal") as entry:
+                scenario_job_restart_after_terminal(entry, state, report)
+            with scenario(report, "job-cancel-final-race") as entry:
+                scenario_job_cancel_race(entry, state, report)
     except ScenarioFailed:
         return False
     return True
@@ -761,6 +1686,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--change",
+        default=os.environ.get("CHANGE") or None,
+        help="变更 ID；指定后追加该变更的专属验收场景（默认读取 CHANGE）",
+    )
+    parser.add_argument(
         "--expect-sha",
         default=os.environ.get("EXPECTED_SHA") or None,
         help="期望的被测 Git SHA；与 HEAD 不一致时验收失败（默认读取 EXPECTED_SHA）",
@@ -775,6 +1705,8 @@ def new_report(expected_sha: str | None) -> dict[str, Any]:
         "tested_sha": "",
         "dirty": False,
         "expected_sha": expected_sha,
+        "change": None,
+        "job_evidence": [],
         "started_at": utc_now(),
         "finished_at": None,
         "exit_code": None,
@@ -851,8 +1783,27 @@ def run(report: dict[str, Any], args: argparse.Namespace) -> int:
             }
         )
 
+    change = args.change or None
+    report["change"] = change
+    if change is not None and change not in KNOWN_CHANGES:
+        message = f"未注册的变更：{change}（可用：{', '.join(sorted(KNOWN_CHANGES))}）"
+        print(f"[verify] {message}")
+        report["scenarios"].append(
+            {
+                "id": "change-known",
+                "status": "failed",
+                "duration_ms": 0,
+                "detail": message,
+            }
+        )
+        return finalize(report, 2)
+
+    if change == CHANGE_ID:
+        # 放大步骤间隔，让“读到第 4 条后断开”、worker 中断等窗口足够宽。
+        os.environ["TEST_TASK_STEP_DELAY_MS"] = VERIFY_STEP_DELAY_MS
+
     try:
-        passed = run_acceptance(report)
+        passed = run_acceptance(report, change)
     finally:
         restore_database()
 

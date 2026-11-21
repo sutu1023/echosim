@@ -110,6 +110,34 @@ class MigrationOrderTests(unittest.TestCase):
         self.assertEqual([m.version for m in pending], ["0002_b"])
 
 
+class RepositoryMigrationTests(unittest.TestCase):
+    def test_0002_is_discovered_after_0001(self) -> None:
+        migrations = discover_migrations(Path("app/migrations"))
+
+        versions = [m.version for m in migrations]
+
+        self.assertEqual(versions[0], "0001_identity_and_projects")
+        self.assertIn("0002_jobs_runs_events", versions)
+        self.assertLess(versions.index("0001_identity_and_projects"), versions.index("0002_jobs_runs_events"))
+
+    def test_0002_statements_cover_jobs_tables_and_indexes(self) -> None:
+        migration = next(
+            m
+            for m in discover_migrations(Path("app/migrations"))
+            if m.version == "0002_jobs_runs_events"
+        )
+        statements = split_sql_statements(migration.path.read_text(encoding="utf-8"))
+        joined = "\n".join(statements)
+
+        for table in ("runs", "jobs", "run_steps", "run_events"):
+            self.assertIn(f"CREATE TABLE {table}", joined)
+        self.assertIn("jobs_active_operation_idx", joined)
+        self.assertIn("jobs_claimable_idx", joined)
+        self.assertIn("WHERE status IN ('queued', 'running')", joined)
+        self.assertIn("fail_at_step", joined)
+        self.assertIn("lease_token", joined)
+
+
 class MigrationRunnerTests(unittest.IsolatedAsyncioTestCase):
     async def test_applies_in_order_and_records_versions(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

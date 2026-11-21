@@ -10,6 +10,7 @@ help:
 	@echo "make down    停止并移除容器与网络（保留数据卷）"
 	@echo "make reset   停止并移除容器、网络与数据卷（破坏性）"
 	@echo "make verify  执行可重复验收并写入 runtime/verify/last-run.json"
+	@echo "make verify CHANGE=<id>  追加该变更的专属验收场景"
 	@echo "make migrate 在运行中的 app 容器内应用数据库迁移"
 	@echo "make user EMAIL=a@example.com  从标准输入读取密码并创建/更新账户"
 
@@ -28,7 +29,7 @@ reset:
 	$(COMPOSE) down --remove-orphans -v
 
 verify:
-	$(PYTHON) scripts/verify.py
+	$(PYTHON) scripts/verify.py $(if $(CHANGE),--change "$(CHANGE)",)
 
 migrate:
 	$(COMPOSE) exec -T app python -m app.migrate
