@@ -28,7 +28,7 @@
 - [x] 3.6 在目标容器中执行不访问外部网络的最小运行：构造三个适配器实例、创建一个最小本地仿真环境并关闭、验证图谱/模型适配器可初始化；验证方式是退出码为 0、资源关闭成功、证明未发起真实外部调用
 - [x] 3.7 处理 Pydantic 上限冲突：若候选 `camel-ai` 要求低于应用当前 2.14.4 的 Pydantic，必须使用隔离引擎环境；验证方式是 `app/requirements.txt` 不变、`app` 镜像内 Pydantic 版本不变、引擎镜像内解析成功或记录 `dependency_unresolved`
 - [x] 3.8 实现并测试基线状态：只有 3.3–3.6 四阶段都成功才允许 `dependencyBaseline.status=verified`；验证方式是 `tests/test_engine_baseline.py` 覆盖全成功、解析失败、安装失败、导入失败、最小运行失败五种状态
-- [ ] 3.9 确认默认入口不构建引擎镜像：`make up`、默认 `make verify` 与 CI 不启用 `live` profile；验证方式是执行 `make up` 后 `docker compose ps` 没有 `engine` 服务，且 `make verify` 在未安装候选包时仍通过
+- [x] 3.9 确认默认入口不构建引擎镜像：`make up`、默认 `make verify` 与 CI 不启用 `live` profile；验证方式是执行 `make up` 后 `docker compose ps` 没有 `engine` 服务，且 `make verify` 在未安装候选包时仍通过
 
 ## 4. 模型结构化接入
 
@@ -72,7 +72,7 @@
 - [x] 7.2 实现报告写入：`runtime/smoke-live/last-run.json` 与带 UTC 时间戳的运行记录，包含 `result`、`mode`、`tested_sha`、`dirty`、起止时间、逐项状态、调用计数、依赖基线与脱敏证据；验证方式是 `tests/test_engine_smoke.py` 断言两份报告内容一致、路径正确、JSON 可解析
 - [x] 7.3 实现退出码：全部必需项通过为 0；任一必需项 `failed`/`not_run` 为 1；非法调用、默认脏工作树被拒绝或报告无法写出为 2；验证方式是逐项构造失败矩阵并断言退出码
 - [x] 7.4 实现真实/替身计数：每个依赖分别记录 `calls.real`/`calls.double`，重试、移除参数重试、SDK 内置重试、写入核对、索引轮询都按实际调用计数；验证方式是模型移除参数重试为 2 次、SDK 内部重试被计数、图谱写入+核对+多次检索分别计数、`mode=live` 时 `calls.double=0`
-- [ ] 7.5 实现 SHA 与脏工作树约定：报告 `tested_sha` 等于 HEAD；默认在外部调用前拒绝脏工作树，`ALLOW_DIRTY=1` 时允许并记录 `dirty=true`；验证方式是干净、默认脏树拒绝、显式允许脏树三种运行各一次，断言退出码、`dirty` 与签收提示
+- [x] 7.5 实现 SHA 与脏工作树约定：报告 `tested_sha` 等于 HEAD；默认在外部调用前拒绝脏工作树，`ALLOW_DIRTY=1` 时允许并记录 `dirty=true`；验证方式是干净、默认脏树拒绝、显式允许脏树三种运行各一次，断言退出码、`dirty` 与签收提示
 - [x] 7.6 在 `Makefile` 增加 `smoke-live` 目标与 help 文案，使用 `docker compose --profile live run --rm` 执行引擎命令；验证方式是 `make help` 出现该目标，`make smoke-live` 在缺配置时写出报告并非零退出
 - [x] 7.7 验证 Compose 隔离：`engine` 不发布端口、不挂载数据库卷、不挂载仓库根目录或 `.env`、只接收模型/Zep 白名单变量，只挂载 `runtime/smoke-live`；验证方式是 `docker compose --profile live config` 与 `docker compose ps` 检查，并确认容器内看不到 `.env`、`private-inputs/`、项目材料与历史报告
 - [x] 7.8 增加缺配置按依赖判定、失效凭据、超时、限流、模型输出不合规、索引超时、单平台失败的编排级测试；验证方式是分别模拟只缺模型、只缺 Zep、两者都缺，断言对应项 `not_run` 而本地 OASIS 仍执行，且每项都断言报告状态、原因码、调用次数与退出码，不把 `not_run` 计为通过
@@ -84,11 +84,11 @@
 - [x] 8.1 新增 `app/engines/offline.py`：用测试替身驱动 `contracts.py`，覆盖 Chat Completions 路径与 `json_object`、模型合法/非法/移除参数重试/缺配置、固定 `graph_uuid` 受理/索引/命中/超时/响应丢失且首次搜索未命中、`twitter/create_post` 与 `reddit/目标帖/create_comment` 独立判定、单平台失败、清理失败、缺配置按依赖分别判定；验证方式是 `python3 -m app.engines.offline --json` 可直接运行且只依赖标准库
 - [x] 8.2 增加 `tests/test_engine_offline.py`，断言离线场景的请求契约、状态转换、原因码、真实调用为 0、替身调用大于 0；验证方式是 `.venv/bin/python -m unittest tests.test_engine_offline` 通过
 - [x] 8.3 在 `scripts/verify.py` 注册 `ENGINE_CHANGE_ID = "2026-11-21-connect-engine-providers"`，初始化 `engine_evidence`，在报告中写入 `mode=offline-contract`、逐场景状态、`calls.real=0`、`calls.double` 与缺配置按依赖判定结果；验证方式是 `python3 -m py_compile scripts/verify.py` 通过
-- [ ] 8.4 在默认 `make verify` 中保持 Change 01–05 全部场景不变，新增内容不得改变 `/health` 200/503/200、`/livez`、容器身份、账户隔离、任务事件、材料冒烟与工作台深链接断言；验证方式是两次默认运行全部通过且报告场景数与既有基线一致
-- [ ] 8.5 增加 `CHANGE=2026-11-21-connect-engine-providers` 专属场景：运行离线契约检查并把结果写入 `engine_evidence`；验证方式是无真实密钥、无外网时两次运行均退出码 0、`tested_sha` 等于 HEAD、`dirty=false`
-- [ ] 8.6 增加未知 `CHANGE` 回归：`CHANGE=not-a-change` 仍以退出码 2 结束并写“未注册的变更”；验证方式是运行该命令并检查报告
-- [ ] 8.7 在 README 验收章节补充 Change 06 离线场景、报告字段、连续两次运行要求与“离线不证明真实联通”；验证方式是文档命令与 `scripts/verify.py` 的实际输出一致
-- [ ] 8.8 确认 `make verify` 与 Change 06 离线场景不读取 `.env` 中的真实密钥、不安装候选引擎依赖、不发起模型/图谱/OASIS 调用；验证方式是在无密钥环境运行并检查报告 `calls.real=0`
+- [x] 8.4 在默认 `make verify` 中保持 Change 01–05 全部场景不变，新增内容不得改变 `/health` 200/503/200、`/livez`、容器身份、账户隔离、任务事件、材料冒烟与工作台深链接断言；验证方式是两次默认运行全部通过且报告场景数与既有基线一致
+- [x] 8.5 增加 `CHANGE=2026-11-21-connect-engine-providers` 专属场景：运行离线契约检查并把结果写入 `engine_evidence`；验证方式是无真实密钥、无外网时两次运行均退出码 0、`tested_sha` 等于 HEAD、`dirty=false`
+- [x] 8.6 增加未知 `CHANGE` 回归：`CHANGE=not-a-change` 仍以退出码 2 结束并写“未注册的变更”；验证方式是运行该命令并检查报告
+- [x] 8.7 在 README 验收章节补充 Change 06 离线场景、报告字段、连续两次运行要求与“离线不证明真实联通”；验证方式是文档命令与 `scripts/verify.py` 的实际输出一致
+- [x] 8.8 确认 `make verify` 与 Change 06 离线场景不读取 `.env` 中的真实密钥、不安装候选引擎依赖、不发起模型/图谱/OASIS 调用；验证方式是在无密钥环境运行并检查报告 `calls.real=0`
 - [x] 8.9 在 `.github/workflows/verify.yml` 保留现有默认 verify job，增加独立 Change 06 离线 job，调用 `make verify CHANGE=2026-11-21-connect-engine-providers`；验证方式是本地用 `act` 等价检查或审阅 YAML，确认两个 job 都调用同一仓库入口且不重复实现验收逻辑
 - [x] 8.10 为两份 CI 报告使用不同 artifact 名称，分别断言 `tested_sha`、`dirty=false`、`result=passed`，Change 06 专属检查额外断言 `calls.real=0`；验证方式是构造通过/失败报告各一次，断言缺失 artifact 或任一断言不满足时 job 失败
 - [x] 8.11 确认 CI 不注入模型或 Zep 密钥、不执行 `make smoke-live`、不构建 live 引擎镜像；验证方式是审阅 workflow 的 env 与命令，确认没有真实密钥、没有 `smoke-live`、没有 `Dockerfile.engine` 或 live profile
@@ -98,20 +98,20 @@
 - [x] 9.1 更新 `AGENTS.md`：新增“引擎接入与真实联调”规则，覆盖配置与密钥边界、引擎只获得所需代码/显式配置/报告目录、原创材料、25 页私有样本禁止外部调用、真实/离线分离、调用计数（含 SDK 内置重试）、依赖基线、固定 `graph_uuid` 与幂等键、双平台原生映射与清理、`ALLOW_DIRTY=1`、CI 双检查与报告脱敏
 - [x] 9.2 更新 `README.md`：新增引擎配置表、模型/图谱/双平台接入说明、`make smoke-live` 验收、离线 `CHANGE` 用法、报告路径、人工签收边界与排障；验证方式是逐条执行文档命令
 - [x] 9.3 更新 `Makefile` help 与 README 命令表，确保 `make smoke-live`、`make verify CHANGE=…` 的说明一致；验证方式是 `make help` 与文档文本对比
-- [ ] 9.4 审阅新增代码注释、测试数据、文档、提交说明与 PR 文案，确认只使用 EchoSim 域术语、原创示例与正式包名，不出现外部参考项目名称、链接、源码路径、代码片段、截图、示例数据或出处说明；验证方式是人工全文检索与评审
+- [x] 9.4 审阅新增代码注释、测试数据、文档、提交说明与 PR 文案，确认只使用 EchoSim 域术语、原创示例与正式包名，不出现外部参考项目名称、链接、源码路径、代码片段、截图、示例数据或出处说明；验证方式是人工全文检索与评审
 - [x] 9.5 确认 `docs/acceptance/` 在本变更实施与自动化运行中未被创建、修改或删除；验证方式是 `git status --porcelain docs/acceptance` 为空
 
 ## 10. 集成验证与真实联调签收准备
 
-- [ ] 10.1 运行 `.venv/bin/python -m unittest discover -s tests`、`cd web && npm test && npm run typecheck && npm run build`，确认既有回归与新增引擎单元测试全部通过
-- [ ] 10.2 在干净提交上带 `EXPECTED_SHA=$(git rev-parse HEAD)` 连续两次执行默认 `make verify`，确认退出码 0、`tested_sha` 一致、`dirty=false`、Change 01–05 场景完整
-- [ ] 10.3 在同一 SHA 上连续两次执行 `make verify CHANGE=2026-11-21-connect-engine-providers`，确认退出码 0、`engine_evidence` 一致、真实调用为 0、离线场景全部通过
+- [x] 10.1 运行 `.venv/bin/python -m unittest discover -s tests`、`cd web && npm test && npm run typecheck && npm run build`，确认既有回归与新增引擎单元测试全部通过
+- [x] 10.2 在干净提交上带 `EXPECTED_SHA=$(git rev-parse HEAD)` 连续两次执行默认 `make verify`，确认退出码 0、`tested_sha` 一致、`dirty=false`、Change 01–05 场景完整
+- [x] 10.3 在同一 SHA 上连续两次执行 `make verify CHANGE=2026-11-21-connect-engine-providers`，确认退出码 0、`engine_evidence` 一致、真实调用为 0、离线场景全部通过
 - [ ] 10.4 在无真实密钥环境执行 `make smoke-live`，分别验证只缺模型、只缺 Zep、两者都缺：对应项为 `not_run`/`missing_config`，本地 OASIS 动作仍执行，真实外部调用为 0，总结果非零；再以临时无效凭据覆盖运行，确认 `auth_failed` 且不重试
 - [ ] 10.5 恢复临时覆盖的有效凭据并填写 `MODEL_API_BASE_URL`、`MODEL_NAME`、`MODEL_API_KEY`、`ZEP_API_KEY`、`ZEP_ACCEPTANCE_GRAPH_ID`（graph_uuid）后重新执行 `make smoke-live`，确认模型结构校验、图谱检索命中和平台 A/B 行动记录全部通过、退出码 0、`mode=live`、`dirty=false`
 - [ ] 10.6 连续两次执行真实 `make smoke-live`，确认两次运行使用不同运行标识、图谱写入不产生重复事实、两次报告都可通过精确标识核对，并记录两份报告路径
-- [ ] 10.7 在目标 Linux aarch64、Python 3.11 容器中确认依赖解析、安装、导入、最小运行四阶段证据齐全；若任一阶段失败，记录 `dependencyBaseline.status=unverified`、失败阶段与阻塞项，并停止真实联调，不得宣称基线可用
-- [ ] 10.8 确认 25 页私有样本没有进入模型请求、图谱 episode、平台动作、日志、报告或 `runtime/`；验证方式是检查请求/报告字段、扫描 `runtime/smoke-live/` 与 `git status`
-- [ ] 10.9 准备待签收清单（不写入 `docs/acceptance/`）：被测 SHA、`make verify` 与 `make verify CHANGE=…` 报告路径、`make smoke-live` live 报告路径、模型字段/来源证据、图谱 episode UUID 与幂等键及检索等待、平台 A/B 原生平台/原生动作/记录标识/目标帖标识、依赖基线四阶段结果、已知限制
-- [ ] 10.10 列出需要开发者在本机填写的变量名与占位说明：`MODEL_API_BASE_URL`（API 根地址，可含 `/v1`）、`MODEL_NAME`、`MODEL_API_KEY`、`ZEP_API_KEY`、`ZEP_ACCEPTANCE_GRAPH_ID`（graph_uuid）；不要求或打印真实值，验证方式是文档/交付说明只列变量名与用途
-- [ ] 10.11 确认脏工作树行为：默认 `make smoke-live` 在外部调用前拒绝并退出，`ALLOW_DIRTY=1` 时允许但报告 `dirty=true`，签收只接受 `dirty=false` 且 `tested_sha` 与候选一致的 live 报告；验证方式是三种运行各一次并检查报告
+- [x] 10.7 在目标 Linux aarch64、Python 3.11 容器中确认依赖解析、安装、导入、最小运行四阶段证据齐全；若任一阶段失败，记录 `dependencyBaseline.status=unverified`、失败阶段与阻塞项，并停止真实联调，不得宣称基线可用
+- [x] 10.8 确认 25 页私有样本没有进入模型请求、图谱 episode、平台动作、日志、报告或 `runtime/`；验证方式是检查请求/报告字段、扫描 `runtime/smoke-live/` 与 `git status`
+- [x] 10.9 准备待签收清单（不写入 `docs/acceptance/`）：被测 SHA、`make verify` 与 `make verify CHANGE=…` 报告路径、`make smoke-live` live 报告路径、模型字段/来源证据、图谱 episode UUID 与幂等键及检索等待、平台 A/B 原生平台/原生动作/记录标识/目标帖标识、依赖基线四阶段结果、已知限制
+- [x] 10.10 列出需要开发者在本机填写的变量名与占位说明：`MODEL_API_BASE_URL`（API 根地址，可含 `/v1`）、`MODEL_NAME`、`MODEL_API_KEY`、`ZEP_API_KEY`、`ZEP_ACCEPTANCE_GRAPH_ID`（graph_uuid）；不要求或打印真实值，验证方式是文档/交付说明只列变量名与用途
+- [x] 10.11 确认脏工作树行为：默认 `make smoke-live` 在外部调用前拒绝并退出，`ALLOW_DIRTY=1` 时允许但报告 `dirty=true`，签收只接受 `dirty=false` 且 `tested_sha` 与候选一致的 live 报告；验证方式是三种运行各一次并检查报告
 - [ ] 10.12 由验收人在真实凭据与浏览器/终端环境中核对联通结果后，才在 `docs/acceptance/` 写入签收记录；记录必须引用同 SHA、`dirty=false` 的 `mode=live` 报告并注明离线报告不能替代真实联调；`make verify`、CI 与 `make smoke-live` 均不得自动创建或修改该记录
