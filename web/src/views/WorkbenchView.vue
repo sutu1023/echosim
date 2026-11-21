@@ -3,8 +3,10 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { RouterLink, useRoute, useRouter } from 'vue-router'
 import { api, ApiError, type Project } from '../api'
 import JobPanel from './JobPanel.vue'
+import MaterialsPanel from './MaterialsPanel.vue'
 import { checkHealth, healthState } from '../health'
 import { messagesFor } from '../i18n'
+import { buildMaterialQuery } from '../materials/format'
 import { markLoggedOut } from '../session'
 import {
   getStage,
@@ -40,6 +42,9 @@ const lang = computed(() => normalizeLang(route.query.lang))
 const layoutModes = LAYOUT_MODES
 const t = computed(() => messagesFor(lang.value))
 const healthLabel = computed(() => t.value.health[healthState.value])
+const documentId = computed(() =>
+  typeof route.query.document === 'string' ? route.query.document : null,
+)
 
 // 当前变更没有阶段数据源；正常分支只由隔离测试数据证明，产品页面始终使用真实 API。
 const stageHasData = false
@@ -147,6 +152,13 @@ function continueStage(): void {
   if (previous.value) {
     goStage(previous.value.slug)
   }
+}
+
+function selectMaterial(id: string | null): void {
+  void router.replace({
+    path: route.path,
+    query: buildMaterialQuery(route.query, id),
+  })
 }
 
 function setLayout(next: LayoutMode): void {
@@ -377,7 +389,15 @@ onBeforeUnmount(() => {
             </div>
           </section>
 
-          <section class="wb-empty card">
+          <MaterialsPanel
+            v-if="currentStage.id === 1"
+            :project-id="project.id"
+            :lang="lang"
+            :document-id="documentId"
+            @select="selectMaterial"
+          />
+
+          <section v-else class="wb-empty card">
             <h2>{{ missingTitle }}</h2>
             <p class="muted">{{ missingBody }}</p>
             <button type="button" class="primary" @click="continueStage">
@@ -413,9 +433,9 @@ onBeforeUnmount(() => {
           <section class="context-card card">
             <h2>{{ t.context.materialsTitle }}</h2>
             <p class="muted">{{ t.context.materialsBody }}</p>
-            <RouterLink :to="{ path: '/', hash: '#materials' }">
+            <a class="quiet-link" href="#materials">
               {{ t.context.materialsLink }}
-            </RouterLink>
+            </a>
           </section>
           <section class="context-card card">
             <h2>{{ t.context.questionsTitle }}</h2>

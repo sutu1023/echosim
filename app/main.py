@@ -15,6 +15,8 @@ from .config import settings
 from .cookies import clear_session_cookie
 from .db import dispose_engine
 from .errors import (
+    DocumentNotFound,
+    DocumentNotText,
     InvalidCursor,
     JobNotFound,
     ProjectNotFound,
@@ -24,6 +26,7 @@ from .errors import (
 from .health import router as health_router
 from .middleware import enforce_same_origin
 from .routers.auth import router as auth_router
+from .routers.documents import router as documents_router
 from .routers.history import router as history_router
 from .routers.jobs import router as jobs_router
 from .routers.projects import router as projects_router
@@ -88,6 +91,20 @@ def create_app(web_dist_dir: Path | None = None) -> FastAPI:
     async def handle_job_not_found(_: Request, __: JobNotFound) -> JSONResponse:
         return JSONResponse({"detail": "任务不存在"}, status_code=404)
 
+    @app.exception_handler(DocumentNotFound)
+    async def handle_document_not_found(
+        _: Request, __: DocumentNotFound
+    ) -> JSONResponse:
+        return JSONResponse({"detail": "材料不存在"}, status_code=404)
+
+    @app.exception_handler(DocumentNotText)
+    async def handle_document_not_text(
+        _: Request, __: DocumentNotText
+    ) -> JSONResponse:
+        return JSONResponse(
+            {"detail": "该材料没有可定位的文本原文"}, status_code=409
+        )
+
     @app.exception_handler(InvalidCursor)
     async def handle_invalid_cursor(_: Request, __: InvalidCursor) -> JSONResponse:
         return JSONResponse({"detail": "游标无效"}, status_code=400)
@@ -95,6 +112,7 @@ def create_app(web_dist_dir: Path | None = None) -> FastAPI:
     app.include_router(auth_router)
     app.include_router(projects_router)
     app.include_router(jobs_router)
+    app.include_router(documents_router)
     app.include_router(history_router)
     app.include_router(health_router)
     register_static_routes(app, web_dist_dir or settings.web_dist_dir)

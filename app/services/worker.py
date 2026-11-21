@@ -9,18 +9,23 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 import uuid
 from collections.abc import Callable
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass
 from datetime import datetime
+from pathlib import Path
 
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..errors import LeaseLost
+from . import document_extract
+from . import document_storage
 from . import run_events
+from .documents import INGEST_TOTAL_STEPS, failure_message
 
 logger = logging.getLogger(__name__)
 
@@ -57,7 +62,8 @@ UPDATE jobs j
   FROM candidate c, runs r
  WHERE j.id = c.id AND r.id = j.run_id
 RETURNING j.id, j.run_id, j.next_step, j.attempts, j.lease_token,
-          r.total_steps, r.stage, r.fail_at_step, r.simulated_epoch
+          r.total_steps, r.stage, r.fail_at_step, r.simulated_epoch,
+          r.kind, r.document_id
 """ % LEASE_SECONDS_PARAM
 
 
@@ -72,6 +78,8 @@ class Claim:
     stage: str
     fail_at_step: int | None
     simulated_epoch: datetime
+    kind: str
+    document_id: uuid.UUID | None
 
 
 @dataclass(frozen=True)
@@ -91,6 +99,8 @@ def _as_claim(row: object) -> Claim:
         stage=row.stage,  # type: ignore[attr-defined]
         fail_at_step=row.fail_at_step,  # type: ignore[attr-defined]
         simulated_epoch=row.simulated_epoch,  # type: ignore[attr-defined]
+        kind=str(getattr(row, "kind", "test.simulation")),
+        document_id=getattr(row, "document_id", None),
     )
 
 
@@ -352,6 +362,405 @@ async def _finish(
     if result.rowcount != 1:
         raise LeaseLost(f"任务 {claim.job_id} 的租约已失效")
 
+
+
+
+# ---------------------------------------------------------------- 材料解析
+
+INGEST_STEP_KEYS = ("read", "clean", "index")
+
+
+@dataclass(frozen=True)
+class IngestArtifacts:
+    chunks: tuple[document_extract.Chunk, ...]
+    page_count: int | None
+    text_encoding: str | None
+
+
+def _compute_artifacts(
+    *,
+    kind: str,
+    data: bytes,
+    max_pages: int,
+    chunk_target: int,
+    chunk_overlap: int,
+    delay_ms: int,
+) -> IngestArtifacts:
+    """在工作线程里完成同步提取；delay 用于验收放大慢解析窗口。"""
+    if delay_ms > 0:
+        time.sleep(delay_ms / 1000)
+    if kind == "pdf":
+        pdf = document_extract.parse_pdf(data, max_pages=max_pages)
+        chunks = document_extract.chunk_pdf(
+            pdf, target=chunk_target, overlap=chunk_overlap
+        )
+        return IngestArtifacts(tuple(chunks), len(pdf.pages), None)
+    text = document_extract.parse_text(data)
+    chunks = document_extract.chunk_text(
+        text, target=chunk_target, overlap=chunk_overlap
+    )
+    return IngestArtifacts(tuple(chunks), None, text.encoding)
+
+
+def ingest_failure(exc: BaseException) -> tuple[str, str]:
+    """把提取异常映射为稳定的失败码与面向用户的说明。"""
+    if isinstance(exc, document_extract.DecodeFailed):
+        return "decode_failed", failure_message("decode_failed")
+    if isinstance(exc, document_extract.NoTextLayer):
+        return "no_text_layer", failure_message("no_text_layer")
+    if isinstance(exc, document_extract.TooManyPages):
+        return "too_many_pages", failure_message(
+            "too_many_pages", pages=exc.pages, limit=exc.limit
+        )
+    return "parse_error", failure_message("parse_error")
+
+
+async def _load_document_meta(db: AsyncSession, claim: Claim) -> object | None:
+    result = await db.execute(
+        text("SELECT id, kind, storage_path FROM documents WHERE id = :document_id"),
+        {"document_id": claim.document_id},
+    )
+    return result.first()
+
+
+async def _mark_parsing(db: AsyncSession, claim: Claim) -> None:
+    await db.execute(
+        text(
+            "UPDATE documents SET status = 'parsing', updated_at = now() "
+            "WHERE id = :document_id AND status IN ('queued', 'parsing')"
+        ),
+        {"document_id": claim.document_id},
+    )
+    await db.commit()
+
+
+async def _heartbeat_loop(
+    claim: Claim,
+    *,
+    session_factory: SessionFactory,
+    lease_seconds: float,
+    heartbeat_seconds: float,
+    stop: asyncio.Event,
+) -> None:
+    """计算期间独立续租；失去租约或数据库故障时安静退出。"""
+    while not stop.is_set():
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=heartbeat_seconds)
+        except asyncio.TimeoutError:
+            pass
+        if stop.is_set():
+            return
+        try:
+            async with session_factory() as db:
+                if not await heartbeat(db, claim, lease_seconds=lease_seconds):
+                    return
+        except DB_ERRORS:
+            return
+
+
+async def _publish_chunks(
+    db: AsyncSession, claim: Claim, artifacts: IngestArtifacts
+) -> None:
+    await db.execute(
+        text("DELETE FROM document_chunks WHERE document_id = :document_id"),
+        {"document_id": claim.document_id},
+    )
+    if artifacts.chunks:
+        await db.execute(
+            text(
+                "INSERT INTO document_chunks (document_id, chunk_index, page_no, "
+                "paragraph_start, paragraph_end, source_start, source_end, text) "
+                "VALUES (:document_id, :chunk_index, :page_no, :paragraph_start, "
+                ":paragraph_end, :source_start, :source_end, :text)"
+            ),
+            [
+                {
+                    "document_id": claim.document_id,
+                    "chunk_index": chunk.index,
+                    "page_no": chunk.page_no,
+                    "paragraph_start": chunk.paragraph_start,
+                    "paragraph_end": chunk.paragraph_end,
+                    "source_start": chunk.source_start,
+                    "source_end": chunk.source_end,
+                    "text": chunk.text,
+                }
+                for chunk in artifacts.chunks
+            ],
+        )
+    updated = await db.execute(
+        text(
+            "UPDATE documents SET status = 'ready', page_count = :page_count, "
+            "chunk_count = :chunk_count, text_encoding = :text_encoding, "
+            "failure_code = NULL, failure_message = NULL, "
+            "ready_at = clock_timestamp(), updated_at = clock_timestamp() "
+            "WHERE id = :document_id AND status IN ('queued', 'parsing')"
+        ),
+        {
+            "document_id": claim.document_id,
+            "page_count": artifacts.page_count,
+            "chunk_count": len(artifacts.chunks),
+            "text_encoding": artifacts.text_encoding,
+        },
+    )
+    if updated.rowcount != 1:
+        raise LeaseLost(f"材料 {claim.document_id} 已不在可发布状态")
+
+
+async def _commit_ingest_step(
+    db: AsyncSession,
+    claim: Claim,
+    *,
+    step: int,
+    step_key: str,
+    artifacts: IngestArtifacts,
+    lease_seconds: float,
+) -> str:
+    """提交一个解析步骤；只有最后一步会原子发布分块与 ready。"""
+    try:
+        row = await _locked_job(db, claim)
+        if row is None:
+            await db.rollback()
+            return "lost"
+        if row.status in TERMINAL_STATUSES:  # type: ignore[attr-defined]
+            await db.rollback()
+            return str(row.status)  # type: ignore[attr-defined]
+        db_now = await _db_now(db)
+        if not _lease_valid(row, claim, db_now):
+            await db.rollback()
+            return "lost"
+        next_step = int(row.next_step)  # type: ignore[attr-defined]
+        if next_step >= step:
+            await db.rollback()
+            return "duplicate"
+        if next_step != step - 1:
+            await db.rollback()
+            return "lost"
+        inserted = await db.execute(
+            text(
+                "INSERT INTO run_steps (run_id, step_index, step_key, payload) "
+                "VALUES (:run_id, :step, :step_key, '{}'::jsonb) "
+                "ON CONFLICT (run_id, step_index) DO NOTHING"
+            ),
+            {"run_id": claim.run_id, "step": step, "step_key": f"ingest-{step_key}"},
+        )
+        if inserted.rowcount != 1:
+            await db.rollback()
+            return "duplicate"
+
+        terminal = step >= claim.total_steps
+        event_type = "completed" if terminal else "progress"
+        await run_events.append_event(
+            db,
+            run_id=claim.run_id,
+            seq=step,
+            type=event_type,
+            stage=claim.stage,
+            simulated_at=run_events.simulated_time(claim.simulated_epoch, step),
+            payload={
+                "step": step,
+                "stepKey": step_key,
+                "chunks": len(artifacts.chunks),
+                "totalSteps": claim.total_steps,
+            },
+        )
+        if terminal:
+            await _publish_chunks(db, claim, artifacts)
+            await _finish(db, claim, step, status="succeeded", reason=None)
+        else:
+            updated = await db.execute(
+                text(
+                    "UPDATE jobs SET next_step = :step, "
+                    "lease_expires_at = clock_timestamp() + make_interval(secs => "
+                    + LEASE_SECONDS_PARAM
+                    + "), updated_at = clock_timestamp() "
+                    "WHERE id = :job_id AND lease_token = :lease_token "
+                    "AND status = 'running'"
+                ),
+                {
+                    "step": step,
+                    "job_id": claim.job_id,
+                    "lease_token": claim.lease_token,
+                    "lease_seconds": lease_seconds,
+                },
+            )
+            if updated.rowcount != 1:
+                await db.rollback()
+                return "lost"
+        await db.commit()
+        return event_type
+    except DB_ERRORS:
+        await db.rollback()
+        raise
+
+
+async def _commit_ingest_failure(
+    db: AsyncSession,
+    claim: Claim,
+    *,
+    code: str,
+    message: str,
+    page_count: int | None = None,
+    failure_detail: dict[str, object] | None = None,
+) -> str:
+    """失败、终态事件与材料失败同事务写入。"""
+    try:
+        row = await _locked_job(db, claim)
+        if row is None:
+            await db.rollback()
+            return "lost"
+        if row.status in TERMINAL_STATUSES:  # type: ignore[attr-defined]
+            await db.rollback()
+            return str(row.status)  # type: ignore[attr-defined]
+        db_now = await _db_now(db)
+        if not _lease_valid(row, claim, db_now):
+            await db.rollback()
+            return "lost"
+        next_step = int(row.next_step)  # type: ignore[attr-defined]
+        seq = next_step + 1
+        await run_events.append_event(
+            db,
+            run_id=claim.run_id,
+            seq=seq,
+            type="failed",
+            stage=claim.stage,
+            simulated_at=run_events.simulated_time(claim.simulated_epoch, seq),
+            payload={
+                "reason": code,
+                "stepsApplied": next_step,
+                "totalSteps": claim.total_steps,
+            },
+        )
+        await db.execute(
+            text(
+                "UPDATE documents SET status = 'failed', failure_code = :code, "
+                "failure_message = :message, chunk_count = 0, "
+                "page_count = :page_count, "
+                "failure_detail = CAST(:failure_detail AS jsonb), "
+                "ready_at = NULL, updated_at = now() "
+                "WHERE id = :document_id AND status IN ('queued', 'parsing')"
+            ),
+            {
+                "document_id": claim.document_id,
+                "code": code,
+                "message": message,
+                "page_count": page_count,
+                "failure_detail": json.dumps(
+                    failure_detail or {}, ensure_ascii=False
+                ),
+            },
+        )
+        await _finish(db, claim, next_step, status="failed", reason=code)
+        await db.commit()
+        return "failed"
+    except DB_ERRORS:
+        await db.rollback()
+        raise
+
+
+async def execute_ingest(
+    claim: Claim,
+    *,
+    session_factory: SessionFactory,
+    stop_event: asyncio.Event | None,
+    lease_seconds: float,
+    heartbeat_seconds: float,
+    storage_root: Path,
+    max_pages: int,
+    chunk_target: int,
+    chunk_overlap: int,
+    parse_delay_ms: int,
+) -> str:
+    """解析材料：读取、清洗、分块都在内存完成，只有最后一步发布分块。"""
+    stop_heartbeat = asyncio.Event()
+    heartbeat_task = asyncio.create_task(
+        _heartbeat_loop(
+            claim,
+            session_factory=session_factory,
+            lease_seconds=lease_seconds,
+            heartbeat_seconds=heartbeat_seconds,
+            stop=stop_heartbeat,
+        )
+    )
+    try:
+        async with session_factory() as db:
+            meta = await _load_document_meta(db, claim)
+            await db.commit()
+            if meta is not None:
+                await _mark_parsing(db, claim)
+        if meta is None:
+            async with session_factory() as db:
+                return await _commit_ingest_failure(
+                    db,
+                    claim,
+                    code="original_missing",
+                    message=failure_message("original_missing"),
+                )
+        try:
+            data = await asyncio.to_thread(
+                document_storage.read_bytes, storage_root, meta.storage_path
+            )
+        except (OSError, ValueError):
+            async with session_factory() as db:
+                return await _commit_ingest_failure(
+                    db,
+                    claim,
+                    code="original_missing",
+                    message=failure_message("original_missing"),
+                )
+        try:
+            artifacts = await asyncio.to_thread(
+                _compute_artifacts,
+                kind=str(meta.kind),
+                data=data,
+                max_pages=max_pages,
+                chunk_target=chunk_target,
+                chunk_overlap=chunk_overlap,
+                delay_ms=parse_delay_ms,
+            )
+        except Exception as exc:  # noqa: BLE001 - 解析失败是业务终态
+            code, message = ingest_failure(exc)
+            page_count = (
+                exc.pages
+                if isinstance(exc, document_extract.TooManyPages)
+                else None
+            )
+            failure_detail = (
+                {"pages": exc.pages, "limit": exc.limit}
+                if isinstance(exc, document_extract.TooManyPages)
+                else {}
+            )
+            async with session_factory() as db:
+                return await _commit_ingest_failure(
+                    db,
+                    claim,
+                    code=code,
+                    message=message,
+                    page_count=page_count,
+                    failure_detail=failure_detail,
+                )
+
+        if stop_event is not None and stop_event.is_set():
+            return "stopped"
+        outcome = "succeeded"
+        for step in range(claim.next_step + 1, claim.total_steps + 1):
+            async with session_factory() as db:
+                outcome = await _commit_ingest_step(
+                    db,
+                    claim,
+                    step=step,
+                    step_key=INGEST_STEP_KEYS[step - 1],
+                    artifacts=artifacts,
+                    lease_seconds=lease_seconds,
+                )
+            if outcome not in ("progress", "completed"):
+                return outcome
+        return "succeeded"
+    finally:
+        stop_heartbeat.set()
+        try:
+            await heartbeat_task
+        except (asyncio.CancelledError, Exception):  # noqa: BLE001 - 收尾不掩盖主流程
+            pass
 
 async def execute_job(
     claim: Claim,

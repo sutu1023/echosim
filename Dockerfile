@@ -24,6 +24,7 @@ COPY app/ ./app/
 COPY --from=web-build /build/web/dist ./web/dist
 
 RUN useradd --create-home --uid 10001 echosim \
+    && mkdir -p /app/data/documents \
     && chown -R echosim:echosim /app
 USER echosim
 

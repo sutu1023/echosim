@@ -3,6 +3,7 @@
 !.env.example
 private-inputs/
 runtime/
+data/
 node_modules/
 .venv/
 __pycache__/
