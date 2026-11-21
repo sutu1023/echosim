@@ -9,7 +9,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
@@ -35,7 +35,7 @@ READY_STATUS = "ready"
 DOCUMENT_COLUMNS = (
     "id, project_id, uploaded_by, display_name, kind, content_type, size_bytes, "
     "sha256, storage_path, text_encoding, status, page_count, chunk_count, "
-    "failure_code, failure_message, created_at, ready_at"
+    "failure_code, failure_message, failure_detail, created_at, ready_at"
 )
 
 FAILURE_MESSAGES = {
@@ -81,6 +81,7 @@ class Document:
     failure_message: str | None
     created_at: datetime
     ready_at: datetime | None
+    failure_detail: dict[str, object] = field(default_factory=dict)
     job_id: uuid.UUID | None = None
     run_id: uuid.UUID | None = None
 
@@ -108,6 +109,7 @@ def _as_document(row: object) -> Document:
         failure_message=row.failure_message,  # type: ignore[attr-defined]
         created_at=row.created_at,  # type: ignore[attr-defined]
         ready_at=row.ready_at,  # type: ignore[attr-defined]
+        failure_detail=dict(getattr(row, "failure_detail", None) or {}),
         job_id=getattr(row, "job_id", None),
         run_id=getattr(row, "job_run_id", None),
     )
@@ -123,6 +125,7 @@ def document_body(document: Document) -> dict[str, object]:
         failure = {
             "code": document.failure_code,
             "message": document.failure_message or failure_message(document.failure_code),
+            "detail": document.failure_detail,
         }
     return {
         "documentId": str(document.id),
@@ -427,8 +430,8 @@ async def cancel_for_run(db: AsyncSession, *, run_id: uuid.UUID) -> None:
     await db.execute(
         text(
             "UPDATE documents SET status = 'failed', failure_code = 'canceled', "
-            "failure_message = :message, chunk_count = 0, page_count = NULL, "
-            "updated_at = now() "
+            "failure_message = :message, failure_detail = '{}'::jsonb, "
+            "chunk_count = 0, page_count = NULL, updated_at = now() "
             "WHERE id = (SELECT document_id FROM runs WHERE id = :run_id) "
             "AND status IN ('queued', 'parsing')"
         ),

@@ -254,6 +254,7 @@ worker 复用同一镜像但没有 HTTP 端口，因此 Compose 用“心跳文�
 - Markdown/TXT 优先 UTF-8（含 BOM），其次带 BOM 的 UTF-16 与可可靠识别的 GB18030；无法可靠解码时材料失败并说明原因。正文中的路径与 URL 不会被当作页眉清理。
 - 每个分块都带 `pageNo`（PDF）或 `paragraphStart`/`paragraphEnd`（文本）以及 `sourceStart`/`sourceEnd`。偏移单位是 **UTF-16 代码单元**、区间左闭右开，浏览器可直接用它切片与高亮。
 - 同一项目内相同内容只保留一套有效材料与分块；失败材料不阻止重新上传。分块与 `ready` 在同一事务内发布，中断接手不会留下半成品或重复分块。
+- 失败的页数超限记录保存解析时的实际页数与上限；之后修改 `DOCUMENT_MAX_PAGES` 只影响新上传与上传提示，历史材料仍按解析时的上限说明原因，修复前没有该信息的旧记录不显示上限数字。
 - 取消解析在取消事务内同时写入 job `canceled`、终态事件与材料失败；worker 停止时取消排队任务也立即生效。
 - 材料深链接就是完整地址：`/projects/<项目 ID>/workbench/evidence-graph?layout=split&lang=zh&document=<材料 ID>`，刷新或粘贴后回到同一材料，`layout` 与 `lang` 保持不变。
 

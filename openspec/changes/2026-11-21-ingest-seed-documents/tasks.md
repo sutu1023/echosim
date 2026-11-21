@@ -71,3 +71,11 @@
 - [x] 9.2 运行 `cd web && npm test && npm run typecheck && npm run build` 与 `.venv/bin/python -m unittest discover -s tests`，确认全部通过且 `stage-links`、`job-log`、`job-panel-state` 等既有回归未被削弱
 - [x] 9.3 准备待人工验收清单（不写入 `docs/acceptance/`）：三页 PDF 在浏览器中总页数为 3、第 1 与第 3 页摘录跳回原件的实际页码；材料深链接的四项浏览器检查（所有者刷新/粘贴回同一材料、匿名登录后回原地址、B 打开时提示项目不存在、`layout`/`lang` 保留）；25 页私有样本的总页数与第 1/3 页落页；截图位置与同 SHA 报告路径；清单标注“未签收前不归档”
 - [ ] 9.4 由项目作者在自己的 Mac 浏览器上传 25 页私有样本并核对总页数与第 1、3 页跳转；样本只放在仓库外或已忽略的 `private-inputs/`，确认它与其正文没有出现在 `git status`、`runtime/`、报告中或任何提交里，验收结论只写入 `docs/acceptance/`
+
+## 10. 历史失败原因与配置变化
+
+- [ ] 10.1 新增 `app/migrations/0004_document_failure_detail.sql`（`documents.failure_detail jsonb NOT NULL DEFAULT '{}'`）；`tests/test_migrate.py` 断言 0004 被发现且包含该列；在已有数据卷上连续两次 `make migrate`，第二次输出“无待应用迁移”
+- [ ] 10.2 `worker` 在 `too_many_pages` 失败时写入 `failure_detail = {"pages": 实际页数, "limit": 解析时上限}`，材料响应返回 `failure.detail`，取消路径清空为 `{}`；`tests/test_documents_routes.py` 断言详情暴露 `failure.detail`
+- [ ] 10.3 前端区分两种文案：上传前提示使用当前 `limits.maxPages`；已失败材料使用 `failure.detail` 的解析时页数与上限，缺详情时显示不含上限数字的原因；`web/tests/material-source.test.mjs` 覆盖中英文的“3 页上限历史值”与“旧记录无数字”
+- [ ] 10.4 `scripts/verify.py` 增加 `document-failure-history` 场景：上限 3 时 4 页失败 → 恢复 2000 → 列表与详情仍返回解析时上限 3、实际页数 4，当前 `limits.maxPages=2000`
+- [ ] 10.5 更新 README、AGENTS 与规约；在干净提交上带 `EXPECTED_SHA` 连续两次执行默认 `make verify` 与两次 `CHANGE=2026-11-21-ingest-seed-documents`，四次退出码为 0、`tested_sha` 一致、`dirty=false`

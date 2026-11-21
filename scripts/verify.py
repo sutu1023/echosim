@@ -1688,6 +1688,14 @@ class DocumentFixtures:
                 [f"LIMIT-D-{self.suffix}"],
             ]
         )
+        self.history_over_pdf = build_pdf_bytes(
+            [
+                [f"HISTORY-A-{self.suffix}"],
+                [f"HISTORY-B-{self.suffix}"],
+                [f"HISTORY-C-{self.suffix}"],
+                [f"HISTORY-D-{self.suffix}"],
+            ]
+        )
         self.emoji_text = (
             "开头 emoji 😀😀 段落。\r\n\r\n"
             "第二段包含合法路径 C:\\data\\report.csv 与 file:///tmp/a.txt。\r\n\r\n"
@@ -2440,6 +2448,85 @@ def scenario_document_slow_parse(
     )
 
 
+
+def scenario_document_failure_history(
+    entry: dict[str, Any],
+    state: dict[str, Any],
+    report: dict[str, Any],
+    fixtures: DocumentFixtures,
+) -> None:
+    """上限 3 页失败后恢复 2000 页，历史材料仍显示解析时的上限。"""
+    token, project_id = state["token_a"], state["project_id"]
+    recreate_worker({"DOCUMENT_MAX_PAGES": "3"})
+    try:
+        failed = upload_and_wait(
+            state,
+            fixtures,
+            "history-limit.pdf",
+            fixtures.history_over_pdf,
+            "application/pdf",
+            expect_ready=False,
+        )
+        require(failed["status"] == "failed", "4 页文件在上限 3 时应失败")
+        failure = failed.get("failure") or {}
+        detail = failure.get("detail") or {}
+        require(detail.get("pages") == 4, f"应记录解析时实际页数 4：{detail}")
+        require(detail.get("limit") == 3, f"应记录解析时上限 3：{detail}")
+    finally:
+        recreate_worker({})
+
+    detail_after = fetch_document(token, project_id, str(failed["documentId"]))
+    failure_after = detail_after.get("failure") or {}
+    detail_after_values = failure_after.get("detail") or {}
+    require(
+        detail_after_values.get("pages") == 4
+        and detail_after_values.get("limit") == 3,
+        f"配置恢复后详情仍应保留解析时上限 3：{failure_after}",
+    )
+    require(int(detail_after.get("pageCount") or 0) == 4, "失败材料应保留实际页数")
+
+    listed = list_documents(token, project_id)
+    entry_listed = next(
+        item
+        for item in listed
+        if item["documentId"] == detail_after["documentId"]
+    )
+    list_failure = entry_listed.get("failure") or {}
+    list_detail = list_failure.get("detail") or {}
+    require(
+        list_detail.get("pages") == 4 and list_detail.get("limit") == 3,
+        f"列表也应保留解析时上限 3：{list_failure}",
+    )
+
+    status_limits, _, limits_body = api_call("GET", document_path(project_id), token)
+    require(status_limits == 200, f"材料列表期望 200，实际 {status_limits}")
+    assert isinstance(limits_body, dict)
+    current_limits = limits_body.get("limits") or {}
+    require(
+        int(current_limits.get("maxPages") or 0) == 2000,
+        f"恢复后当前配置应为 2000：{current_limits}",
+    )
+    require(
+        "3" in str(failure_after.get("message")),
+        "后端失败说明应保留解析时的上限 3",
+    )
+
+    record_document_evidence(
+        report,
+        "document-failure-history",
+        document_id=detail_after["documentId"],
+        page_count=detail_after.get("pageCount"),
+        parse_limit=detail_after_values.get("limit"),
+        current_limit=current_limits.get("maxPages"),
+        list_limit=list_detail.get("limit"),
+        message=failure_after.get("message"),
+    )
+    entry["detail"] = (
+        "上限 3 时 4 页失败；恢复 2000 后列表与详情仍记录解析时上限 3、实际页数 4，"
+        "当前配置为 2000"
+    )
+
+
 def run_acceptance(report: dict[str, Any], change: str | None = None) -> bool:
     state: dict[str, Any] = {}
     fixtures = DocumentFixtures()
@@ -2532,6 +2619,8 @@ def run_acceptance(report: dict[str, Any], change: str | None = None) -> bool:
                 scenario_document_boundaries(entry, state, report, fixtures)
             with scenario(report, "document-page-limit") as entry:
                 scenario_document_page_limit(entry, state, report, fixtures)
+            with scenario(report, "document-failure-history") as entry:
+                scenario_document_failure_history(entry, state, report, fixtures)
             with scenario(report, "document-dedup-isolation") as entry:
                 scenario_document_dedup_isolation(entry, state, report, fixtures)
             with scenario(report, "document-cancel") as entry:

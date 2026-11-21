@@ -6,7 +6,7 @@ import { messagesFor } from '../i18n'
 import {
   failureKey,
   formatBytes,
-  formatPageLimit,
+  pageLimitFailureText,
   isProcessing,
   kindLabelKey,
   paragraphLabel,
@@ -310,11 +310,10 @@ function statusLabel(document: MaterialDocument): string {
 function failureText(document: MaterialDocument): string {
   const code = document.failure?.code ?? 'parse_error'
   if (code === 'too_many_pages') {
-    return formatPageLimit(
-      t.value.failure.tooManyPagesDetail,
-      document.pageCount,
-      limits.value.maxPages,
-    )
+    return pageLimitFailureText(document.failure, {
+      detail: t.value.failure.tooManyPagesDetail,
+      unknown: t.value.failure.tooManyPagesNoLimit,
+    })
   }
   const key = failureKey(code) as keyof typeof t.value.failure
   return t.value.failure[key] ?? document.failure?.message ?? ''

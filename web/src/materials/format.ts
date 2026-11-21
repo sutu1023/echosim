@@ -3,9 +3,15 @@
 export type DocumentStatus = 'queued' | 'parsing' | 'ready' | 'failed'
 export type DocumentKind = 'pdf' | 'markdown' | 'text'
 
+export interface FailureDetail {
+  pages?: number | null
+  limit?: number | null
+}
+
 export interface MaterialFailure {
   code: string
   message: string
+  detail?: FailureDetail | null
 }
 
 export interface MaterialDocument {
@@ -128,4 +134,20 @@ export function formatPageLimit(
   return template
     .replace('{pages}', pages === null ? '?' : String(pages))
     .replace('{limit}', String(limit))
+}
+
+/**
+ * 已失败材料的页数超限文案：只使用解析时记录的实际页数与上限。
+ * 修复前没有结构化详情的旧记录返回不含上限数字的文案。
+ */
+export function pageLimitFailureText(
+  failure: MaterialFailure | null | undefined,
+  templates: { detail: string; unknown: string },
+): string {
+  const pages = failure?.detail?.pages
+  const limit = failure?.detail?.limit
+  if (typeof pages === 'number' && typeof limit === 'number') {
+    return formatPageLimit(templates.detail, pages, limit)
+  }
+  return templates.unknown
 }

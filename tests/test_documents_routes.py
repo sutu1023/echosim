@@ -194,6 +194,36 @@ class DocumentResponseTests(unittest.TestCase):
         self.assertFalse(response.json()["ready"])
 
 
+class FailedDocumentDetailTests(unittest.TestCase):
+    def test_failed_document_exposes_parse_time_limit(self) -> None:
+        client = build_client()
+        failed = Document(
+            **{
+                **DOCUMENT.__dict__,
+                "status": "failed",
+                "page_count": 4,
+                "chunk_count": 0,
+                "failure_code": "too_many_pages",
+                "failure_message": "该 PDF 共 4 页，页数超过当前上限（上限 3 页）",
+                "failure_detail": {"pages": 4, "limit": 3},
+            }
+        )
+        with patch(
+            "app.routers.documents.projects.resolve_owned_project",
+            new=AsyncMock(return_value=PROJECT),
+        ), patch(
+            "app.routers.documents.document_service.get_document",
+            new=AsyncMock(return_value=failed),
+        ):
+            response = client.get(f"{BASE}/{DOCUMENT.id}")
+
+        body = response.json()["document"]
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(body["pageCount"], 4)
+        self.assertEqual(body["failure"]["code"], "too_many_pages")
+        self.assertEqual(body["failure"]["detail"], {"pages": 4, "limit": 3})
+
+
 class UploadValidationTests(unittest.TestCase):
     def _client(self) -> TestClient:
         return build_client()

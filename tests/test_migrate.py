@@ -129,6 +129,21 @@ class RepositoryMigrationTests(unittest.TestCase):
             versions.index("0003_documents"),
         )
 
+    def test_0004_adds_failure_detail_column(self) -> None:
+        versions = [m.version for m in discover_migrations(Path("app/migrations"))]
+        self.assertIn("0004_document_failure_detail", versions)
+        migration = next(
+            m
+            for m in discover_migrations(Path("app/migrations"))
+            if m.version == "0004_document_failure_detail"
+        )
+        statements = split_sql_statements(migration.path.read_text(encoding="utf-8"))
+        joined = "\n".join(statements)
+
+        self.assertIn("ALTER TABLE documents", joined)
+        self.assertIn("failure_detail jsonb", joined)
+        self.assertIn("DEFAULT '{}'::jsonb", joined)
+
     def test_0003_statements_cover_documents_and_kind_extension(self) -> None:
         migration = next(
             m

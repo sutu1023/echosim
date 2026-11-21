@@ -600,6 +600,7 @@ async def _commit_ingest_failure(
     code: str,
     message: str,
     page_count: int | None = None,
+    failure_detail: dict[str, object] | None = None,
 ) -> str:
     """失败、终态事件与材料失败同事务写入。"""
     try:
@@ -633,7 +634,9 @@ async def _commit_ingest_failure(
             text(
                 "UPDATE documents SET status = 'failed', failure_code = :code, "
                 "failure_message = :message, chunk_count = 0, "
-                "page_count = :page_count, ready_at = NULL, updated_at = now() "
+                "page_count = :page_count, "
+                "failure_detail = CAST(:failure_detail AS jsonb), "
+                "ready_at = NULL, updated_at = now() "
                 "WHERE id = :document_id AND status IN ('queued', 'parsing')"
             ),
             {
@@ -641,6 +644,9 @@ async def _commit_ingest_failure(
                 "code": code,
                 "message": message,
                 "page_count": page_count,
+                "failure_detail": json.dumps(
+                    failure_detail or {}, ensure_ascii=False
+                ),
             },
         )
         await _finish(db, claim, next_step, status="failed", reason=code)
@@ -718,6 +724,11 @@ async def execute_ingest(
                 if isinstance(exc, document_extract.TooManyPages)
                 else None
             )
+            failure_detail = (
+                {"pages": exc.pages, "limit": exc.limit}
+                if isinstance(exc, document_extract.TooManyPages)
+                else {}
+            )
             async with session_factory() as db:
                 return await _commit_ingest_failure(
                     db,
@@ -725,6 +736,7 @@ async def execute_ingest(
                     code=code,
                     message=message,
                     page_count=page_count,
+                    failure_detail=failure_detail,
                 )
 
         if stop_event is not None and stop_event.is_set():
