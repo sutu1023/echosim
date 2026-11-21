@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import io
 import json
 import os
 import shutil
@@ -66,10 +68,12 @@ def _default_platform_factory(
     except Exception as exc:  # noqa: BLE001 - 共享依赖导入失败
         raise SharedSetupError(f"{type(exc).__name__}: {exc}") from exc
     try:
-        return Platform(
-            db_path=str(db_path),
-            recsys_type=PLATFORM_CONFIG[platform_key]["recsys_type"],
-        )
+        # OASIS 的 create_db 会向 stdout 打印 db_path；报告与 CLI JSON 不应混入这类噪声。
+        with contextlib.redirect_stdout(io.StringIO()):
+            return Platform(
+                db_path=str(db_path),
+                recsys_type=PLATFORM_CONFIG[platform_key]["recsys_type"],
+            )
     except Exception as exc:  # noqa: BLE001 - 单平台构造失败
         raise RuntimeError(f"{type(exc).__name__}: {exc}") from exc
 
