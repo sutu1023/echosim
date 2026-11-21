@@ -51,4 +51,4 @@
 ## 8. 集成验收与人工签收准备
 
 - [x] 8.1 提交后确认 `git status --porcelain` 为空，按任务 6.4 在同一 SHA 生成四份报告，核对 `tested_sha`、`dirty`、`job_evidence` 与两次运行一致；待签收清单含四份报告路径、真实 `jobId`/`runId`（`154772e4…`/`1f0e35c1…`、`31c65920…`/`c1317da1…`）、两段 SSE 实际序号、接手前后 `attempts`、旧令牌与锁等待回归结果
-- [ ] 8.2 按 README 走查步骤在浏览器完成：开始任务后在第 4 条后断开再重连、`docker compose stop worker` 观察“等待接手”并在恢复后继续、受控失败与运行中取消的提示、切换阶段/布局/语言后任务面板仍在同一项目与阶段，并记录网络恢复时刻起补齐耗时；保存截图与待签收清单，签收后只在 `docs/acceptance/` 写入记录（含 `tested_sha`、`jobId`、`runId`、两段实际序号、`stepsAtStop`、证据位置），`make verify` 与 CI 不触碰该目录
+- [x] 8.2 浏览器复验由 Codex 在桌面 Chrome 完成并经项目作者签收：断线从第 4 条重连、恢复后 1738 ms 内补齐 5–10（`jobId=c4e04aa8…`/`runId=cd15fe59…`）；worker 停止时已提交 4 步、684 ms 观察到等待接手、恢复后 2578 ms 继续（`jobId=cd1561eb…`/`runId=dce15334…`）；首次列表 503 后"重试读取"恢复原任务与 3 条事件（`jobId=4efb97b2…`）；受控失败、运行中取消、双击与排队取消、订阅隔离均通过。正式记录 `docs/acceptance/2026-11-21-a49a292.md` 与脱敏截图已提交，`make verify` 与 CI 不触碰该目录。
