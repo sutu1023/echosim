@@ -19,7 +19,7 @@
 - [x] 3.3 手工验证中断恢复：以 `TEST_TASK_STEP_DELAY_MS=800 make up` 启动，开始一个任务并用 `docker compose stop worker` 在第 2–3 步后中断，记录 `jobId`、`runId`、`stepsApplied`、`attempts`；确认持久状态仍为 `running` 且详情在 `lease_expires_at` 后 2 秒内返回 `awaitingTakeover: true`，`docker compose start worker` 后任务走到终态，`/effects` 返回 `total=10`、`distinctSteps=10`、`steps=[1..10]`，把实际数值写入任务 8 的待签收清单
 - [x] 3.4 验证 worker 隔离：仅 `docker compose stop worker` 时请求 `GET /health` 与 `GET /livez`，确认分别返回 200 与 200 且 `app` 容器 ID/PID/启动时间/重启次数不变；再 `docker compose start worker` 确认任务可继续，结果记入任务 8 清单
 - [x] 3.5 新增验收专用 `app/lease_probe.py`（不出现在 app/worker 正常调用路径）：`--mode two-jobs` 建两个 probe 任务并分别领取，A 提交 1 步后逐列比对 B 的 `status`/`next_step`/`lease_token`/`lease_expires_at`/`attempts` 未变；`--mode counts` 返回项目的 `jobs`/`runs` 行数；`--mode takeover --job-id` 回放“A 提交到 3 → 强制过期 → B 提交到 5 → A 用旧令牌续租与写 6 被拒 → B 完成 6–10”；`--mode cancel-race` 用两个连接让最后一步与取消竞争 5 次并断言只有一个终态；用 `docker compose exec -T app python -m app.lease_probe --mode two-jobs --project-id <id>` 实测并记录 JSON
-- [ ] 3.6 修正租约判断：`heartbeat` 与 `commit_step` 先 `FOR UPDATE` 锁行，再用独立语句读 `clock_timestamp()` 核对令牌/状态/到期时间，失效即回滚；`app/lease_probe.py --mode lease-wait` 在真实 PostgreSQL 中复现“到期前开始、锁等待跨过到期点”，断言 `heartbeat=false`、`commit_step=lost`、租约未延长、步骤与事件数不变；运行 `.venv/bin/python -m unittest tests.test_worker_steps` 通过
+- [x] 3.6 修正租约判断：`heartbeat` 与 `commit_step` 先 `FOR UPDATE` 锁行，再用独立语句读 `clock_timestamp()` 核对令牌/状态/到期时间，失效即回滚；`app/lease_probe.py --mode lease-wait` 在真实 PostgreSQL 中复现“到期前开始、锁等待跨过到期点”，断言 `heartbeat=false`、`commit_step=lost`、租约未延长、步骤与事件数不变；运行 `.venv/bin/python -m unittest tests.test_worker_steps` 通过
 
 ## 4. 事件持久化与 SSE
 
@@ -32,8 +32,8 @@
 - [x] 5.1 新增 `web/src/workbench/job-log.ts`（以“已完整处理的连续 seq”作为 `cursor`、`(runId, seq)` 去重、乱序暂存、忽略其他 run、缺口标记、终态标记）与 `web/tests/job-log.test.mjs`，覆盖“补发 1–4 后实时又来 3、4、5 只显示一次”“已有 1–4 收到 6 时游标仍为 4，收到 5 后连续到 6”“切换任务丢弃旧 run”“终态后不再追加”；运行 `cd web && npm test` 通过，且 `stage-links` 回归仍通过
 - [x] 5.2 新增 `web/src/workbench/job-stream.ts`：用同源 `EventSource` 订阅 `…/events?after=<cursor>`，把帧交给 `job-log` 的同一 reducer，`stream-end` 后 `close()`，`error` 时按 `CONNECTING`/`CLOSED` 区分“自动重连/手动重试”，重连与手动重新同步都使用连续 `cursor` 而非最大 `seq`；运行 `cd web && npm run typecheck` 通过
 - [x] 5.3 新增 `web/src/views/JobPanel.vue` 并在 `web/src/i18n.ts` 增加中英文案：显示 `jobId`、`runId`、状态、`attempts`、已提交/总步数、副作用计数与事件日志，提供开始、取消、重新连接与“这是连通性自检，不产生推演结论”的说明；在 `WorkbenchView.vue` 挂载到共享上下文栏与图谱布局工具条入口（三种布局、五个阶段都可打开），开始/取消时只更新面板状态、不改动路由；运行 `cd web && npm run typecheck && npm run build` 通过
-- [ ] 5.5 修正面板错误状态：SSE 重连提示优先于轮询错误，读取成功后清空轮询错误并保留日志与游标；`web/tests/job-panel-state.test.mjs` 覆盖“断线重连不被 503 覆盖”“成功后无提示”“终态优先”
-- [ ] 5.6 首次任务列表读取失败时提供“重试读取”按钮（`data-action="retry-list"`），只发 GET `/jobs`，成功后恢复已有任务、日志与副作用计数且不改动 URL；在浏览器注入一次列表 503 后验证
+- [x] 5.5 修正面板错误状态：SSE 重连提示优先于轮询错误，读取成功后清空轮询错误并保留日志与游标；`web/tests/job-panel-state.test.mjs` 覆盖“断线重连不被 503 覆盖”“成功后无提示”“终态优先”
+- [x] 5.6 首次任务列表读取失败时提供“重试读取”按钮（`data-action="retry-list"`），只发 GET `/jobs`，成功后恢复已有任务、日志与副作用计数且不改动 URL；在浏览器注入一次列表 503 后验证
 - [x] 5.4 实现面板五种状态提示（SSE 中断 / worker 中断 / 任务失败 / 任务取消 / 服务不可用）与**从可测起点计算**的时限文案（断开后 3 秒内提示、网络恢复时刻起 10 秒内 `cursor == lastSeq`、租约到期后 2 秒内 `awaitingTakeover`、终态事件写入后 2 秒内出现、503 沿用 5 秒），确保连接中断不显示失败、worker 中断不显示取消、失败与取消不显示成功；在浏览器逐项触发并记录实际耗时，写入任务 8 的待签收清单（此任务不写 `docs/acceptance/`）
 
 ## 6. 自动化验收与 CHANGE 选择器
@@ -41,7 +41,7 @@
 - [x] 6.1 扩展 `scripts/verify.py`：新增 `--change` 参数与 `CHANGE` 环境变量，未注册值以退出码 2 结束并在报告中写入“未注册的变更”失败场景；报告中新增 `change` 与 `job_evidence`（`job_id`、`run_id`、`attempts_before`、`attempts_after`、`first_segment_seqs`、`second_segment_seqs`、`resumed_from`、`effects_total`、`effects_steps`、`steps_at_stop`、`old_token_rejected`、`job_rows_added`、`run_rows_added`）；运行 `python3 -m py_compile scripts/verify.py` 与 `CHANGE=not-a-change python3 scripts/verify.py`，确认退出码 2 且报告含失败场景
 - [x] 6.2 在默认 `make verify` 中加入任务底座基础场景：开始返回 202 与两个标识、状态可查询、确定性任务到 `succeeded` 且事件序号 1–10、匿名 401、B 访问 A 的任务与不存在项目同为 404、停库期间带 Cookie 返回 503 并保留 Cookie、只停 worker 时 `/health` 与 `/livez` 仍为 200 且 `app` 容器身份不变；确认 Change 01–03 全部既有场景仍在报告中按原顺序通过
 - [x] 6.3 在 `CHANGE=2026-11-21-track-background-jobs` 中加入变更专属场景（脚本在 `compose up` 前设置 `TEST_TASK_STEP_DELAY_MS=800`）：`lease_probe` 两任务隔离；停 worker 后并发两个 POST 并断言一个 202/一个 200、`jobs`/`runs` 各 +1；真实 SSE **读完 `seq=4` 帧（id + data + 空行）**后断开，记录第一段 `[1,2,3,4]`、以 `after=4` 重连记录第二段 `[5..10]` 并断言拼接为 1–10、`format=json` 交叉核对；`Last-Event-ID` 优先于 `after`；`after=lastSeq+1` 为 400 JSON；终态 `after=10` 在 2 秒内收到 `stream-end`；worker 中断接手（`running` + `awaitingTakeover`、`attempts` 递增、`/effects` 为 10）；`lease_probe --mode takeover` 旧令牌被拒；运行中取消（3 步后 `seq=4` 的 `canceled`、再取消幂等）；`failAtStep=3` 持久化并在 worker 重启后仍失败于 3；终态后新任务新标识；每个场景同时核对详情、终态事件与副作用计数；场景自清理（取消遗留任务、恢复 worker 与数据库）
-- [x] 6.4 在干净提交 `1c885e6` 上带 `EXPECTED_SHA=$(git rev-parse HEAD)` 连续两次执行 `make verify` 与两次 `make verify CHANGE=2026-11-21-track-background-jobs`，四次退出码均为 0、`tested_sha=1c885e6642ad4ae2d2ae4cae6755aca57afb9994`、`dirty=false`；报告为 `runtime/verify/run-20261121T055712Z.json`、`run-20261121T055739Z.json`、`run-20261121T055851Z.json`、`run-20261121T060007Z.json`，变更专属报告两段序号均为 1–4 与 5–10、接手 `attempts` 1→2、旧令牌 `heartbeat=false`/`step=lost`，报告未声明页面提示、布局或语言
+- [x] 6.4 在修复后的干净提交 `a49a292` 上带 `EXPECTED_SHA=$(git rev-parse HEAD)` 连续两次执行 `make verify` 与两次 `make verify CHANGE=2026-11-21-track-background-jobs`，四次退出码均为 0、`tested_sha=a49a292ec946fa171e724caf7cee2adcec3217d9`、`dirty=false`；报告为 `runtime/verify/run-20261121T062122Z.json`、`run-20261121T062225Z.json`、`run-20261121T062434Z.json`、`run-20261121T062631Z.json`（变更专属各 37 场景），两段序号 1–4 / 5–10、接手 `attempts` 1→2、旧令牌 `heartbeat=false`/`step=lost`、锁等待回归 `heartbeat=false`/`commit_step=lost` 且 `expiry_extended=false`、步骤与事件均为 0
 
 ## 7. 文档与工程规则
 
@@ -50,5 +50,5 @@
 
 ## 8. 集成验收与人工签收准备
 
-- [x] 8.1 提交后确认 `git status --porcelain` 为空，按任务 6.4 在同一 SHA 生成四份报告，核对 `tested_sha`、`dirty`、`job_evidence` 与两次运行一致；待签收清单已含四份报告路径、真实 `jobId`/`runId`（如 `8d2bc1f0…`/`b02766b8…`、`32cee6fc…`/`f6eec991…`）、两段 SSE 实际序号、接手前后 `attempts` 与旧令牌测试结果
+- [x] 8.1 提交后确认 `git status --porcelain` 为空，按任务 6.4 在同一 SHA 生成四份报告，核对 `tested_sha`、`dirty`、`job_evidence` 与两次运行一致；待签收清单含四份报告路径、真实 `jobId`/`runId`（`154772e4…`/`1f0e35c1…`、`31c65920…`/`c1317da1…`）、两段 SSE 实际序号、接手前后 `attempts`、旧令牌与锁等待回归结果
 - [ ] 8.2 按 README 走查步骤在浏览器完成：开始任务后在第 4 条后断开再重连、`docker compose stop worker` 观察“等待接手”并在恢复后继续、受控失败与运行中取消的提示、切换阶段/布局/语言后任务面板仍在同一项目与阶段，并记录网络恢复时刻起补齐耗时；保存截图与待签收清单，签收后只在 `docs/acceptance/` 写入记录（含 `tested_sha`、`jobId`、`runId`、两段实际序号、`stepsAtStop`、证据位置），`make verify` 与 CI 不触碰该目录
