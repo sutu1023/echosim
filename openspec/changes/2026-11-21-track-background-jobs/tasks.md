@@ -38,7 +38,7 @@
 - [x] 6.1 扩展 `scripts/verify.py`：新增 `--change` 参数与 `CHANGE` 环境变量，未注册值以退出码 2 结束并在报告中写入“未注册的变更”失败场景；报告中新增 `change` 与 `job_evidence`（`job_id`、`run_id`、`attempts_before`、`attempts_after`、`first_segment_seqs`、`second_segment_seqs`、`resumed_from`、`effects_total`、`effects_steps`、`steps_at_stop`、`old_token_rejected`、`job_rows_added`、`run_rows_added`）；运行 `python3 -m py_compile scripts/verify.py` 与 `CHANGE=not-a-change python3 scripts/verify.py`，确认退出码 2 且报告含失败场景
 - [x] 6.2 在默认 `make verify` 中加入任务底座基础场景：开始返回 202 与两个标识、状态可查询、确定性任务到 `succeeded` 且事件序号 1–10、匿名 401、B 访问 A 的任务与不存在项目同为 404、停库期间带 Cookie 返回 503 并保留 Cookie、只停 worker 时 `/health` 与 `/livez` 仍为 200 且 `app` 容器身份不变；确认 Change 01–03 全部既有场景仍在报告中按原顺序通过
 - [x] 6.3 在 `CHANGE=2026-11-21-track-background-jobs` 中加入变更专属场景（脚本在 `compose up` 前设置 `TEST_TASK_STEP_DELAY_MS=800`）：`lease_probe` 两任务隔离；停 worker 后并发两个 POST 并断言一个 202/一个 200、`jobs`/`runs` 各 +1；真实 SSE **读完 `seq=4` 帧（id + data + 空行）**后断开，记录第一段 `[1,2,3,4]`、以 `after=4` 重连记录第二段 `[5..10]` 并断言拼接为 1–10、`format=json` 交叉核对；`Last-Event-ID` 优先于 `after`；`after=lastSeq+1` 为 400 JSON；终态 `after=10` 在 2 秒内收到 `stream-end`；worker 中断接手（`running` + `awaitingTakeover`、`attempts` 递增、`/effects` 为 10）；`lease_probe --mode takeover` 旧令牌被拒；运行中取消（3 步后 `seq=4` 的 `canceled`、再取消幂等）；`failAtStep=3` 持久化并在 worker 重启后仍失败于 3；终态后新任务新标识；每个场景同时核对详情、终态事件与副作用计数；场景自清理（取消遗留任务、恢复 worker 与数据库）
-- [ ] 6.4 在干净提交上带 `EXPECTED_SHA=$(git rev-parse HEAD)` 连续两次执行 `make verify` 与两次 `make verify CHANGE=2026-11-21-track-background-jobs`，确认四次退出码均为 0、四份报告 `tested_sha` 等于 `HEAD`、`dirty=false`，变更专属报告包含 `job_evidence`（两段序号、尝试次数、旧令牌结果）且两次运行序号集合与副作用计数一致；确认报告未声称验证了页面提示、布局或语言
+- [x] 6.4 在干净提交 `1c885e6` 上带 `EXPECTED_SHA=$(git rev-parse HEAD)` 连续两次执行 `make verify` 与两次 `make verify CHANGE=2026-11-21-track-background-jobs`，四次退出码均为 0、`tested_sha=1c885e6642ad4ae2d2ae4cae6755aca57afb9994`、`dirty=false`；报告为 `runtime/verify/run-20261121T055712Z.json`、`run-20261121T055739Z.json`、`run-20261121T055851Z.json`、`run-20261121T060007Z.json`，变更专属报告两段序号均为 1–4 与 5–10、接手 `attempts` 1→2、旧令牌 `heartbeat=false`/`step=lost`，报告未声明页面提示、布局或语言
 
 ## 7. 文档与工程规则
 
@@ -47,5 +47,5 @@
 
 ## 8. 集成验收与人工签收准备
 
-- [ ] 8.1 提交后确认 `git status --porcelain` 为空，按任务 6.4 在同一 SHA 生成四份报告，核对 `tested_sha`、`dirty`、`job_evidence` 与两次运行一致，并整理待签收清单：四份报告路径、真实 `jobId`/`runId`、两段 SSE 实际序号、接手前后 `attempts`、旧令牌测试结果
+- [x] 8.1 提交后确认 `git status --porcelain` 为空，按任务 6.4 在同一 SHA 生成四份报告，核对 `tested_sha`、`dirty`、`job_evidence` 与两次运行一致；待签收清单已含四份报告路径、真实 `jobId`/`runId`（如 `8d2bc1f0…`/`b02766b8…`、`32cee6fc…`/`f6eec991…`）、两段 SSE 实际序号、接手前后 `attempts` 与旧令牌测试结果
 - [ ] 8.2 按 README 走查步骤在浏览器完成：开始任务后在第 4 条后断开再重连、`docker compose stop worker` 观察“等待接手”并在恢复后继续、受控失败与运行中取消的提示、切换阶段/布局/语言后任务面板仍在同一项目与阶段，并记录网络恢复时刻起补齐耗时；保存截图与待签收清单，签收后只在 `docs/acceptance/` 写入记录（含 `tested_sha`、`jobId`、`runId`、两段实际序号、`stepsAtStop`、证据位置），`make verify` 与 CI 不触碰该目录
