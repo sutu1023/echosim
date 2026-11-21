@@ -77,3 +77,74 @@ jobs:
       - name: Stop environment
         if: always()
         run: make down || true
+
+  verify-change-06:
+    name: verify-change-06
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run Change 06 offline acceptance
+        env:
+          EXPECTED_SHA: ${{ inputs.expected_sha || github.sha }}
+        run: make verify CHANGE=2026-11-21-connect-engine-providers
+
+      - name: Assert Change 06 report
+        if: always()
+        env:
+          EXPECTED_SHA: ${{ inputs.expected_sha || github.sha }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import pathlib
+          import sys
+
+          report_path = pathlib.Path("runtime/verify/last-run.json")
+          if not report_path.is_file():
+              sys.exit("缺少 Change 06 验收报告: %s" % report_path)
+
+          report = json.loads(report_path.read_text(encoding="utf-8"))
+          expected = os.environ["EXPECTED_SHA"]
+          tested = report.get("tested_sha")
+          result = report.get("result")
+          engine = report.get("engine_evidence") or {}
+          calls = engine.get("calls") or {}
+
+          print(f"expected_sha={expected}")
+          print(f"tested_sha={tested}")
+          print(f"result={result}")
+          print(f"dirty={report.get('dirty')}")
+          print(f"change={report.get('change')}")
+          print(f"engine_mode={engine.get('mode')}")
+          print(f"calls_real={calls.get('real')}")
+
+          if tested != expected:
+              sys.exit("报告 SHA 与触发 SHA 不一致")
+          if result != "passed":
+              sys.exit("Change 06 验收结果不是 passed")
+          if report.get("dirty") is not False:
+              sys.exit("Change 06 报告标记为脏工作树")
+          if report.get("change") != "2026-11-21-connect-engine-providers":
+              sys.exit("Change 06 报告 change 字段不一致")
+          if engine.get("mode") != "offline-contract":
+              sys.exit("Change 06 报告不是 offline-contract")
+          if calls.get("real") != 0:
+              sys.exit("Change 06 离线检查出现真实调用")
+          PY
+
+      - name: Upload Change 06 report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: verify-report-change-06-${{ github.sha }}
+          path: runtime/verify/
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Stop environment
+        if: always()
+        run: make down || true

@@ -23,12 +23,16 @@
 | `app/` | FastAPI 后端：配置、数据库、健康检查、鉴权、迁移、静态托管 |
 | `app/migrations/` | 前向 SQL 迁移，版本记录在 `schema_migrations` |
 | `app/services/` | 账户、会话、项目、历史与任务服务；项目归属校验与租约执行的唯一入口 |
+| `app/engines/` | 引擎契约、模型/图谱/双平台适配器、离线契约检查与依赖基线 |
 | `app/routers/` | HTTP 路由，只做参数校验、依赖注入与异常映射 |
 | `app/worker.py` | 独立 worker 进程入口（无 HTTP 端口，只从数据库领取任务） |
 | `app/lease_probe.py` | 验收专用租约/终态竞态探针，仅由 `make verify CHANGE=…` 调用 |
 | `web/` | Vue 前端源码与构建配置；`web/dist` 为构建产物（不提交） |
 | `tests/` | Python 单元测试（`unittest`） |
 | `scripts/verify.py` | 可重复验收脚本，仅用 Python 标准库 |
+| `scripts/smoke_live.py` | 真实联调的宿主预检、脏工作树拒绝与报告路径 |
+| `Dockerfile.engine` | 隔离引擎镜像；只复制引擎代码与依赖，不暴露端口 |
+| `app/requirements-engines.txt` | 引擎候选依赖，只安装到隔离引擎镜像 |
 | `docs/acceptance/` | 人工验收记录与模板（自动化流程禁止写入） |
 | `.github/workflows/` | CI 工作流 |
 | `runtime/` | 本地运行产物（报告、日志），已忽略不提交 |
@@ -41,6 +45,7 @@ make up       # 缺 .env 时从 .env.example 生成，然后构建并启动，�
 make down     # 停止并移除容器与网络，保留数据卷
 make reset    # 破坏性：连同数据卷一起移除
 make verify   # 执行可重复验收，写入 runtime/verify/last-run.json
+make smoke-live  # 由开发者显式执行真实模型/图谱/双平台联通验收
 make migrate  # 在运行中的 app 容器内应用未执行的迁移
 make user EMAIL=a@example.com  # 从标准输入读取密码，创建/更新账户
 ```
@@ -94,6 +99,26 @@ make user EMAIL=a@example.com  # 从标准输入读取密码，创建/更新账�
 - 材料上传、列表、详情、分块、原文视图与原件接口必须复用 `resolve_owned_project`；匿名立即 401 且不访问数据库，他人项目与他人材料对外不可区分（`材料不存在`）。
 - 材料深链接是完整 URL（含 `document`、`layout`、`lang`）；匿名打开必须先登录并回到原地址，不得丢弃查询参数。
 - 25 页私有样本只用于项目作者在浏览器中的人工验收，必须放在仓库外或已忽略的 `private-inputs/`，不得提交、复制到 `runtime/` 或进入 CI 产物；自动化与测试数据不得引用其文件名、路径或正文。
+
+## 引擎接入与真实联调
+
+- 真实模型、图谱与 OASIS 调用只能由开发者显式执行 `make smoke-live` 触发；`make up`、默认 `make verify` 与 CI 不得执行真实联调、不得注入模型/Zep 密钥、不得构建 live 引擎镜像。
+- `make smoke-live` 沿用 `ALLOW_DIRTY=1` 约定：默认在发起外部调用前拒绝脏工作树；显式允许时报告 `dirty=true`，但签收只接受 `dirty=false`、`tested_sha` 与候选一致的 live 报告。
+- 真实调用只使用运行时生成的原创微型夹具；MUST NOT 读取项目材料、`private-inputs/` 或 25 页私有样本，MUST NOT 把其文件名、路径或正文写入请求、日志或报告。
+- 模型使用 Chat Completions 兼容接口；`MODEL_API_BASE_URL` 是根地址（可含 `/v1`），拼接后只出现一次 `/chat/completions`。首次请求使用 `model`、`messages` 与 `response_format={"type":"json_object"}`，字段、类型、UTF-16 偏移、原文引用与运行标识由 EchoSim 校验。
+- 只有上游 400/422 明确指出不支持 `response_format` 时才移除该参数重试一次；所有重试、移除参数重试与 SDK 内置重试共用 30 秒、最多 2 次实际 HTTP 请求预算。HTTP 200 或“能解析 JSON”不构成成功。
+- 图谱使用预先配置的固定验收专用图谱，`ZEP_ACCEPTANCE_GRAPH_ID` MUST 是 `graph_uuid`。每次运行生成不同 `runId` 与唯一 `idempotency_key`；同一次逻辑写入的所有重试 MUST 复用原键、原图谱与原请求体，不得因超时、连接中断或搜索未命中而换键或改写请求体。
+- 图谱写入使用 `graph.episode.add`，保存服务端返回的 episode UUID；检索使用 `graph.search_episodes`，同时核对 UUID、`runId` 与唯一事实。固定图谱允许旧记录共存，本次记录精确命中即可通过；只返回旧记录不得冒充本次结果。
+- 写入响应丢失时，搜索未命中 MUST NOT 作为换键重写的依据；预算内仍无法确认 MUST 判定 `write_unconfirmed`。离线契约必须覆盖“服务端已受理、响应丢失、首次搜索未命中”。
+- OASIS 双平台使用稳定别名：`platform_a` 对应原生 `twitter` 并执行 `create_post`；`platform_b` 对应原生 `reddit`，先建立本次目标帖，再执行 `create_comment`。报告 MUST 保留原生平台、原生动作、角色、记录标识与目标帖标识。
+- 两个平台 MUST 使用独立临时目录、数据库/进程与运行标识；动作结果 MUST 从各自引擎记录读回，不能只用动作调用返回值。两个平台分别判定，只有两个平台都有实际行动记录，双平台项才通过；清理失败 MUST 记录并导致运行失败。
+- 缺配置 MUST 按依赖分别判定：缺模型配置只阻断模型项，缺 Zep 配置只阻断图谱项；本地 OASIS 动作不依赖这些外部密钥，仍应继续执行。总结果因必需项缺失而非零。
+- 引擎镜像 MUST 只包含 `app/engines/`、必要包初始化文件与引擎依赖；MUST NOT 复制或挂载整仓、`.env`、`.git/`、`private-inputs/`、项目材料或历史报告。运行时只把 `runtime/smoke-live` 挂载为可写报告目录，只注入模型/Zep 白名单变量与引擎超时配置。
+- 引擎依赖 MUST 使用独立 `app/requirements-engines.txt` 与 `Dockerfile.engine`；候选 `camel-ai` 的 Pydantic 上限不得通过降级 `app`/`worker` 依赖来迁就。只有目标 Linux aarch64、Python 3.11 容器完成“解析 → 安装 → 导入 → 最小运行”四阶段，才允许把组合记录为 `verified`。
+- 日志与报告只记录依赖名称、阶段、调用次数、耗时、HTTP 状态类别、原因码、运行标识、episode UUID、幂等键、平台键、原生平台、原生动作、目标帖标识与脱敏结果；MUST NOT 记录密钥、`Authorization`、完整请求/响应正文、完整 episode 正文、材料正文或私有样本。
+- `make verify CHANGE=2026-11-21-connect-engine-providers` MUST 在无真实密钥、无外部网络、不安装候选引擎依赖时完成，并把离线契约结果写入报告 `engine_evidence`（`mode=offline-contract`、`calls.real=0`）。
+- CI MUST 保留默认 `make verify`，并增加独立的 Change 06 离线检查；两份报告使用不同 artifact 名称，分别断言 `tested_sha`、`dirty=false`、`result=passed`，专属检查额外断言 `calls.real=0`。
+- 真实联通结论只来自同 SHA、`mode=live`、`dirty=false` 且必需项全部 `passed` 的 `make smoke-live` 报告，并仍需人工签收；离线通过不得替代真实联调或人工记录。
 
 ## 控制台与工作台地址
 

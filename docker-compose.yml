@@ -57,6 +57,34 @@ services:
       start_period: 5s
     restart: unless-stopped
 
+  engine:
+    build:
+      context: .
+      dockerfile: Dockerfile.engine
+    image: echosim-engine:dev
+    profiles: ["live"]
+    restart: "no"
+    environment:
+      MODEL_API_BASE_URL: ${MODEL_API_BASE_URL:-}
+      MODEL_API_KEY: ${MODEL_API_KEY:-}
+      MODEL_NAME: ${MODEL_NAME:-}
+      MODEL_TIMEOUT_SECONDS: ${MODEL_TIMEOUT_SECONDS:-30}
+      ZEP_API_KEY: ${ZEP_API_KEY:-}
+      ZEP_API_BASE_URL: ${ZEP_API_BASE_URL:-}
+      ZEP_ACCEPTANCE_GRAPH_ID: ${ZEP_ACCEPTANCE_GRAPH_ID:-}
+      GRAPH_WRITE_TIMEOUT_SECONDS: ${GRAPH_WRITE_TIMEOUT_SECONDS:-20}
+      GRAPH_STATUS_TIMEOUT_SECONDS: ${GRAPH_STATUS_TIMEOUT_SECONDS:-10}
+      GRAPH_INDEX_TIMEOUT_SECONDS: ${GRAPH_INDEX_TIMEOUT_SECONDS:-60}
+      GRAPH_POLL_INTERVAL_SECONDS: ${GRAPH_POLL_INTERVAL_SECONDS:-3}
+      SIMULATION_TIMEOUT_SECONDS: ${SIMULATION_TIMEOUT_SECONDS:-60}
+      SMOKE_LIVE_TOTAL_TIMEOUT_SECONDS: ${SMOKE_LIVE_TOTAL_TIMEOUT_SECONDS:-300}
+      SMOKE_REPORT_DIR: /app/runtime/smoke-live
+      ECHOSIM_TESTED_SHA: ${ECHOSIM_TESTED_SHA:-unknown}
+      ECHOSIM_DIRTY: ${ECHOSIM_DIRTY:-false}
+      ALLOW_DIRTY: ${ALLOW_DIRTY:-}
+    volumes:
+      - ./runtime/smoke-live:/app/runtime/smoke-live
+
   worker:
     build:
       context: .

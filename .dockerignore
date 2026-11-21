@@ -15,4 +15,5 @@ playwright-report
 openspec
 docs
 .pi
+private-inputs/
 data/
