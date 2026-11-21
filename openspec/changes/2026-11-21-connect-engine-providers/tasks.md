@@ -38,7 +38,7 @@
 - [x] 4.4 实现移除参数重试：仅当 400/422 明确表示 `response_format` 不受支持且尚无结果时，移除该参数后最多追加 1 次调用；重试结果执行同一套校验；验证方式是测试替身断言 401/429/5xx/超时/其它 400/422/结果不合格都不触发移除参数重试，移除后成功与仍不合格各自有断言
 - [x] 4.5 实现模型预算：实际 HTTP 请求不超过 2 次、总时限不超过 30 秒；408/429/502/503/504/连接超时最多重试 1 次，重试、移除参数重试与 SDK 内置重试共用预算；验证方式是测试替身断言实际请求次数、退避时间、SDK 内部重试被计数，以及 `rate_limited`/`timeout`/`auth_failed` 分类
 - [x] 4.6 确保 HTTP 200 但结果不合格时模型项为 `failed`，不得因“能解析 JSON”通过；验证方式是构造 200 + 非法 JSON、200 + 合法 JSON 但字段错误、200 + 来源不匹配三种回归
-- [x] 4.7 增加模型报告的脱敏字段：依赖名、阶段、调用次数、耗时、精确 `httpStatus`、`httpStatusClass`、`providerErrorCode`、`fieldsValid`、`sourceMatches`、`markerMatched`、`fallbackUsed`、`retryUsed` 与原因码；验证方式是报告快照不包含密钥、请求头全集或完整响应
+- [x] 4.7 增加模型报告的脱敏字段：依赖名、阶段、调用次数、耗时、精确 `httpStatus`、`httpStatusClass`、允许列表内的 `providerErrorCode`、`fieldsValid`、`sourceMatches`、`markerMatched`、`fallbackUsed`、`retryUsed` 与原因码；验证方式是报告快照不包含密钥、请求头全集或完整响应，假 Key 回显到 `error.code` 时整份序列化报告不含该值，普通 403 仅无关元数据含 1010 时仍为 `auth_failed`
 - [x] 4.8 在 README 补充模型接入的 Chat Completions 路径拼接、`json_object` 首次请求、移除 `response_format` 触发条件、总预算（含 SDK 内置重试）与失败原因表；验证方式是文档示例与实际测试替身请求一致
 
 ## 5. 证据图谱接入

@@ -18,7 +18,7 @@
 - **WHEN** 以 `CHANGE=2026-11-21-connect-engine-providers` 执行 `make verify`
 - **THEN** 命令在无真实密钥与无外部网络时以退出码 0 结束
 - **AND** 报告 `change` 字段等于 `2026-11-21-connect-engine-providers`
-- **AND** 报告新增离线引擎证据，至少覆盖模型字段与来源校验、EchoSim User-Agent、移除 `response_format` 重试、402/403-1010/普通 403/401 的精确状态码与原因码、图谱受理/索引/命中状态机、服务端已受理但响应丢失且首次搜索未命中、双平台独立判定、单平台失败保留另一平台证据、清理失败与缺配置依赖分别判定
+- **AND** 报告新增离线引擎证据，至少覆盖模型字段与来源校验、EchoSim User-Agent、移除 `response_format` 重试、402/403-1010/普通 403/401 的精确状态码与原因码、未知错误码不回显、无关元数据 1010 不误判、图谱受理/索引/命中状态机、服务端已受理但响应丢失且首次搜索未命中、双平台独立判定、单平台失败保留另一平台证据、清理失败与缺配置依赖分别判定
 
 #### Scenario: 离线场景使用测试替身而非真实服务
 
@@ -39,7 +39,9 @@
 - **WHEN** 离线场景分别模拟 HTTP 402、403 且带 Cloudflare 1010、普通 403 与 401
 - **THEN** 原因码分别为 `billing_required`、`edge_blocked`、`auth_failed` 与 `auth_failed`
 - **AND** 每项报告保留精确 `httpStatus` 与 `httpStatusClass`，实际调用次数为 1
-- **AND** 报告只包含脱敏 `providerErrorCode`，不包含原始响应正文或请求头全集
+- **AND** 普通 403 只有无关元数据含 1010 时仍为 `auth_failed`
+- **AND** `providerErrorCode` 只包含允许列表内的错误码；假 Key 等未知回显值留空且不进入序列化报告
+- **AND** 报告不包含原始响应正文或请求头全集
 
 ### Requirement: Change 06 离线入口保留未知变更与 SHA 规则
 

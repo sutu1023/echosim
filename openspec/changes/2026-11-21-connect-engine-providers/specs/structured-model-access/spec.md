@@ -142,7 +142,7 @@
 
 ### Requirement: HTTP 错误保留精确状态码并按 402/403/401 分类
 
-模型项证据 SHALL 记录精确的 `httpStatus` 与兼容字段 `httpStatusClass`。HTTP 402 MUST 归类为 `billing_required`；HTTP 403 且响应包含明确的 Cloudflare 1010 证据时 MUST 归类为 `edge_blocked`；HTTP 401 与普通 403 MUST 保留 `auth_failed` 语义。上述错误 MUST NOT 重试，MUST NOT 触发移除 `response_format` 的重试。报告 MAY 记录脱敏的 `providerErrorCode`，MUST NOT 保存密钥、请求头全集或原始响应正文。
+模型项证据 SHALL 记录精确的 `httpStatus` 与兼容字段 `httpStatusClass`。HTTP 402 MUST 归类为 `billing_required`；HTTP 403 且响应包含明确的 Cloudflare 1010 证据时 MUST 归类为 `edge_blocked`；HTTP 401 与普通 403 MUST 保留 `auth_failed` 语义。上述错误 MUST NOT 重试，MUST NOT 触发移除 `response_format` 的重试。报告 MAY 记录 `providerErrorCode`，但 MUST 只记录已识别、可安全公开的允许列表错误码（当前为 `1010` 与 `insufficient_quota`）；未知值 MUST 留空，MUST NOT 回显供应商返回的任意字符串（包括被回显的密钥）。报告 MUST NOT 保存密钥、请求头全集或原始响应正文。
 
 #### Scenario: 402 归类为 billing_required
 
@@ -164,6 +164,20 @@
 - **THEN** 模型项判定为失败，原因码为 `auth_failed`
 - **AND** 报告记录 `httpStatus=403`
 - **AND** 实际 HTTP 调用次数为 1，不重试
+
+#### Scenario: 只有无关元数据含 1010 时仍是普通 403
+
+- **WHEN** HTTP 403 的 `error.code` 不是 1010，只有无关元数据字段包含 1010
+- **THEN** 模型项判定为失败，原因码仍为 `auth_failed`，不得归类为 `edge_blocked`
+- **AND** `providerErrorCode` 留空，因为 1010 不在明确的 `error.code` 或 `error_code` 位置
+- **AND** 实际 HTTP 调用次数为 1
+
+#### Scenario: 未知或被回显的供应商错误码不回显
+
+- **WHEN** 供应商把假 Key 或其他未知字符串回显到 `error.code`
+- **THEN** `providerErrorCode` 留空
+- **AND** 序列化后的报告不包含该假 Key 或未知字符串
+- **AND** 失败原因仍按 HTTP 状态归类，调用次数为 1
 
 #### Scenario: 401 保留 auth_failed
 

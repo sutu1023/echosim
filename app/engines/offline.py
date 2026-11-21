@@ -594,6 +594,46 @@ def run_offline() -> dict[str, Any]:
     )
     scenarios.append(
         _model_scenario(
+            "model-auth-403-metadata-1010",
+            material,
+            [HttpResponse(403, json.dumps({
+                "error": {"code": "forbidden", "message": "denied"},
+                "metadata": {"code": 1010, "note": "1010 is unrelated metadata"},
+            }, ensure_ascii=False))],
+            expected_status=FAILED,
+            expected_reason="auth_failed",
+            expected_http_status=403,
+            expected_calls=1,
+        )
+    )
+    fake_key = "sk-fake-echoed-provider-code-123"
+    fake_transport = SequenceTransport(
+        [HttpResponse(401, json.dumps({"error": {"code": fake_key}}))]
+    )
+    fake_result = ModelRunner(
+        _settings(),
+        transport=fake_transport,
+        call_kind=DOUBLE,
+        clock=lambda: 0.0,
+        sleep=lambda _: None,
+    ).run(material)
+    fake_serialized = json.dumps({"items": [fake_result.to_dict()]}, ensure_ascii=False)
+    fake_ok = (
+        fake_result.reason == "auth_failed"
+        and fake_result.evidence.get("providerErrorCode") is None
+        and fake_key not in fake_serialized
+        and fake_result.calls.double == 1
+    )
+    scenarios.append(
+        Scenario(
+            "model-unknown-provider-code-redacted",
+            PASSED if fake_ok else FAILED,
+            f"provider={fake_result.evidence.get('providerErrorCode')} calls={fake_result.calls.to_dict()}",
+            fake_result.calls,
+        )
+    )
+    scenarios.append(
+        _model_scenario(
             "model-rate-limit-retry",
             material,
             [HttpResponse(429, "slow down"), HttpResponse(200, _chat_body(material))],

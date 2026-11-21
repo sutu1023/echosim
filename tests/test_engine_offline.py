@@ -22,6 +22,8 @@ class OfflineContractTests(unittest.TestCase):
             "model-billing-402",
             "model-edge-blocked-403-1010",
             "model-auth-403",
+            "model-auth-403-metadata-1010",
+            "model-unknown-provider-code-redacted",
             "graph-response-lost-first-search-miss",
             "graph-write-unconfirmed",
             "graph-metadata-marker-only",

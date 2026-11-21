@@ -146,7 +146,7 @@
 | 403 | 普通 403 | `auth_failed` | 1 |
 | 401 | 鉴权失败 | `auth_failed` | 1 |
 
-报告只记录脱敏的 `providerErrorCode`（如 `1010`、`insufficient_quota`）；不保存密钥、请求头全集或原始响应正文。
+`providerErrorCode` 只记录允许列表内、已识别且可安全公开的错误码（当前为 `1010` 与 `insufficient_quota`）；未知值或被供应商回显的任意字符串一律留空。Cloudflare 1010 只从明确的 `error.code` / `error_code` 位置或 `error code: 1010` 文本识别；普通 403 即使无关元数据含 1010 仍归类 `auth_failed`。报告不保存密钥、请求头全集或原始响应正文。
 
 **备选方案**：只接受结构化模式，不做移除参数重试。否决原因：部分兼容端点不支持 `response_format`，若直接失败会把“上游能力差异”误报为联通失败；但移除参数必须受严格触发条件与同一校验约束，不能变成“解析出任何 JSON 就算成功”。
 

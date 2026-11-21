@@ -6,18 +6,29 @@ import contextlib
 import http.server
 import json
 import os
+import tempfile
 import threading
 import unittest
+from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
-from app.engines.contracts import build_acceptance_material, utf16_len
+from app.engines.baseline import DependencyBaseline, PINS, StageResult
+from app.engines.contracts import (
+    CallCounts,
+    ItemResult,
+    PASSED,
+    build_acceptance_material,
+    utf16_len,
+)
 from app.engines.model import (
     HttpResponse,
     ModelRunner,
     build_chat_completions_url,
 )
 from app.engines.settings import EngineSettings
+from app.engines.simulation import PlatformOutcome
+from app.engines.smoke import run_smoke
 
 
 def settings(**overrides: Any) -> EngineSettings:
@@ -255,6 +266,81 @@ class ModelRunnerTests(unittest.TestCase):
         self.assertEqual(result.reason, "edge_blocked")
         self.assertEqual(result.evidence["httpStatus"], 403)
         self.assertEqual(result.evidence["providerErrorCode"], "1010")
+        self.assertEqual(result.calls.real, 1)
+
+    def test_unknown_provider_error_code_is_not_recorded_or_serialized(self) -> None:
+        fake_key = "sk-fake-echoed-provider-code-123"
+        body = json.dumps({"error": {"code": fake_key, "message": "denied"}})
+        transport = SequenceTransport([HttpResponse(401, body)])
+        result = ModelRunner(settings(), transport=transport).run(self.material)
+
+        self.assertEqual(result.reason, "auth_failed")
+        self.assertIsNone(result.evidence["providerErrorCode"])
+        serialized = json.dumps({"items": [result.to_dict()]}, ensure_ascii=False)
+        self.assertNotIn(fake_key, serialized)
+
+        def verified_baseline() -> DependencyBaseline:
+            stages = {
+                name: StageResult("passed", "offline", 0, {})
+                for name in ("resolve", "install", "import", "minimalRun")
+            }
+            return DependencyBaseline("verified", stages, dict(PINS), "offline", "3.11")
+
+        def graph_pass(_material: Any) -> ItemResult:
+            return ItemResult(
+                "graph.searchable",
+                "graph",
+                "episode-search",
+                PASSED,
+                None,
+                0,
+                CallCounts(double=1),
+                {"accepted": True, "episodeId": "episode-test"},
+            )
+
+        def platform_pass(key: str, *_: Any) -> PlatformOutcome:
+            return PlatformOutcome(
+                ItemResult(
+                    f"simulation.{key}",
+                    "simulation",
+                    "offline",
+                    PASSED,
+                    None,
+                    0,
+                    CallCounts(double=1),
+                    {"cleanup": "passed"},
+                ),
+                "passed",
+            )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            outcome = run_smoke(
+                settings=settings(model_api_key="fake-model-key"),
+                report_dir=Path(tmp),
+                tested_sha="offline-test",
+                dirty=False,
+                baseline_evaluator=verified_baseline,
+                model_runner=lambda _material: result,
+                graph_runner=graph_pass,
+                platform_runner=platform_pass,
+            )
+        serialized_report = json.dumps(outcome.report, ensure_ascii=False)
+        self.assertNotIn(fake_key, serialized_report)
+
+    def test_403_with_1010_only_in_unrelated_metadata_stays_auth_failed(self) -> None:
+        body = json.dumps(
+            {
+                "error": {"code": "forbidden", "message": "denied"},
+                "metadata": {"code": 1010, "note": "1010 is unrelated metadata"},
+            }
+        )
+        transport = SequenceTransport([HttpResponse(403, body)])
+        result = ModelRunner(settings(), transport=transport).run(self.material)
+
+        self.assertEqual(result.status, "failed")
+        self.assertEqual(result.reason, "auth_failed")
+        self.assertEqual(result.evidence["httpStatus"], 403)
+        self.assertIsNone(result.evidence["providerErrorCode"])
         self.assertEqual(result.calls.real, 1)
 
     def test_ordinary_403_keeps_auth_failed(self) -> None:

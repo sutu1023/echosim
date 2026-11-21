@@ -25,6 +25,7 @@ from .settings import EngineSettings
 
 RETRYABLE_STATUSES = {408, 429, 502, 503, 504}
 USER_AGENT = "EchoSim/0.1.0"
+SAFE_PROVIDER_ERROR_CODES = frozenset({"1010", "insufficient_quota"})
 
 
 @dataclass(frozen=True)
@@ -176,30 +177,32 @@ def _status_class(status: int) -> str:
     return f"{status // 100}xx"
 
 
-def _iter_error_codes(value: object) -> list[str]:
-    codes: list[str] = []
-    if isinstance(value, dict):
-        for key, item in value.items():
-            if str(key).lower() in {"code", "error_code"} and isinstance(
-                item, (str, int, float)
-            ):
-                codes.append(str(item))
-            codes.extend(_iter_error_codes(item))
-    elif isinstance(value, list):
-        for item in value:
-            codes.extend(_iter_error_codes(item))
-    return codes
+def _sanitize_provider_code(code: object) -> str | None:
+    if not isinstance(code, (str, int, float)):
+        return None
+    value = re.sub(r"[^A-Za-z0-9_.:-]+", "_", str(code))[:80]
+    return value or None
 
 
-def _provider_error_codes(body: str) -> list[str]:
-    codes: list[str] = []
+def _explicit_provider_error_codes(body: str) -> list[str]:
+    """只从明确的 error 字段提取错误码，不扫描任意元数据。"""
     try:
         parsed = json.loads(body)
     except json.JSONDecodeError:
         parsed = None
-    if parsed is not None:
-        codes.extend(_iter_error_codes(parsed))
-    if not codes:
+
+    codes: list[str] = []
+    if isinstance(parsed, dict):
+        error = parsed.get("error")
+        if isinstance(error, dict):
+            for key in ("code", "error_code"):
+                sanitized = _sanitize_provider_code(error.get(key))
+                if sanitized:
+                    codes.append(sanitized)
+        sanitized = _sanitize_provider_code(parsed.get("error_code"))
+        if sanitized:
+            codes.append(sanitized)
+    elif parsed is None:
         match = re.search(
             r"(?:error\s*code|code)\s*[:=]\s*([A-Za-z0-9_.:-]{1,80})",
             body,
@@ -207,24 +210,29 @@ def _provider_error_codes(body: str) -> list[str]:
         )
         if match:
             codes.append(match.group(1))
-    sanitized: list[str] = []
+
+    unique: list[str] = []
     for code in codes:
-        value = re.sub(r"[^A-Za-z0-9_.:-]+", "_", code)[:80]
-        if value and value not in sanitized:
-            sanitized.append(value)
-    return sanitized
+        if code not in unique:
+            unique.append(code)
+    return unique
 
 
 def _provider_error_code(body: str) -> str | None:
-    codes = _provider_error_codes(body)
-    return codes[0] if codes else None
+    """只返回已识别且可安全公开的错误码；未知值留空。"""
+    for code in _explicit_provider_error_codes(body):
+        if code in SAFE_PROVIDER_ERROR_CODES:
+            return code
+    return None
 
 
 def _is_cloudflare_1010(body: str) -> bool:
-    if "1010" in _provider_error_codes(body):
+    if "1010" in _explicit_provider_error_codes(body):
         return True
     lowered = body.lower()
-    return "cloudflare" in lowered and re.search(r"\b1010\b", lowered) is not None
+    if "cloudflare" not in lowered:
+        return False
+    return re.search(r"(?:error\s*code|code)\s*[:=]?\s*1010\b", lowered) is not None
 
 
 def _failure_reason(status: int, response: HttpResponse) -> str:
