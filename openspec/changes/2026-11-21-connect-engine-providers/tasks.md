@@ -106,12 +106,18 @@
 - [x] 10.1 运行 `.venv/bin/python -m unittest discover -s tests`、`cd web && npm test && npm run typecheck && npm run build`，确认既有回归与新增引擎单元测试全部通过
 - [x] 10.2 在干净提交上带 `EXPECTED_SHA=$(git rev-parse HEAD)` 连续两次执行默认 `make verify`，确认退出码 0、`tested_sha` 一致、`dirty=false`、Change 01–05 场景完整
 - [x] 10.3 在同一 SHA 上连续两次执行 `make verify CHANGE=2026-11-21-connect-engine-providers`，确认退出码 0、`engine_evidence` 一致、真实调用为 0、离线场景全部通过
-- [ ] 10.4 在无真实密钥环境执行 `make smoke-live`，分别验证只缺模型、只缺 Zep、两者都缺：对应项为 `not_run`/`missing_config`，本地 OASIS 动作仍执行，真实外部调用为 0，总结果非零；再以临时无效凭据覆盖运行，确认 `auth_failed` 且不重试
-- [ ] 10.5 恢复临时覆盖的有效凭据并填写 `MODEL_API_BASE_URL`、`MODEL_NAME`、`MODEL_API_KEY`、`ZEP_API_KEY`、`ZEP_ACCEPTANCE_GRAPH_ID`（graph_uuid）后重新执行 `make smoke-live`，确认模型结构校验、图谱检索命中和平台 A/B 行动记录全部通过、退出码 0、`mode=live`、`dirty=false`
-- [ ] 10.6 连续两次执行真实 `make smoke-live`，确认两次运行使用不同运行标识、图谱写入不产生重复事实、两次报告都可通过精确标识核对，并记录两份报告路径
+- [x] 10.4 在无真实密钥环境执行 `make smoke-live`，分别验证只缺模型、只缺 Zep、两者都缺：对应项为 `not_run`/`missing_config`，本地 OASIS 动作仍执行，真实外部调用为 0，总结果非零；再以临时无效凭据覆盖运行，确认 `auth_failed` 且不重试
+- [x] 10.5 恢复临时覆盖的有效凭据并填写 `MODEL_API_BASE_URL`、`MODEL_NAME`、`MODEL_API_KEY`、`ZEP_API_KEY`、`ZEP_ACCEPTANCE_GRAPH_ID`（graph_uuid）后重新执行 `make smoke-live`，确认模型结构校验、图谱检索命中和平台 A/B 行动记录全部通过、退出码 0、`mode=live`、`dirty=false`
+- [x] 10.6 连续两次执行真实 `make smoke-live`，确认两次运行使用不同运行标识、图谱写入不产生重复事实、两次报告都可通过精确标识核对，并记录两份报告路径
 - [x] 10.7 在目标 Linux aarch64、Python 3.11 容器中确认依赖解析、安装、导入、最小运行四阶段证据齐全；若任一阶段失败，记录 `dependencyBaseline.status=unverified`、失败阶段与阻塞项，并停止真实联调，不得宣称基线可用
 - [x] 10.8 确认 25 页私有样本没有进入模型请求、图谱 episode、平台动作、日志、报告或 `runtime/`；验证方式是检查请求/报告字段、扫描 `runtime/smoke-live/` 与 `git status`
 - [x] 10.9 准备待签收清单（不写入 `docs/acceptance/`）：被测 SHA、`make verify` 与 `make verify CHANGE=…` 报告路径、`make smoke-live` live 报告路径、模型字段/来源证据、图谱 episode UUID 与幂等键及检索等待、平台 A/B 原生平台/原生动作/记录标识/目标帖标识、依赖基线四阶段结果、已知限制
 - [x] 10.10 列出需要开发者在本机填写的变量名与占位说明：`MODEL_API_BASE_URL`（API 根地址，可含 `/v1`）、`MODEL_NAME`、`MODEL_API_KEY`、`ZEP_API_KEY`、`ZEP_ACCEPTANCE_GRAPH_ID`（graph_uuid）；不要求或打印真实值，验证方式是文档/交付说明只列变量名与用途
 - [x] 10.11 确认脏工作树行为：默认 `make smoke-live` 在外部调用前拒绝并退出，`ALLOW_DIRTY=1` 时允许但报告 `dirty=true`，签收只接受 `dirty=false` 且 `tested_sha` 与候选一致的 live 报告；验证方式是三种运行各一次并检查报告
 - [ ] 10.12 由验收人在真实凭据与浏览器/终端环境中核对联通结果后，才在 `docs/acceptance/` 写入签收记录；记录必须引用同 SHA、`dirty=false` 的 `mode=live` 报告并注明离线报告不能替代真实联调；`make verify`、CI 与 `make smoke-live` 均不得自动创建或修改该记录
+
+## 本次联调证据
+
+- 被测代码 `85497b6acf798d3a4a2b0bfea1563db9623c547c`，工作树干净。
+- 10.4 的回环隔离报告在 `runtime/smoke-live/missing-auth-85497b6-20261121T164636Z/`，真实服务的失效凭据报告为 `runtime/smoke-live/run-20261121T164755Z.json`。
+- 10.5 和 10.6 的两份原始报告为 `runtime/smoke-live/run-20261121T164808Z.json`、`runtime/smoke-live/run-20261121T164820Z.json`。每次独立回查均只有一个匹配的 episode，对应同名 `-exact.json`。
