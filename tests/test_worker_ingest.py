@@ -31,6 +31,7 @@ class FailureMappingTests(unittest.TestCase):
         self.assertEqual(code, "too_many_pages")
         self.assertIn("4", message)
         self.assertIn("3", message)
+        self.assertNotIn("该 PDF 该 PDF", message)
 
     def test_unknown_failure_is_parse_error(self) -> None:
         code, _ = worker.ingest_failure(RuntimeError("boom"))

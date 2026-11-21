@@ -45,7 +45,7 @@ FAILURE_MESSAGES = {
     "decode_failed": "无法以 UTF-8 或可识别的中文编码解码",
     "no_text_layer": "该 PDF 没有文字层，请上传文本型 PDF",
     "original_missing": "原件不可读取，请重新上传",
-    "too_many_pages": "该 PDF 页数超过当前上限",
+    "too_many_pages": "页数超过当前上限",
     "parse_error": "解析失败，请重试或更换文件",
     "canceled": "入库已取消",
 }
@@ -53,10 +53,12 @@ FAILURE_MESSAGES = {
 
 def failure_message(code: str, **details: object) -> str:
     message = FAILURE_MESSAGES.get(code, "解析失败，请重试或更换文件")
-    if code == "too_many_pages" and "limit" in details:
-        message = f"{message}（上限 {details['limit']} 页）"
-    if code == "too_many_pages" and "pages" in details:
-        message = f"该 PDF 共 {details['pages']} 页，{message}"
+    if code == "too_many_pages":
+        pages = details.get("pages")
+        limit = details.get("limit")
+        message = f"该 PDF 共 {pages} 页，{message}" if pages is not None else message
+        if limit is not None:
+            message = f"{message}（上限 {limit} 页）"
     return message
 
 
