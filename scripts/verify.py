@@ -661,7 +661,8 @@ def scenario_relogin_keeps_project(
 
 CHANGE_ID = "2026-11-21-track-background-jobs"
 DOCUMENT_CHANGE_ID = "2026-11-21-ingest-seed-documents"
-KNOWN_CHANGES = {CHANGE_ID, DOCUMENT_CHANGE_ID}
+ENGINE_CHANGE_ID = "2026-11-21-connect-engine-providers"
+KNOWN_CHANGES = {CHANGE_ID, DOCUMENT_CHANGE_ID, ENGINE_CHANGE_ID}
 VERIFY_STEP_DELAY_MS = "800"
 JOB_TIMEOUT_SECONDS = 90.0
 JOB_EVENT_TIMEOUT_SECONDS = 60.0
@@ -2527,6 +2528,39 @@ def scenario_document_failure_history(
     )
 
 
+def scenario_engine_offline(entry: dict[str, Any], report: dict[str, Any]) -> None:
+    """运行离线契约检查；不读取真实密钥，不访问外部服务。"""
+    environment = dict(os.environ)
+    environment["PYTHONPATH"] = str(REPO_ROOT)
+    result = subprocess.run(
+        [sys.executable, "-m", "app.engines.offline", "--json"],
+        cwd=REPO_ROOT,
+        env=environment,
+        text=True,
+        capture_output=True,
+        timeout=120,
+        check=False,
+    )
+    require(
+        result.returncode == 0,
+        f"离线引擎契约检查失败：{result.stderr.strip() or result.stdout.strip()[:500]}",
+    )
+    try:
+        payload = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise AssertionError(f"离线引擎契约检查未返回 JSON：{exc}") from exc
+    require(payload.get("mode") == "offline-contract", "离线检查 mode 不是 offline-contract")
+    require(payload.get("result") == "passed", "离线检查结果不是 passed")
+    calls = payload.get("calls") or {}
+    require(calls.get("real") == 0, "离线检查出现真实调用")
+    require(int(calls.get("double") or 0) > 0, "离线检查没有测试替身调用")
+    report["engine_evidence"] = payload
+    entry["detail"] = (
+        f"离线契约 {len(payload.get('scenarios', []))} 项通过；"
+        f"real={calls.get('real')} double={calls.get('double')}"
+    )
+
+
 def run_acceptance(report: dict[str, Any], change: str | None = None) -> bool:
     state: dict[str, Any] = {}
     fixtures = DocumentFixtures()
@@ -2608,6 +2642,9 @@ def run_acceptance(report: dict[str, Any], change: str | None = None) -> bool:
                 scenario_job_restart_after_terminal(entry, state, report)
             with scenario(report, "job-cancel-final-race") as entry:
                 scenario_job_cancel_race(entry, state, report)
+        if change == ENGINE_CHANGE_ID:
+            with scenario(report, "engine-offline-contract") as entry:
+                scenario_engine_offline(entry, report)
         if change == DOCUMENT_CHANGE_ID:
             with scenario(report, "document-pdf-pages") as entry:
                 scenario_document_pdf_pages(entry, state, report, fixtures)
@@ -2717,6 +2754,7 @@ def new_report(expected_sha: str | None) -> dict[str, Any]:
         "change": None,
         "job_evidence": [],
         "document_evidence": [],
+        "engine_evidence": None,
         "started_at": utc_now(),
         "finished_at": None,
         "exit_code": None,

@@ -1,0 +1,7 @@
+# EchoSim 引擎联通隔离环境（目标 Linux aarch64 / Python 3.11）
+# 仅由 Dockerfile.engine 安装；不进入 app/worker 镜像。
+# 候选包必须精确版本；Pydantic 受 camel-ai 上限约束，固定 2.12.0。
+camel-oasis==0.2.6
+camel-ai==0.2.90
+zep-cloud==4.1.0
+pydantic==2.12.0

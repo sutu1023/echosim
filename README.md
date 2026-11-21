@@ -150,6 +150,19 @@ echosim_session=<随机令牌>; HttpOnly; Path=/; SameSite=lax
 | `DOCUMENT_CHUNK_TARGET_CHARS` | `1200` | 分块目标长度（字符） |
 | `DOCUMENT_CHUNK_OVERLAP_CHARS` | `120` | 同一段落被拆开时的重叠长度（字符） |
 | `DOCUMENT_INGEST_DELAY_MS` | `0` | 解析前的可控延迟（毫秒），仅用于验收放大慢解析窗口 |
+| `MODEL_API_BASE_URL` | 空 | Chat Completions 兼容 API 根地址，可包含 `/v1`；空表示未配置 |
+| `MODEL_API_KEY` | 空 | 模型密钥；只注入 `engine` 服务 |
+| `MODEL_NAME` | 空 | 模型名；空表示未配置 |
+| `MODEL_TIMEOUT_SECONDS` | `30` | 模型项总时限（秒），含重试与移除 `response_format` 重试 |
+| `ZEP_API_KEY` | 空 | Zep 密钥；只注入 `engine` 服务 |
+| `ZEP_API_BASE_URL` | 空 | 可选 Zep 服务地址；空表示使用 SDK 默认 |
+| `ZEP_ACCEPTANCE_GRAPH_ID` | 空 | 固定验收专用图谱的 `graph_uuid`；空表示未配置 |
+| `GRAPH_WRITE_TIMEOUT_SECONDS` | `20` | 单次 episode 写入时限（秒） |
+| `GRAPH_STATUS_TIMEOUT_SECONDS` | `10` | 写入响应丢失后的单次核对时限（秒） |
+| `GRAPH_INDEX_TIMEOUT_SECONDS` | `60` | `graph.search_episodes` 索引等待上限（秒） |
+| `GRAPH_POLL_INTERVAL_SECONDS` | `3` | 索引期间检索间隔（秒） |
+| `SIMULATION_TIMEOUT_SECONDS` | `60` | 单个 OASIS 平台的动作与读回总时限（秒） |
+| `SMOKE_LIVE_TOTAL_TIMEOUT_SECONDS` | `300` | 整次 `make smoke-live` 总时限（秒） |
 
 覆盖端口示例：
 
@@ -258,6 +271,60 @@ worker 复用同一镜像但没有 HTTP 端口，因此 Compose 用“心跳文�
 - 取消解析在取消事务内同时写入 job `canceled`、终态事件与材料失败；worker 停止时取消排队任务也立即生效。
 - 材料深链接就是完整地址：`/projects/<项目 ID>/workbench/evidence-graph?layout=split&lang=zh&document=<材料 ID>`，刷新或粘贴后回到同一材料，`layout` 与 `lang` 保持不变。
 
+## 引擎联通验收
+
+本版本的引擎联通只做服务端接入与真实联通证据，不接入正式推演、角色准备或工作台页面。真实调用只由开发者显式执行：
+
+```bash
+make smoke-live
+```
+
+`make smoke-live` 默认在工作树存在未提交改动时拒绝执行；本地调试可显式使用 `ALLOW_DIRTY=1 make smoke-live`，报告会记录 `dirty=true`，但不能作为签收证据。该命令不会自动创建或复制 `.env`；`.env.example` 中的 `replace-with-*`、`*.example.invalid` 与全零 UUID 会按“未配置”处理，不会触发外部调用。
+
+真实联调使用隔离的 `engine` 镜像与 `live` Compose profile；`make up`、默认 `make verify` 和 CI 都不会构建或启动它。引擎镜像只包含 `app/engines/`、显式配置与 `runtime/smoke-live` 报告目录，不挂载整仓、`.env`、私有材料或历史报告。
+
+### 配置与真实调用
+
+真实联调需要在本机 `.env` 填写以下变量（只列变量名，不要求提交真实值）：
+
+- `MODEL_API_BASE_URL`、`MODEL_NAME`、`MODEL_API_KEY`：Chat Completions 兼容接口。根地址可包含 `/v1`，拼接后只出现一次 `/chat/completions`。
+- `ZEP_API_KEY`、`ZEP_ACCEPTANCE_GRAPH_ID`：固定验收专用图谱，后者必须是 `graph_uuid`。
+
+明显占位值（`replace-with-*`、`*.example.invalid`、全零 UUID）会被视为未配置，避免误触发外部调用。
+
+模型首次请求使用 `model`、`messages` 与 `response_format={"type":"json_object"}`，并固定发送 `User-Agent: EchoSim/0.1.0`；正常调用、移除参数重试与网络重试都使用同一 User-Agent。字段、类型、UTF-16 偏移、原文引用与运行标识由 EchoSim 校验。只有上游 400/422 明确指出不支持 `response_format` 时才移除参数重试一次；所有重试与 SDK 内置重试共用 30 秒、最多 2 次实际 HTTP 请求的预算。
+
+使用 OpenCode Go 的订阅端点时，模型客户端以本次运行标识设置 `x-opencode-session`，同次重试复用该标识。该端点的 `deepseek-v4.1-flash` 结构化提取使用 `reasoning_effort=none`。请求按原文行给出 UTF-16 定位，响应仍逐条与原文核对。
+
+模型项报告保留精确 `httpStatus` 与兼容字段 `httpStatusClass`；HTTP 402 归类为 `billing_required`，403 且明确 `error.code`/`error_code` 为 1010 时归类为 `edge_blocked`，401 与普通 403 保持 `auth_failed`。这些错误均只调用一次。`providerErrorCode` 只记录允许列表内的 `1010` 与 `insufficient_quota`；未知值或被回显的字符串留空。普通 403 只在无关元数据中出现 1010 时仍为 `auth_failed`。报告不保存密钥、请求头全集或原始响应正文。
+
+图谱使用 `graph.episode.add` 写入固定 `graph_uuid`，每次运行生成不同 `runId` 与唯一 `idempotency_key`；同一次逻辑写入的重试复用原键、原图谱与原请求体。保存服务端返回的 episode UUID，再用 `graph.search_episodes` 核对 UUID、运行标识与唯一事实。写入响应丢失时，搜索未命中不能作为换键重写的依据；预算内仍无法确认则报告 `write_unconfirmed`。
+
+OASIS 双平台使用稳定别名 `platform_a`/`platform_b`：前者对应原生 `twitter` 并执行 `create_post`；后者对应原生 `reddit`，先建立本次目标帖，再执行 `create_comment`。报告保留原生平台、原生动作、角色、记录标识与目标帖标识；两个平台分别判定，只有两个平台都有实际行动记录，双平台项才通过。
+
+报告写入 `runtime/smoke-live/last-run.json`，并保留带时间戳的运行记录。每项标记 `passed`、`failed` 或 `not_run`，真实调用与测试替身分别计数；任一必需项未通过时命令以非零状态退出。缺模型配置只阻断模型项，缺 Zep 配置只阻断图谱项；本地 OASIS 动作继续执行，但总结果仍因必需项缺失而失败。
+
+离线回归不读取真实密钥、不安装候选引擎依赖、不访问外部服务：
+
+```bash
+make verify CHANGE=2026-11-21-connect-engine-providers
+```
+
+该命令把离线契约结果写入 `runtime/verify/last-run.json` 的 `engine_evidence`，并记录 `mode=offline-contract`、`calls.real=0` 与测试替身次数。离线通过不能替代真实联调或人工签收。
+
+### 依赖基线
+
+候选组合为 `camel-oasis==0.2.6`、`camel-ai==0.2.90`、`zep-cloud==4.1.0`，目标为 Linux aarch64、Python 3.11。只有在目标容器中完成依赖解析、容器安装、导入与最小运行四阶段，`dependencyBaseline.status` 才为 `verified`。候选 `camel-ai` 的 Pydantic 上限低于应用当前版本，因此引擎依赖安装在隔离镜像中，不修改 `app`/`worker` 的依赖。
+
+### 失败处理
+
+- 缺配置：按依赖分别标记 `not_run`/`missing_config`，不发起对应调用；其它可独立运行的项继续执行。
+- 失效凭据：返回 `auth_failed`，不重试；恢复凭据后可重新运行。
+- 超时与限流：在各自总时限与最多 1 次重试预算内结束；SDK 内置重试也计入实际调用。
+- 模型输出不合规：`invalid_output`、`source_mismatch` 或 `marker_missing`，HTTP 200 不算成功。
+- 索引等待超时：保留已受理标识，图谱项以 `index_timeout` 失败。
+- 单个平台失败：只影响该平台与双平台总判定，另一个平台的证据仍保留。
+
 ## 数据库迁移
 
 迁移文件位于 `app/migrations/*.sql`，按文件名顺序执行，版本记录在 `schema_migrations`。容器启动时先执行 `python -m app.migrate` 再启动 Uvicorn，因此 `make up` 会自动升级已有数据卷。
@@ -314,7 +381,7 @@ gh workflow run verify --ref <branch> -f expected_sha=00000000000000000000000000
   该运行会失败，并上传记录 SHA 不一致原因的失败报告，用于证明失败路径可观测。
 - `scripts/verify.py` 对未预期异常也会写入 `verify-crash` 失败报告，保证 CI 有产物可下载。
 
-CI 在干净检出上执行同一命令，并断言报告中的 `tested_sha` 等于触发提交 SHA；工作流名称 `verify`，报告作为构建产物上传。
+CI 在干净检出上执行同一命令，并断言报告中的 `tested_sha` 等于触发提交 SHA；工作流名称 `verify`，报告作为构建产物上传。CI 同时提供独立的 Change 06 离线检查（`make verify CHANGE=2026-11-21-connect-engine-providers`），两份报告使用不同 artifact 名称；专属检查额外断言 `calls.real=0`。CI 不注入模型或 Zep 密钥、不执行 `make smoke-live`、不构建 live 引擎镜像。
 
 ### 浏览器人工走查
 
@@ -351,6 +418,8 @@ app/routers/         HTTP 路由
 web/                 Vue 3 + TypeScript + Vite 前端
 tests/               Python 单元测试（unittest）
 scripts/verify.py    验收脚本（Python 标准库）
+scripts/smoke_live.py 真实联调的宿主预检与报告拒绝路径
+app/engines/         引擎契约、模型/图谱/双平台适配器、离线检查与依赖基线
 docs/acceptance/     人工验收记录与模板
 .github/workflows/   CI 工作流
 runtime/verify/      make verify 生成的报告（已忽略，不提交）
@@ -416,4 +485,4 @@ docker compose logs db
 
 ## 非目标
 
-本阶段不实现自助注册、找回密码、邮箱验证、多因素认证、登录限流与账户锁定；也不实现回放、上传、推演引擎、生产部署、nginx 反向代理或多环境编排。
+本阶段不实现自助注册、找回密码、邮箱验证、多因素认证、登录限流与账户锁定；也不实现完整证据图谱、角色准备、正式推演编排、报告生成、工作台页面、生产部署、nginx 反向代理或多环境编排。引擎联通验收只证明一次真实调用与证据可核对，不构成产品推演能力。

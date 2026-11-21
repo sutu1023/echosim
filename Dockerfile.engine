@@ -1,0 +1,29 @@
+# EchoSim 引擎联通隔离镜像：不提供 HTTP 端口，不复制整仓。
+FROM python:3.11-slim-bookworm
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PYTHONPATH=/app
+
+WORKDIR /app
+
+# camel-ai 允许的 psutil 5.9.8 在 aarch64 上没有 wheel，需要本地编译。
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY app/requirements-engines.txt ./requirements-engines.txt
+# 解析阶段只生成报告，不安装；作为四阶段基线的 resolve 证据。
+RUN python -m pip install --no-cache-dir --dry-run --report /app/engine-resolve.json \
+    -r requirements-engines.txt
+# 安装阶段：只在引擎镜像内安装候选组合及其传递依赖。
+RUN python -m pip install --no-cache-dir -r requirements-engines.txt
+
+COPY app/__init__.py ./app/__init__.py
+COPY app/engines ./app/engines
+
+# 记录安装与导入证据；最小运行由 smoke 预检或 baseline 命令执行。
+RUN python -m app.engines.baseline --record-build /app/engine-build.json
+
+CMD ["python", "-m", "app.engines.smoke"]

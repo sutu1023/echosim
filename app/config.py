@@ -6,6 +6,22 @@ from pathlib import Path
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from .engines.settings import (
+    DEFAULT_GRAPH_INDEX_TIMEOUT_SECONDS,
+    DEFAULT_GRAPH_POLL_INTERVAL_SECONDS,
+    DEFAULT_GRAPH_STATUS_TIMEOUT_SECONDS,
+    DEFAULT_GRAPH_WRITE_TIMEOUT_SECONDS,
+    DEFAULT_MODEL_API_BASE_URL,
+    DEFAULT_MODEL_API_KEY,
+    DEFAULT_MODEL_NAME,
+    DEFAULT_MODEL_TIMEOUT_SECONDS,
+    DEFAULT_SIMULATION_TIMEOUT_SECONDS,
+    DEFAULT_SMOKE_LIVE_TOTAL_TIMEOUT_SECONDS,
+    DEFAULT_ZEP_ACCEPTANCE_GRAPH_ID,
+    DEFAULT_ZEP_API_BASE_URL,
+    DEFAULT_ZEP_API_KEY,
+)
+
 # 仓库根目录（app/config.py 的上两级），用于定位本地构建产物。
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
@@ -31,6 +47,9 @@ class Settings(BaseSettings):
     - DOCUMENT_CHUNK_TARGET_CHARS：分块目标长度（字符）。
     - DOCUMENT_CHUNK_OVERLAP_CHARS：同一段落被拆开时的重叠长度（字符）。
     - DOCUMENT_INGEST_DELAY_MS：解析前的可控延迟，仅用于验收放大慢解析窗口。
+    - MODEL_API_BASE_URL / MODEL_API_KEY / MODEL_NAME：Chat Completions 兼容模型配置。
+    - ZEP_API_KEY / ZEP_ACCEPTANCE_GRAPH_ID：固定验收图谱配置。
+    - 其余 GRAPH_* / SIMULATION_* / SMOKE_LIVE_*：引擎超时与预算。
     """
 
     model_config = SettingsConfigDict(case_sensitive=False, extra="ignore")
@@ -50,6 +69,19 @@ class Settings(BaseSettings):
     document_chunk_target_chars: int = 1200
     document_chunk_overlap_chars: int = 120
     document_ingest_delay_ms: int = 0
+    model_api_base_url: str = DEFAULT_MODEL_API_BASE_URL
+    model_api_key: str = DEFAULT_MODEL_API_KEY
+    model_name: str = DEFAULT_MODEL_NAME
+    model_timeout_seconds: float = DEFAULT_MODEL_TIMEOUT_SECONDS
+    zep_api_key: str = DEFAULT_ZEP_API_KEY
+    zep_api_base_url: str = DEFAULT_ZEP_API_BASE_URL
+    zep_acceptance_graph_id: str = DEFAULT_ZEP_ACCEPTANCE_GRAPH_ID
+    graph_write_timeout_seconds: float = DEFAULT_GRAPH_WRITE_TIMEOUT_SECONDS
+    graph_status_timeout_seconds: float = DEFAULT_GRAPH_STATUS_TIMEOUT_SECONDS
+    graph_index_timeout_seconds: float = DEFAULT_GRAPH_INDEX_TIMEOUT_SECONDS
+    graph_poll_interval_seconds: float = DEFAULT_GRAPH_POLL_INTERVAL_SECONDS
+    simulation_timeout_seconds: float = DEFAULT_SIMULATION_TIMEOUT_SECONDS
+    smoke_live_total_timeout_seconds: float = DEFAULT_SMOKE_LIVE_TOTAL_TIMEOUT_SECONDS
 
 
 settings = Settings()
