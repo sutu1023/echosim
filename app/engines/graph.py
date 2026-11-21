@@ -416,6 +416,7 @@ class GraphRunner:
         material: AcceptanceMaterial,
         expected_uuid: str | None,
     ) -> SearchOutcome:
+        fact = build_graph_fact(material)
         try:
             pager = client.graph.search_episodes(  # type: ignore[attr-defined]
                 graph_uuid,
@@ -425,17 +426,38 @@ class GraphRunner:
             items = getattr(pager, "items", None)
             if items is None and isinstance(pager, list):
                 items = pager
+
+            wrong_uuid_seen = False
             for item in items or []:
                 uuid = _episode_uuid(item)
                 content = _episode_content(item)
                 metadata = _episode_metadata(item)
-                marker_match = material.marker in content or metadata.get("marker") == material.marker
-                if not marker_match:
+                metadata_hint = (
+                    metadata.get("marker") == material.marker
+                    or metadata.get("runId") == material.run_id
+                )
+                content_marker = material.marker in content
+                content_fact = fact in content
+
+                # 元数据只用于把候选项纳入扫描；它本身不能构成命中证据。
+                if not (metadata_hint or content_marker or content_fact):
                     continue
-                if expected_uuid is None or uuid == expected_uuid:
+
+                uuid_match = expected_uuid is None or uuid == expected_uuid
+                if uuid and uuid_match and content_marker and content_fact:
                     return SearchOutcome(uuid, False, None)
-                return SearchOutcome(None, True, None)
-            return SearchOutcome(None, False, None)
+
+                # 正文携带本次标记与唯一事实、但 UUID 不匹配的旧/外部记录，
+                # 不能在扫描结束前遮蔽后面的精确命中。
+                if (
+                    expected_uuid is not None
+                    and not uuid_match
+                    and content_marker
+                    and content_fact
+                ):
+                    wrong_uuid_seen = True
+
+            return SearchOutcome(None, wrong_uuid_seen, None)
         except Exception as exc:  # noqa: BLE001 - 检索异常按稳定分类处理
             return SearchOutcome(None, False, _classify_exception(exc))
 

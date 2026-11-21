@@ -598,8 +598,50 @@ def run_offline() -> dict[str, Any]:
             material,
             add_responses=[{"episode": {"uuid": "episode-current"}}],
             search_responses=[[_episode("episode-other", material)]],
+            default_search=[_episode("episode-other", material)],
             expected_status=FAILED,
             expected_reason="stale_or_foreign_hit",
+        )
+    )
+    metadata_only = {
+        "uuid": "episode-current",
+        "content": "与本次运行无关的正文",
+        "metadata": {"runId": material.run_id, "marker": material.marker},
+    }
+    scenarios.append(
+        _graph_scenario(
+            "graph-metadata-marker-only",
+            material,
+            add_responses=[{"episode": {"uuid": "episode-current"}}],
+            search_responses=[[metadata_only]],
+            default_search=[metadata_only],
+            expected_status=FAILED,
+            expected_reason="index_timeout",
+        )
+    )
+    wrong_fact = {
+        "uuid": "episode-current",
+        "content": f"错误事实 {material.marker}",
+        "metadata": {"runId": material.run_id, "marker": material.marker},
+    }
+    scenarios.append(
+        _graph_scenario(
+            "graph-content-marker-wrong-fact",
+            material,
+            add_responses=[{"episode": {"uuid": "episode-current"}}],
+            search_responses=[[wrong_fact]],
+            default_search=[wrong_fact],
+            expected_status=FAILED,
+            expected_reason="index_timeout",
+        )
+    )
+    scenarios.append(
+        _graph_scenario(
+            "graph-wrong-uuid-before-exact",
+            material,
+            add_responses=[{"episode": {"uuid": "episode-current"}}],
+            search_responses=[[_episode("episode-other", material), current]],
+            expected_status=PASSED,
         )
     )
     missing_graph = GraphRunner(

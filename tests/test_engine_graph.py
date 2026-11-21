@@ -153,10 +153,59 @@ class GraphRunnerTests(unittest.TestCase):
         self.assertEqual(result.status, "passed")
         self.assertEqual(result.evidence["episodeId"], "ep-current")
 
-    def test_wrong_uuid_fails(self) -> None:
+    def test_wrong_uuid_first_then_exact_hit_passes(self) -> None:
+        client = FakeClient(
+            add_responses=[{"episode": {"uuid": "ep-current"}}],
+            search_responses=[[
+                episode("ep-wrong", self.material),
+                episode("ep-current", self.material),
+            ]],
+        )
+
+        result = self.run_with(client)
+
+        self.assertEqual(result.status, "passed")
+        self.assertEqual(result.evidence["episodeId"], "ep-current")
+
+    def test_metadata_marker_only_cannot_pass(self) -> None:
+        metadata_only = {
+            "uuid": "ep-current",
+            "content": "与本次运行无关的正文",
+            "metadata": {"runId": self.material.run_id, "marker": self.material.marker},
+        }
+        client = FakeClient(
+            add_responses=[{"episode": {"uuid": "ep-current"}}],
+            search_responses=[[metadata_only]],
+            default_search=[metadata_only],
+        )
+
+        result = self.run_with(client)
+
+        self.assertEqual(result.status, "failed")
+        self.assertEqual(result.reason, "index_timeout")
+
+    def test_content_marker_with_wrong_fact_cannot_pass(self) -> None:
+        wrong_fact = {
+            "uuid": "ep-current",
+            "content": f"错误事实 {self.material.marker}",
+            "metadata": {"runId": self.material.run_id, "marker": self.material.marker},
+        }
+        client = FakeClient(
+            add_responses=[{"episode": {"uuid": "ep-current"}}],
+            search_responses=[[wrong_fact]],
+            default_search=[wrong_fact],
+        )
+
+        result = self.run_with(client)
+
+        self.assertEqual(result.status, "failed")
+        self.assertEqual(result.reason, "index_timeout")
+
+    def test_wrong_uuid_fails_only_after_scanning_all_candidates(self) -> None:
         client = FakeClient(
             add_responses=[{"episode": {"uuid": "ep-current"}}],
             search_responses=[[episode("ep-other", self.material)]],
+            default_search=[episode("ep-other", self.material)],
         )
 
         result = self.run_with(client)
