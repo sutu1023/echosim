@@ -114,7 +114,7 @@
 - [x] 10.9 准备待签收清单（不写入 `docs/acceptance/`）：被测 SHA、`make verify` 与 `make verify CHANGE=…` 报告路径、`make smoke-live` live 报告路径、模型字段/来源证据、图谱 episode UUID 与幂等键及检索等待、平台 A/B 原生平台/原生动作/记录标识/目标帖标识、依赖基线四阶段结果、已知限制
 - [x] 10.10 列出需要开发者在本机填写的变量名与占位说明：`MODEL_API_BASE_URL`（API 根地址，可含 `/v1`）、`MODEL_NAME`、`MODEL_API_KEY`、`ZEP_API_KEY`、`ZEP_ACCEPTANCE_GRAPH_ID`（graph_uuid）；不要求或打印真实值，验证方式是文档/交付说明只列变量名与用途
 - [x] 10.11 确认脏工作树行为：默认 `make smoke-live` 在外部调用前拒绝并退出，`ALLOW_DIRTY=1` 时允许但报告 `dirty=true`，签收只接受 `dirty=false` 且 `tested_sha` 与候选一致的 live 报告；验证方式是三种运行各一次并检查报告
-- [ ] 10.12 由验收人在真实凭据与浏览器/终端环境中核对联通结果后，才在 `docs/acceptance/` 写入签收记录；记录必须引用同 SHA、`dirty=false` 的 `mode=live` 报告并注明离线报告不能替代真实联调；`make verify`、CI 与 `make smoke-live` 均不得自动创建或修改该记录
+- [x] 10.12 由验收人在真实凭据与浏览器/终端环境中核对联通结果后，才在 `docs/acceptance/` 写入签收记录；记录必须引用同 SHA、`dirty=false` 的 `mode=live` 报告并注明离线报告不能替代真实联调；`make verify`、CI 与 `make smoke-live` 均不得自动创建或修改该记录
 
 ## 本次联调证据
 
