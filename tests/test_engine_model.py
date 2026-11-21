@@ -9,6 +9,7 @@ import os
 import tempfile
 import threading
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
@@ -166,14 +167,26 @@ class ModelRunnerTests(unittest.TestCase):
                 responses = iter([HttpResponse(429), HttpResponse(200, valid_body(self.material))])
 
                 def record(url, headers, payload, timeout):
-                    sessions.append(headers.get("x-opencode-session"))
+                    sessions.append((headers.get("x-opencode-session"), payload.get("reasoning_effort")))
                     return next(responses)
 
                 result = ModelRunner(
-                    settings(model_api_base_url=base), transport=record, sleep=lambda _: None
+                    settings(model_api_base_url=base, model_name="deepseek-v4.1-flash"), transport=record, sleep=lambda _: None
                 ).run(self.material)
                 self.assertEqual(result.status, "passed")
-                self.assertEqual(sessions, [expected, expected])
+                expected_headers_and_effort = (expected, "none" if expected else None)
+                self.assertEqual(sessions, [expected_headers_and_effort] * 2)
+
+    def test_source_lines_preserve_utf16_offsets_across_crlf_and_empty_lines(self) -> None:
+        material = replace(self.material, text="😀甲\r\n\n乙")
+        transport = SequenceTransport([HttpResponse(401, "denied")])
+        ModelRunner(settings(), transport=transport).run(material)
+        message = transport.requests[0][1]["messages"][0]["content"]
+        lines = json.loads(message.split("材料原文行：", 1)[1])
+        self.assertEqual(lines, [
+            {"text": "😀甲", "sourceStart": 0, "sourceEnd": 3},
+            {"text": "乙", "sourceStart": 6, "sourceEnd": 7},
+        ])
 
     def test_first_request_uses_json_object_and_model(self) -> None:
         transport = SequenceTransport([HttpResponse(200, valid_body(self.material))])
