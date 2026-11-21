@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import socket
 import time
 import urllib.error
@@ -23,6 +24,7 @@ from .contracts import (
 from .settings import EngineSettings
 
 RETRYABLE_STATUSES = {408, 429, 502, 503, 504}
+USER_AGENT = "EchoSim/0.1.0"
 
 
 @dataclass(frozen=True)
@@ -58,10 +60,11 @@ def build_chat_completions_url(base_url: str) -> str:
 def _default_transport(
     url: str, headers: dict[str, str], payload: dict[str, Any], timeout: float
 ) -> HttpResponse:
+    request_headers = {"User-Agent": USER_AGENT, **headers}
     request = urllib.request.Request(
         url,
         data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
-        headers=headers,
+        headers=request_headers,
         method="POST",
     )
     try:
@@ -173,7 +176,62 @@ def _status_class(status: int) -> str:
     return f"{status // 100}xx"
 
 
+def _iter_error_codes(value: object) -> list[str]:
+    codes: list[str] = []
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if str(key).lower() in {"code", "error_code"} and isinstance(
+                item, (str, int, float)
+            ):
+                codes.append(str(item))
+            codes.extend(_iter_error_codes(item))
+    elif isinstance(value, list):
+        for item in value:
+            codes.extend(_iter_error_codes(item))
+    return codes
+
+
+def _provider_error_codes(body: str) -> list[str]:
+    codes: list[str] = []
+    try:
+        parsed = json.loads(body)
+    except json.JSONDecodeError:
+        parsed = None
+    if parsed is not None:
+        codes.extend(_iter_error_codes(parsed))
+    if not codes:
+        match = re.search(
+            r"(?:error\s*code|code)\s*[:=]\s*([A-Za-z0-9_.:-]{1,80})",
+            body,
+            flags=re.IGNORECASE,
+        )
+        if match:
+            codes.append(match.group(1))
+    sanitized: list[str] = []
+    for code in codes:
+        value = re.sub(r"[^A-Za-z0-9_.:-]+", "_", code)[:80]
+        if value and value not in sanitized:
+            sanitized.append(value)
+    return sanitized
+
+
+def _provider_error_code(body: str) -> str | None:
+    codes = _provider_error_codes(body)
+    return codes[0] if codes else None
+
+
+def _is_cloudflare_1010(body: str) -> bool:
+    if "1010" in _provider_error_codes(body):
+        return True
+    lowered = body.lower()
+    return "cloudflare" in lowered and re.search(r"\b1010\b", lowered) is not None
+
+
 def _failure_reason(status: int, response: HttpResponse) -> str:
+    if status == 402:
+        return "billing_required"
+    if status == 403 and _is_cloudflare_1010(response.body):
+        return "edge_blocked"
     if status in {401, 403}:
         return "auth_failed"
     if status == 429:
@@ -217,7 +275,7 @@ class ModelRunner:
                 "missing_config",
                 0,
                 CallCounts(),
-                {"missing": list(self.settings.missing_model)},
+                {"missing": list(self.settings.missing_model), "httpStatus": None, "providerErrorCode": None},
             )
 
         try:
@@ -231,13 +289,14 @@ class ModelRunner:
                 "missing_config",
                 0,
                 CallCounts(),
-                {"invalidBaseUrl": True},
+                {"invalidBaseUrl": True, "httpStatus": None, "providerErrorCode": None},
             )
 
         headers = {
             "Authorization": f"Bearer {self.settings.model_api_key}",
             "Content-Type": "application/json",
             "Accept": "application/json",
+            "User-Agent": USER_AGENT,
         }
         deadline = started + self.settings.model_timeout_seconds
         include_response_format = True
@@ -323,6 +382,7 @@ class ModelRunner:
             fallback_used,
             retry_used,
             last_status,
+            provider_error_code=_provider_error_code(last_response.body),
         )
 
     def _result(
@@ -341,6 +401,7 @@ class ModelRunner:
         fact_count: int = 0,
         marker_matched: bool = False,
         detail: str = "",
+        provider_error_code: str | None = None,
     ) -> ItemResult:
         return ItemResult(
             "model.structured",
@@ -357,7 +418,9 @@ class ModelRunner:
                 "markerMatched": marker_matched,
                 "fallbackUsed": fallback_used,
                 "retryUsed": retry_used,
+                "httpStatus": http_status,
                 "httpStatusClass": _status_class(http_status),
+                "providerErrorCode": provider_error_code,
                 "responseFormatUsed": include_response_format,
                 "detail": detail,
             },

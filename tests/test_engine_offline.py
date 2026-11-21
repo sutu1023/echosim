@@ -18,6 +18,10 @@ class OfflineContractTests(unittest.TestCase):
         scenarios = {item["id"]: item for item in payload["scenarios"]}
         for scenario_id in (
             "model-response-format-retry",
+            "model-auth-no-retry",
+            "model-billing-402",
+            "model-edge-blocked-403-1010",
+            "model-auth-403",
             "graph-response-lost-first-search-miss",
             "graph-write-unconfirmed",
             "graph-metadata-marker-only",

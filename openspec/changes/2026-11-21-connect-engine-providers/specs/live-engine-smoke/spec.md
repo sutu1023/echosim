@@ -111,13 +111,21 @@
 
 ### Requirement: 凭据、材料与报告内容有明确脱敏边界
 
-真实联调 SHALL 只从本机 `.env` 或进程环境读取模型与 Zep 密钥，MUST NOT 把密钥写入仓库、日志、报告、命令行参数或错误响应。模型与 Zep 密钥 MUST 只注入需要它们的引擎运行环境，`app` 与 `worker` 在本变更中 MUST NOT 接收这些密钥。日志与报告 SHALL 记录依赖名称、阶段、调用次数、耗时与脱敏结果，MUST NOT 记录完整密钥、Authorization 头、完整模型请求/响应正文、完整 episode 正文或私有样本内容。
+真实联调 SHALL 只从本机 `.env` 或进程环境读取模型与 Zep 密钥，MUST NOT 把密钥写入仓库、日志、报告、命令行参数或错误响应。模型与 Zep 密钥 MUST 只注入需要它们的引擎运行环境，`app` 与 `worker` 在本变更中 MUST NOT 接收这些密钥。日志与报告 SHALL 记录依赖名称、阶段、调用次数、耗时与脱敏结果；模型项证据 MUST 包含精确 `httpStatus`、兼容字段 `httpStatusClass` 与可选的脱敏 `providerErrorCode`。报告 MUST NOT 记录完整密钥、Authorization 头、完整模型请求/响应正文、完整 episode 正文或私有样本内容。模型 HTTP 402 MUST 归类为 `billing_required`，403 且有明确 Cloudflare 1010 证据 MUST 归类为 `edge_blocked`，401 与普通 403 MUST 保留 `auth_failed`，这些错误均只调用一次。
 
 #### Scenario: 报告不包含密钥
 
 - **WHEN** 使用一个具有唯一可识别值的测试密钥执行真实联调
 - **THEN** `runtime/smoke-live/` 下的报告与命令输出中找不到该值
 - **AND** 也不出现 `Authorization` 头的完整内容或带凭据的完整 URL
+
+#### Scenario: 模型 HTTP 诊断字段脱敏且保留精确状态
+
+- **WHEN** 模型端点返回 402、403/1010、普通 403 或 401
+- **THEN** 报告分别记录 `billing_required`、`edge_blocked`、`auth_failed`、`auth_failed`
+- **AND** 证据包含精确 `httpStatus` 与 `httpStatusClass`，并在可用时包含脱敏 `providerErrorCode`
+- **AND** 不保存密钥、请求头全集或原始响应正文
+- **AND** 每项实际调用次数为 1
 
 #### Scenario: 只使用原创验收材料
 

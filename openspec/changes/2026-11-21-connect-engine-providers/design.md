@@ -103,6 +103,8 @@
 }
 ```
 
+正式请求头固定包含 `Authorization: Bearer <KEY>`、`Content-Type: application/json`、`Accept: application/json` 与 `User-Agent: EchoSim/0.1.0`。正常调用、移除参数重试与网络重试 MUST 使用同一 User-Agent；不得回退到 `Python-urllib/*` 默认值。
+
 请求体中的材料是运行时生成的原创短文本：
 
 ```
@@ -134,6 +136,17 @@
 **移除参数重试**：只有第一次调用返回 400/422，且响应明确指出 `response_format` 不受支持，且尚未得到可解析结果时，允许移除 `response_format` 后再试一次。第二次调用在提示中要求只返回同一 JSON 契约，并执行完全相同的校验。认证失败、权限不足、限流、5xx、超时、其它 400/422 原因与结果不合格都不触发移除参数重试。
 
 **预算**：模型项最多 2 次实际 HTTP 请求、总时限 30 秒。重试、移除参数重试与 SDK 内置重试共用这 2 次预算，不得叠加；SDK 内部每次实际 HTTP 请求都计数。408/429/502/503/504/连接超时允许在预算内重试 1 次；400/401/403/404/422、结果不合格与来源不匹配不重试。超过预算立即失败，不把部分结果记为通过。
+
+**HTTP 错误分类**：报告保留精确 `httpStatus` 与兼容字段 `httpStatusClass`。
+
+| 状态 | 条件 | 原因码 | 调用次数 |
+| --- | --- | --- | --- |
+| 402 | 余额或支付方式问题 | `billing_required` | 1 |
+| 403 | 响应有明确的 Cloudflare 1010 证据 | `edge_blocked` | 1 |
+| 403 | 普通 403 | `auth_failed` | 1 |
+| 401 | 鉴权失败 | `auth_failed` | 1 |
+
+报告只记录脱敏的 `providerErrorCode`（如 `1010`、`insufficient_quota`）；不保存密钥、请求头全集或原始响应正文。
 
 **备选方案**：只接受结构化模式，不做移除参数重试。否决原因：部分兼容端点不支持 `response_format`，若直接失败会把“上游能力差异”误报为联通失败；但移除参数必须受严格触发条件与同一校验约束，不能变成“解析出任何 JSON 就算成功”。
 
@@ -237,7 +250,15 @@ OASIS 的两个本地模拟平台使用稳定别名报告，并保留原生平�
       "stage": "structured-extraction",
       "durationMs": 1234,
       "calls": {"real": 1, "double": 0},
-      "evidence": {"fieldsValid": true, "sourceMatches": 3, "markerMatched": true, "fallbackUsed": false}
+      "evidence": {
+        "fieldsValid": true,
+        "sourceMatches": 3,
+        "markerMatched": true,
+        "fallbackUsed": false,
+        "httpStatus": 200,
+        "httpStatusClass": "2xx",
+        "providerErrorCode": null
+      }
     },
     {
       "id": "graph.searchable",
@@ -305,7 +326,7 @@ Change 06 专属流程调用 `app/engines/offline.py` 的离线契约检查（�
 
 | 能力 | 场景 | 验收入口 | 证据 |
 | --- | --- | --- | --- |
-| `structured-model-access` | Chat Completions 路径、json_object、合格结构化结果、非法输出、来源不匹配、移除参数重试、认证失败、限流、超时 | `make smoke-live`（真实）；`make verify CHANGE=…`（替身） | `items.model.structured`、`fieldsValid`、`sourceMatches`、`markerMatched`、`fallbackUsed`、`calls.real`、`reason` |
+| `structured-model-access` | Chat Completions 路径、json_object、User-Agent、合格结构化结果、非法输出、来源不匹配、移除参数重试、402/403-1010/普通 403/401、限流、超时 | `make smoke-live`（真实）；`make verify CHANGE=…`（替身） | `items.model.structured`、`fieldsValid`、`sourceMatches`、`markerMatched`、`fallbackUsed`、`httpStatus`、`httpStatusClass`、`providerErrorCode`、`calls.real`、`reason` |
 | `evidence-graph-access` | 固定 graph_uuid、写入受理、仍在索引、可以检索、响应丢失、同键重试、索引超时、旧记录共存 | `make smoke-live`（真实）；`make verify CHANGE=…`（替身） | `items.graph.*`、`episodeId`、`idempotencyKey`、状态序列、`indexWaitMs`、`searchAttempts`、`episodeMatched`、`markerMatched` |
 | `dual-platform-simulation` | twitter/create_post、reddit/目标帖/create_comment、记录读回、单平台失败、动作超时、清理失败 | `make smoke-live`（真实）；`make verify CHANGE=…`（替身） | `items.simulation.platform_a/b`、`platformKey`、`nativePlatform`、`nativeAction`、角色、结果、`recordId`、`targetPostId`、`cleanup` |
 | `live-engine-smoke` | 全部通过、脏工作树拒绝、缺配置按依赖判定、凭据失效、超时、限流、单平台失败、依赖未验证 | `make smoke-live` | `runtime/smoke-live/last-run.json`、`result`、逐项状态、`calls.real/double`、`dependencyBaseline`、`dirty`、退出码 |

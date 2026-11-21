@@ -32,13 +32,13 @@
 
 ## 4. 模型结构化接入
 
-- [x] 4.1 在 `app/engines/model.py` 实现 Chat Completions 兼容 HTTP 调用，按 `MODEL_API_BASE_URL`（可含 `/v1`）规范化拼接，保证最终路径只出现一次 `/chat/completions`；使用服务端配置的模型名与密钥，设置总超时并禁用会绕过预算的内置重试；验证方式是测试替身分别覆盖含 `/v1` 与不含 `/v1` 的根地址，并断言只出现一次 `/chat/completions`
+- [x] 4.1 在 `app/engines/model.py` 实现 Chat Completions 兼容 HTTP 调用，按 `MODEL_API_BASE_URL`（可含 `/v1`）规范化拼接，保证最终路径只出现一次 `/chat/completions`；使用服务端配置的模型名与密钥，固定 `User-Agent: EchoSim/0.1.0`，设置总超时并禁用会绕过预算的内置重试；验证方式是测试替身与本地 HTTP 服务覆盖含 `/v1` 与不含 `/v1` 的根地址，并断言路径、Bearer、JSON 请求体与正常/降级/重试的 User-Agent
 - [x] 4.2 实现首次请求与原创材料提示：请求体包含 `model`、`messages` 与 `response_format={"type":"json_object"}`，消息包含 JSON 契约、`materialId`、唯一运行标识与“只返回 JSON”的约束；验证方式是 `tests/test_engine_model.py` 断言首次请求包含该 `response_format`，且请求体只含本次夹具、不含项目材料或私有样本
 - [x] 4.3 复用 `contracts.py` 实现结果校验：必需字段、类型、`materialId` 一致、`facts` 非空、`kind` 枚举、UTF-16 偏移、输入切片等于 `evidenceQuote`、至少一条事实包含运行标识；验证方式是覆盖合法结果、200 但非 JSON、缺字段、类型错误、偏移越界、切片不一致、标识缺失
 - [x] 4.4 实现移除参数重试：仅当 400/422 明确表示 `response_format` 不受支持且尚无结果时，移除该参数后最多追加 1 次调用；重试结果执行同一套校验；验证方式是测试替身断言 401/429/5xx/超时/其它 400/422/结果不合格都不触发移除参数重试，移除后成功与仍不合格各自有断言
 - [x] 4.5 实现模型预算：实际 HTTP 请求不超过 2 次、总时限不超过 30 秒；408/429/502/503/504/连接超时最多重试 1 次，重试、移除参数重试与 SDK 内置重试共用预算；验证方式是测试替身断言实际请求次数、退避时间、SDK 内部重试被计数，以及 `rate_limited`/`timeout`/`auth_failed` 分类
 - [x] 4.6 确保 HTTP 200 但结果不合格时模型项为 `failed`，不得因“能解析 JSON”通过；验证方式是构造 200 + 非法 JSON、200 + 合法 JSON 但字段错误、200 + 来源不匹配三种回归
-- [x] 4.7 增加模型报告的脱敏字段：依赖名、阶段、调用次数、耗时、HTTP 状态类别、`fieldsValid`、`sourceMatches`、`markerMatched`、`fallbackUsed`、`retryUsed` 与原因码；验证方式是报告快照不包含密钥、完整提示或完整响应
+- [x] 4.7 增加模型报告的脱敏字段：依赖名、阶段、调用次数、耗时、精确 `httpStatus`、`httpStatusClass`、`providerErrorCode`、`fieldsValid`、`sourceMatches`、`markerMatched`、`fallbackUsed`、`retryUsed` 与原因码；验证方式是报告快照不包含密钥、请求头全集或完整响应
 - [x] 4.8 在 README 补充模型接入的 Chat Completions 路径拼接、`json_object` 首次请求、移除 `response_format` 触发条件、总预算（含 SDK 内置重试）与失败原因表；验证方式是文档示例与实际测试替身请求一致
 
 ## 5. 证据图谱接入

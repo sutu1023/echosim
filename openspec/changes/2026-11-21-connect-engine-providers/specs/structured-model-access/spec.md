@@ -65,7 +65,7 @@
 
 ### Requirement: Chat Completions 地址拼接与首次请求契约
 
-系统 SHALL 把 `MODEL_API_BASE_URL` 视为 API 根地址（可以包含 `/v1`），在拼接 `/chat/completions` 时 MUST 保证最终路径中只出现一次 `/chat/completions`。首次请求 MUST 使用 `model`、`messages` 与 `response_format={"type":"json_object"}`，字段、类型、UTF-16 偏移、原文引用与运行标识仍由 EchoSim 校验。具体供应商、模型名与地址由本机配置提供，兼容性 MUST 在真实联调中确认。
+系统 SHALL 把 `MODEL_API_BASE_URL` 视为 API 根地址（可以包含 `/v1`），在拼接 `/chat/completions` 时 MUST 保证最终路径中只出现一次 `/chat/completions`。首次请求 MUST 使用 `model`、`messages` 与 `response_format={"type":"json_object"}`，并 MUST 设置 `User-Agent: EchoSim/0.1.0`；正常调用、移除参数重试与网络重试 MUST 使用同一 User-Agent。字段、类型、UTF-16 偏移、原文引用与运行标识仍由 EchoSim 校验。具体供应商、模型名与地址由本机配置提供，兼容性 MUST 在真实联调中确认。
 
 #### Scenario: 根地址包含 /v1 时只拼一次路径
 
@@ -79,10 +79,11 @@
 - **THEN** 请求路径同样只出现一次 `/chat/completions`
 - **AND** 不因缺少或重复 `/v1` 改变请求目标
 
-#### Scenario: 首次请求使用 json_object
+#### Scenario: 首次请求使用 json_object 与 EchoSim User-Agent
 
 - **WHEN** 模型项开始执行
 - **THEN** 首次请求体包含 `model`、`messages` 与 `response_format={"type":"json_object"}`
+- **AND** 请求头包含 `User-Agent: EchoSim/0.1.0` 与 Bearer 鉴权
 - **AND** 模型名与消息中的材料来自本机配置与本次原创夹具
 
 ### Requirement: 仅当上游明确拒绝 response_format 时移除参数重试
@@ -138,3 +139,35 @@
 - **THEN** 模型项判定为失败，原因码为 `timeout`
 - **AND** 报告记录已发生的调用次数与耗时，不记录任何未校验的响应内容
 - **AND** 模型项不得被标记为通过
+
+### Requirement: HTTP 错误保留精确状态码并按 402/403/401 分类
+
+模型项证据 SHALL 记录精确的 `httpStatus` 与兼容字段 `httpStatusClass`。HTTP 402 MUST 归类为 `billing_required`；HTTP 403 且响应包含明确的 Cloudflare 1010 证据时 MUST 归类为 `edge_blocked`；HTTP 401 与普通 403 MUST 保留 `auth_failed` 语义。上述错误 MUST NOT 重试，MUST NOT 触发移除 `response_format` 的重试。报告 MAY 记录脱敏的 `providerErrorCode`，MUST NOT 保存密钥、请求头全集或原始响应正文。
+
+#### Scenario: 402 归类为 billing_required
+
+- **WHEN** 模型端点返回 HTTP 402，并提示余额或支付方式问题
+- **THEN** 模型项判定为失败，原因码为 `billing_required`
+- **AND** 报告记录 `httpStatus=402`、`httpStatusClass=4xx` 与脱敏的供应商错误码
+- **AND** 实际 HTTP 调用次数为 1，不重试
+
+#### Scenario: 403 且明确 Cloudflare 1010 归类为 edge_blocked
+
+- **WHEN** 模型端点返回 HTTP 403，响应包含明确的 Cloudflare 1010 证据
+- **THEN** 模型项判定为失败，原因码为 `edge_blocked`
+- **AND** 报告记录 `httpStatus=403` 与 `providerErrorCode=1010`
+- **AND** 实际 HTTP 调用次数为 1，不重试
+
+#### Scenario: 普通 403 保留 auth_failed
+
+- **WHEN** 模型端点返回 HTTP 403，但没有明确的 Cloudflare 1010 证据
+- **THEN** 模型项判定为失败，原因码为 `auth_failed`
+- **AND** 报告记录 `httpStatus=403`
+- **AND** 实际 HTTP 调用次数为 1，不重试
+
+#### Scenario: 401 保留 auth_failed
+
+- **WHEN** 模型端点返回 HTTP 401
+- **THEN** 模型项判定为失败，原因码为 `auth_failed`
+- **AND** 报告记录 `httpStatus=401`
+- **AND** 实际 HTTP 调用次数为 1，不重试

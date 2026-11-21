@@ -106,8 +106,9 @@ make user EMAIL=a@example.com  # 从标准输入读取密码，创建/更新账�
 - 真实模型、图谱与 OASIS 调用只能由开发者显式执行 `make smoke-live` 触发；`make up`、默认 `make verify` 与 CI 不得执行真实联调、不得注入模型/Zep 密钥、不得构建 live 引擎镜像。
 - `make smoke-live` 沿用 `ALLOW_DIRTY=1` 约定：默认在发起外部调用前拒绝脏工作树；显式允许时报告 `dirty=true`，但签收只接受 `dirty=false`、`tested_sha` 与候选一致的 live 报告。
 - 真实调用只使用运行时生成的原创微型夹具；MUST NOT 读取项目材料、`private-inputs/` 或 25 页私有样本，MUST NOT 把其文件名、路径或正文写入请求、日志或报告。
-- 模型使用 Chat Completions 兼容接口；`MODEL_API_BASE_URL` 是根地址（可含 `/v1`），拼接后只出现一次 `/chat/completions`。首次请求使用 `model`、`messages` 与 `response_format={"type":"json_object"}`，字段、类型、UTF-16 偏移、原文引用与运行标识由 EchoSim 校验。
+- 模型使用 Chat Completions 兼容接口；`MODEL_API_BASE_URL` 是根地址（可含 `/v1`），拼接后只出现一次 `/chat/completions`。首次请求使用 `model`、`messages`、`response_format={"type":"json_object"}` 与 `User-Agent: EchoSim/0.1.0`；正常调用、移除参数重试与网络重试 MUST 使用同一 User-Agent，不得回退到 `Python-urllib/*`。字段、类型、UTF-16 偏移、原文引用与运行标识由 EchoSim 校验。
 - 只有上游 400/422 明确指出不支持 `response_format` 时才移除该参数重试一次；所有重试、移除参数重试与 SDK 内置重试共用 30 秒、最多 2 次实际 HTTP 请求预算。HTTP 200 或“能解析 JSON”不构成成功。
+- 模型报告 MUST 保留精确 `httpStatus` 与兼容字段 `httpStatusClass`；402 归类为 `billing_required`，403 且有明确 Cloudflare 1010 证据归类为 `edge_blocked`，401 与普通 403 保留 `auth_failed`。上述错误均只调用一次；报告只记录脱敏 `providerErrorCode`，不得保存密钥、请求头全集或原始响应正文。
 - 图谱使用预先配置的固定验收专用图谱，`ZEP_ACCEPTANCE_GRAPH_ID` MUST 是 `graph_uuid`。每次运行生成不同 `runId` 与唯一 `idempotency_key`；同一次逻辑写入的所有重试 MUST 复用原键、原图谱与原请求体，不得因超时、连接中断或搜索未命中而换键或改写请求体。
 - 图谱写入使用 `graph.episode.add`，保存服务端返回的 episode UUID；检索使用 `graph.search_episodes`，同时核对 UUID、`runId` 与唯一事实。固定图谱允许旧记录共存，本次记录精确命中即可通过；只返回旧记录不得冒充本次结果。
 - 写入响应丢失时，搜索未命中 MUST NOT 作为换键重写的依据；预算内仍无法确认 MUST 判定 `write_unconfirmed`。离线契约必须覆盖“服务端已受理、响应丢失、首次搜索未命中”。

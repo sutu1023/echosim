@@ -2,9 +2,14 @@
 
 from __future__ import annotations
 
+import contextlib
+import http.server
 import json
+import os
+import threading
 import unittest
 from typing import Any
+from unittest.mock import patch
 
 from app.engines.contracts import build_acceptance_material, utf16_len
 from app.engines.model import (
@@ -66,6 +71,55 @@ class SequenceTransport:
         return response
 
 
+class RecordingHandler(http.server.BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+    responses: list[tuple[int, str]] = []
+    requests: list[dict[str, Any]] = []
+
+    def do_POST(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
+        length = int(self.headers.get("Content-Length", "0"))
+        raw = self.rfile.read(length).decode("utf-8")
+        self.__class__.requests.append(
+            {
+                "path": self.path,
+                "headers": {key.lower(): value for key, value in self.headers.items()},
+                "body": json.loads(raw),
+            }
+        )
+        status, body = self.__class__.responses.pop(0)
+        payload = body.encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(payload)))
+        self.end_headers()
+        self.wfile.write(payload)
+
+    def log_message(self, *_: object) -> None:
+        return None
+
+
+@contextlib.contextmanager
+def local_model_server(responses: list[tuple[int, str]]):
+    class Handler(RecordingHandler):
+        pass
+
+    Handler.responses = list(responses)
+    Handler.requests = []
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        with patch.dict(
+            os.environ,
+            {"NO_PROXY": "127.0.0.1,localhost", "no_proxy": "127.0.0.1,localhost"},
+        ):
+            yield Handler, f"http://127.0.0.1:{server.server_port}/v1"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
 class UrlTests(unittest.TestCase):
     def test_base_with_v1_gets_single_endpoint(self) -> None:
         self.assertEqual(
@@ -101,6 +155,52 @@ class ModelRunnerTests(unittest.TestCase):
         self.assertEqual(payload["response_format"], {"type": "json_object"})
         self.assertNotIn("secret-model-key", json.dumps(result.to_dict(), ensure_ascii=False))
 
+    def test_default_transport_sends_user_agent_bearer_path_and_json(self) -> None:
+        with local_model_server([(200, valid_body(self.material))]) as (handler, base_url):
+            result = ModelRunner(
+                settings(
+                    model_api_base_url=base_url,
+                    model_api_key="local-secret",
+                    model_name="demo-model",
+                )
+            ).run(self.material)
+
+        self.assertEqual(result.status, "passed")
+        request = handler.requests[0]
+        self.assertEqual(request["path"], "/v1/chat/completions")
+        self.assertEqual(request["headers"]["user-agent"], "EchoSim/0.1.0")
+        self.assertEqual(request["headers"]["authorization"], "Bearer local-secret")
+        self.assertEqual(request["body"]["model"], "demo-model")
+        self.assertEqual(request["body"]["response_format"], {"type": "json_object"})
+
+    def test_user_agent_is_kept_on_response_format_fallback(self) -> None:
+        with local_model_server(
+            [(400, "response_format is not supported"), (200, valid_body(self.material))]
+        ) as (handler, base_url):
+            result = ModelRunner(settings(model_api_base_url=base_url)).run(self.material)
+
+        self.assertEqual(result.status, "passed")
+        self.assertEqual(len(handler.requests), 2)
+        self.assertTrue(
+            all(request["headers"]["user-agent"] == "EchoSim/0.1.0" for request in handler.requests)
+        )
+        self.assertIn("response_format", handler.requests[0]["body"])
+        self.assertNotIn("response_format", handler.requests[1]["body"])
+
+    def test_user_agent_is_kept_on_retry(self) -> None:
+        with local_model_server(
+            [(429, "slow down"), (200, valid_body(self.material))]
+        ) as (handler, base_url):
+            result = ModelRunner(
+                settings(model_api_base_url=base_url), sleep=lambda _: None
+            ).run(self.material)
+
+        self.assertEqual(result.status, "passed")
+        self.assertEqual(len(handler.requests), 2)
+        self.assertTrue(
+            all(request["headers"]["user-agent"] == "EchoSim/0.1.0" for request in handler.requests)
+        )
+
     def test_200_invalid_json_is_not_success(self) -> None:
         transport = SequenceTransport([HttpResponse(200, "not-json")])
         result = ModelRunner(settings(), transport=transport).run(self.material)
@@ -129,6 +229,41 @@ class ModelRunnerTests(unittest.TestCase):
 
         self.assertEqual(result.status, "failed")
         self.assertEqual(result.reason, "auth_failed")
+        self.assertEqual(result.evidence["httpStatus"], 401)
+        self.assertEqual(result.evidence["httpStatusClass"], "4xx")
+        self.assertEqual(result.calls.real, 1)
+
+    def test_402_is_billing_required_and_not_retried(self) -> None:
+        body = json.dumps(
+            {"error": {"code": "insufficient_quota", "message": "balance and payment method required"}}
+        )
+        transport = SequenceTransport([HttpResponse(402, body)])
+        result = ModelRunner(settings(), transport=transport).run(self.material)
+
+        self.assertEqual(result.status, "failed")
+        self.assertEqual(result.reason, "billing_required")
+        self.assertEqual(result.evidence["httpStatus"], 402)
+        self.assertEqual(result.evidence["providerErrorCode"], "insufficient_quota")
+        self.assertEqual(result.calls.real, 1)
+
+    def test_403_cloudflare_1010_is_edge_blocked_and_not_retried(self) -> None:
+        body = json.dumps({"error": {"code": 1010, "message": "cloudflare edge policy"}})
+        transport = SequenceTransport([HttpResponse(403, body)])
+        result = ModelRunner(settings(), transport=transport).run(self.material)
+
+        self.assertEqual(result.status, "failed")
+        self.assertEqual(result.reason, "edge_blocked")
+        self.assertEqual(result.evidence["httpStatus"], 403)
+        self.assertEqual(result.evidence["providerErrorCode"], "1010")
+        self.assertEqual(result.calls.real, 1)
+
+    def test_ordinary_403_keeps_auth_failed(self) -> None:
+        transport = SequenceTransport([HttpResponse(403, "forbidden")])
+        result = ModelRunner(settings(), transport=transport).run(self.material)
+
+        self.assertEqual(result.status, "failed")
+        self.assertEqual(result.reason, "auth_failed")
+        self.assertEqual(result.evidence["httpStatus"], 403)
         self.assertEqual(result.calls.real, 1)
 
     def test_rate_limit_retries_once(self) -> None:

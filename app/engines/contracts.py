@@ -19,6 +19,8 @@ REASON_CODES = frozenset(
     {
         "missing_config",
         "auth_failed",
+        "billing_required",
+        "edge_blocked",
         "invalid_request",
         "invalid_output",
         "source_mismatch",

@@ -135,6 +135,8 @@ def _model_scenario(
     expected_status: str,
     expected_reason: str | None = None,
     expected_calls: int = 1,
+    expected_http_status: int | None = None,
+    expected_provider_code: str | None = None,
 ) -> Scenario:
     transport = SequenceTransport(responses)
     runner = ModelRunner(
@@ -151,10 +153,15 @@ def _model_scenario(
         and result.calls.double == expected_calls
         and result.calls.real == 0
     )
+    if expected_http_status is not None:
+        ok = ok and result.evidence.get("httpStatus") == expected_http_status
+    if expected_provider_code is not None:
+        ok = ok and result.evidence.get("providerErrorCode") == expected_provider_code
     return Scenario(
         scenario_id,
         PASSED if ok else FAILED,
-        f"status={result.status} reason={result.reason} calls={result.calls.to_dict()}",
+        f"status={result.status} reason={result.reason} http={result.evidence.get('httpStatus')} "
+        f"provider={result.evidence.get('providerErrorCode')} calls={result.calls.to_dict()}",
         result.calls,
     )
 
@@ -542,6 +549,47 @@ def run_offline() -> dict[str, Any]:
             [HttpResponse(401, "unauthorized")],
             expected_status=FAILED,
             expected_reason="auth_failed",
+            expected_http_status=401,
+        )
+    )
+    scenarios.append(
+        _model_scenario(
+            "model-billing-402",
+            material,
+            [HttpResponse(402, json.dumps({
+                "error": {
+                    "code": "insufficient_quota",
+                    "message": "balance and payment method required",
+                }
+            }, ensure_ascii=False))],
+            expected_status=FAILED,
+            expected_reason="billing_required",
+            expected_http_status=402,
+            expected_provider_code="insufficient_quota",
+        )
+    )
+    scenarios.append(
+        _model_scenario(
+            "model-edge-blocked-403-1010",
+            material,
+            [HttpResponse(403, json.dumps({
+                "error": {"code": 1010, "message": "cloudflare edge policy"}
+            }, ensure_ascii=False))],
+            expected_status=FAILED,
+            expected_reason="edge_blocked",
+            expected_http_status=403,
+            expected_provider_code="1010",
+        )
+    )
+    scenarios.append(
+        _model_scenario(
+            "model-auth-403",
+            material,
+            [HttpResponse(403, "forbidden")],
+            expected_status=FAILED,
+            expected_reason="auth_failed",
+            expected_http_status=403,
+            expected_calls=1,
         )
     )
     scenarios.append(
