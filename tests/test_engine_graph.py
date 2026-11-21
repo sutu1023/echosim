@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import types
 import unittest
+import uuid
 from typing import Any
 
 from app.engines.contracts import build_acceptance_material, build_graph_fact
@@ -108,6 +109,9 @@ class GraphRunnerTests(unittest.TestCase):
         self.assertEqual(result.evidence["state"], "searchable")
         self.assertTrue(result.evidence["firstSearchMiss"])
         self.assertEqual(len(set(client.add_keys)), 1)
+        parsed = uuid.UUID(result.evidence["idempotencyKey"])
+        self.assertEqual(parsed.version, 4)
+        self.assertEqual(parsed.variant, uuid.RFC_4122)
 
     def test_response_lost_first_search_miss_reuses_key(self) -> None:
         client = FakeClient(
@@ -125,6 +129,9 @@ class GraphRunnerTests(unittest.TestCase):
         self.assertTrue(result.evidence["firstSearchMiss"])
         self.assertEqual(len(set(client.add_keys)), 1)
         self.assertEqual(len(set(client.add_bodies)), 1)
+        parsed = uuid.UUID(client.add_keys[0])
+        self.assertEqual(parsed.version, 4)
+        self.assertEqual(parsed.variant, uuid.RFC_4122)
 
     def test_write_unconfirmed_does_not_change_key(self) -> None:
         client = FakeClient(
@@ -166,6 +173,23 @@ class GraphRunnerTests(unittest.TestCase):
 
         self.assertEqual(result.status, "passed")
         self.assertEqual(result.evidence["episodeId"], "ep-current")
+
+    def test_independent_runs_use_different_uuid_keys(self) -> None:
+        keys: list[str] = []
+        for _ in range(2):
+            client = FakeClient(
+                add_responses=[{"episode": {"uuid": "ep-1"}}],
+                search_responses=[[], [episode("ep-1", self.material)]],
+            )
+            result = self.run_with(client)
+            self.assertEqual(result.status, "passed")
+            keys.append(result.evidence["idempotencyKey"])
+
+        self.assertNotEqual(keys[0], keys[1])
+        for key in keys:
+            parsed = uuid.UUID(key)
+            self.assertEqual(parsed.version, 4)
+            self.assertEqual(parsed.variant, uuid.RFC_4122)
 
     def test_metadata_marker_only_cannot_pass(self) -> None:
         metadata_only = {

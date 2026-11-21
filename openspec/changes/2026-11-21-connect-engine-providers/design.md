@@ -145,7 +145,7 @@
 河畔社区图书角验收批次 <runId> 的蓝色书箱编号为 ECHOSIM-ACCEPT-<runId>，保管人是林舟。
 ```
 
-写入使用 `graph.episode.add`，每次运行生成唯一的 `idempotency_key`。同一次逻辑写入的所有重试 MUST 复用原键、原 `graph_uuid` 与原请求体；不得因超时、连接中断或搜索未命中而换键或改写请求体。写入成功后保存服务端返回的 episode UUID。
+写入使用 `graph.episode.add`。每次新的逻辑写入在重试循环前生成一次 `str(uuid.uuid4())` 作为 `idempotency_key`；同一次逻辑写入的所有重试 MUST 复用原键、原 `graph_uuid` 与原请求体；不得因超时、连接中断或搜索未命中而换键或改写请求体。两次独立运行生成不同的 UUIDv4 键。写入成功后保存服务端返回的 episode UUID。
 
 状态机：
 

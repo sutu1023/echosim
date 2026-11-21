@@ -26,7 +26,7 @@
 
 ### Requirement: 使用 graph.episode.add 与唯一 idempotency_key 写入
 
-系统 SHALL 使用 `zep-cloud==4.1.0` 的 `graph.episode.add` 向配置的 `graph_uuid` 写入一条 episode。每次运行 MUST 生成唯一的 `idempotency_key`；同一次逻辑写入的所有重试 MUST 复用原键、原图谱与原请求体，MUST NOT 因超时、连接中断或搜索未命中而换键或改写请求体。写入成功后 MUST 保存服务端返回的 episode UUID。
+系统 SHALL 使用 `zep-cloud==4.1.0` 的 `graph.episode.add` 向配置的 `graph_uuid` 写入一条 episode。每次新的逻辑写入 MUST 在重试循环前生成一次 `str(uuid.uuid4())` 作为唯一 `idempotency_key`；同一次逻辑写入的所有重试 MUST 复用原键、原图谱与原请求体，MUST NOT 因超时、连接中断或搜索未命中而换键或改写请求体。写入成功后 MUST 保存服务端返回的 episode UUID。
 
 #### Scenario: 写入成功后保存 episode UUID
 
@@ -35,12 +35,19 @@
 - **AND** 图谱状态从 `submitting` 进入 `accepted`
 - **AND** 本次运行只写入一条验收 episode
 
-#### Scenario: 同一次逻辑写入的重试复用原键与原请求体
+#### Scenario: 幂等键是 UUIDv4 且在重试中保持不变
 
 - **WHEN** 第一次写入超时或返回 5xx，系统在预算内再次尝试同一逻辑写入
-- **THEN** 第二次请求使用与第一次相同的 `idempotency_key`、同一 `graph_uuid` 与同一请求体
+- **THEN** 第一次请求的 `idempotency_key` 是可解析的 UUIDv4
+- **AND** 第二次请求使用与第一次相同的 `idempotency_key`、同一 `graph_uuid` 与同一请求体
 - **AND** 报告记录两次尝试共用同一个幂等键
 - **AND** 不生成第二个幂等键，不写入第二个逻辑事实
+
+#### Scenario: 两次独立运行使用不同幂等键
+
+- **WHEN** 同一个运行标识执行两次独立的逻辑写入
+- **THEN** 两次写入各自在重试循环前生成不同的 UUIDv4 幂等键
+- **AND** 两次写入不会因为键相同而被服务端视为同一次逻辑写入
 
 #### Scenario: 写入返回明确错误状态
 

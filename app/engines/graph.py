@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+import uuid
 from dataclasses import dataclass
 from typing import Any, Callable
 
@@ -163,7 +164,8 @@ class GraphRunner:
                 {"missing": list(self.settings.missing_graph)},
             )
         graph_uuid = self.settings.zep_acceptance_graph_id
-        idempotency_key = f"echosim-accept-{material.run_id}-episode"
+        # 每次新的逻辑写入只生成一次 UUIDv4；响应丢失后的重试复用同一键。
+        idempotency_key = str(uuid.uuid4())
         fact = build_graph_fact(material)
         metadata = {
             "runId": material.run_id,

@@ -7,6 +7,7 @@ import json
 import sys
 import tempfile
 import types
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
@@ -226,6 +227,7 @@ def _graph_scenario(
     expected_status: str,
     expected_reason: str | None = None,
     expect_single_key: bool | None = None,
+    expect_uuid_key: bool = False,
 ) -> Scenario:
     clock = FakeClock()
     client = FakeGraphClient(
@@ -242,9 +244,17 @@ def _graph_scenario(
     )
     result = runner.run(material)
     same_key = len(set(client.add_keys)) <= 1
+    uuid_key_ok = True
+    if expect_uuid_key:
+        try:
+            parsed = uuid.UUID(client.add_keys[0])
+            uuid_key_ok = parsed.version == 4 and parsed.variant == uuid.RFC_4122
+        except (IndexError, ValueError):
+            uuid_key_ok = False
     ok = result.status == expected_status and result.reason == expected_reason
     if expect_single_key is not None:
         ok = ok and same_key == expect_single_key
+    ok = ok and uuid_key_ok
     return Scenario(
         scenario_id,
         PASSED if ok else FAILED,
@@ -567,6 +577,7 @@ def run_offline() -> dict[str, Any]:
             search_responses=[[], [current]],
             expected_status=PASSED,
             expect_single_key=True,
+            expect_uuid_key=True,
         )
     )
     scenarios.append(
@@ -642,6 +653,36 @@ def run_offline() -> dict[str, Any]:
             add_responses=[{"episode": {"uuid": "episode-current"}}],
             search_responses=[[_episode("episode-other", material), current]],
             expected_status=PASSED,
+        )
+    )
+    independent_keys: list[str] = []
+    for _ in range(2):
+        run_clock = FakeClock()
+        run_client = FakeGraphClient(
+            add_responses=[{"episode": {"uuid": "episode-current"}}],
+            search_responses=[[], [current]],
+        )
+        run_result = GraphRunner(
+            _settings(),
+            client_factory=lambda _: run_client,
+            call_kind=DOUBLE,
+            clock=run_clock,
+            sleep=run_clock.sleep,
+        ).run(material)
+        independent_keys.append(str(run_result.evidence.get("idempotencyKey")))
+    try:
+        unique_key_ok = len(set(independent_keys)) == 2 and all(
+            uuid.UUID(key).version == 4 and uuid.UUID(key).variant == uuid.RFC_4122
+            for key in independent_keys
+        )
+    except (ValueError, TypeError):
+        unique_key_ok = False
+    scenarios.append(
+        Scenario(
+            "graph-idempotency-key-unique-runs",
+            PASSED if unique_key_ok else FAILED,
+            f"keys={independent_keys}",
+            CallCounts(double=6),
         )
     )
     missing_graph = GraphRunner(

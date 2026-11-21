@@ -23,6 +23,7 @@ class OfflineContractTests(unittest.TestCase):
             "graph-metadata-marker-only",
             "graph-content-marker-wrong-fact",
             "graph-wrong-uuid-before-exact",
+            "graph-idempotency-key-unique-runs",
             "simulation-platform-b-target-mismatch",
             "smoke-missing-zep-keeps-oasis",
             "smoke-missing-model-keeps-oasis",
