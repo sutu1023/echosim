@@ -32,7 +32,7 @@ reset:
 verify:
 	$(PYTHON) scripts/verify.py $(if $(CHANGE),--change "$(CHANGE)",)
 
-smoke-live: .env
+smoke-live:
 	$(PYTHON) scripts/smoke_live.py
 
 migrate:

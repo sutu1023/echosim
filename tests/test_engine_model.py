@@ -17,7 +17,7 @@ from app.engines.settings import EngineSettings
 
 def settings(**overrides: Any) -> EngineSettings:
     values: dict[str, Any] = {
-        "model_api_base_url": "https://model.example.invalid/v1",
+        "model_api_base_url": "https://model.test.local/v1",
         "model_api_key": "secret-model-key",
         "model_name": "demo-model",
         "model_timeout_seconds": 30.0,
@@ -96,7 +96,7 @@ class ModelRunnerTests(unittest.TestCase):
 
         self.assertEqual(result.status, "passed")
         url, payload = transport.requests[0]
-        self.assertEqual(url, "https://model.example.invalid/v1/chat/completions")
+        self.assertEqual(url, "https://model.test.local/v1/chat/completions")
         self.assertEqual(payload["model"], "demo-model")
         self.assertEqual(payload["response_format"], {"type": "json_object"})
         self.assertNotIn("secret-model-key", json.dumps(result.to_dict(), ensure_ascii=False))

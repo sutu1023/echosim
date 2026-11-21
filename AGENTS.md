@@ -102,6 +102,7 @@ make user EMAIL=a@example.com  # 从标准输入读取密码，创建/更新账�
 
 ## 引擎接入与真实联调
 
+- `.env.example` 的 `replace-with-*`、`*.example.invalid` 与全零 UUID 必须按“未配置”处理；`make smoke-live` 不得自动复制 `.env`，避免占位值触发外部调用。
 - 真实模型、图谱与 OASIS 调用只能由开发者显式执行 `make smoke-live` 触发；`make up`、默认 `make verify` 与 CI 不得执行真实联调、不得注入模型/Zep 密钥、不得构建 live 引擎镜像。
 - `make smoke-live` 沿用 `ALLOW_DIRTY=1` 约定：默认在发起外部调用前拒绝脏工作树；显式允许时报告 `dirty=true`，但签收只接受 `dirty=false`、`tested_sha` 与候选一致的 live 报告。
 - 真实调用只使用运行时生成的原创微型夹具；MUST NOT 读取项目材料、`private-inputs/` 或 25 页私有样本，MUST NOT 把其文件名、路径或正文写入请求、日志或报告。

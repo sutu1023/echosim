@@ -49,6 +49,21 @@ def _text(env: Mapping[str, str], key: str, default: str = "") -> str:
     return str(value).strip()
 
 
+def _is_placeholder(value: str) -> bool:
+    lowered = value.strip().lower()
+    if not lowered:
+        return False
+    return (
+        lowered.startswith("replace-with-")
+        or "example.invalid" in lowered
+        or lowered == "00000000-0000-0000-0000-000000000000"
+    )
+
+
+def _configured(value: str) -> bool:
+    return bool(value) and not _is_placeholder(value)
+
+
 def _number(env: Mapping[str, str], key: str, default: float) -> float:
     raw = _text(env, key)
     if not raw:
@@ -118,20 +133,20 @@ class EngineSettings:
     @property
     def missing_model(self) -> tuple[str, ...]:
         missing: list[str] = []
-        if not self.model_api_base_url:
+        if not _configured(self.model_api_base_url):
             missing.append("MODEL_API_BASE_URL")
-        if not self.model_api_key:
+        if not _configured(self.model_api_key):
             missing.append("MODEL_API_KEY")
-        if not self.model_name:
+        if not _configured(self.model_name):
             missing.append("MODEL_NAME")
         return tuple(missing)
 
     @property
     def missing_graph(self) -> tuple[str, ...]:
         missing: list[str] = []
-        if not self.zep_api_key:
+        if not _configured(self.zep_api_key):
             missing.append("ZEP_API_KEY")
-        if not self.zep_acceptance_graph_id:
+        if not _configured(self.zep_acceptance_graph_id):
             missing.append("ZEP_ACCEPTANCE_GRAPH_ID")
         return tuple(missing)
 

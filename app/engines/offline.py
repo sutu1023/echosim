@@ -56,7 +56,7 @@ class Scenario:
 
 def _settings(**overrides: Any) -> EngineSettings:
     base: dict[str, Any] = {
-        "model_api_base_url": "https://model.example.invalid/v1",
+        "model_api_base_url": "https://model.test.local/v1",
         "model_api_key": "offline-model-key",
         "model_name": "offline-model",
         "model_timeout_seconds": 30.0,
@@ -490,8 +490,8 @@ def run_offline() -> dict[str, Any]:
         Scenario(
             "model-url-v1",
             PASSED
-            if build_chat_completions_url("https://model.example.invalid/v1")
-            == "https://model.example.invalid/v1/chat/completions"
+            if build_chat_completions_url("https://model.test.local/v1")
+            == "https://model.test.local/v1/chat/completions"
             else FAILED,
             "根地址含 /v1 时只拼一次 /chat/completions",
         )

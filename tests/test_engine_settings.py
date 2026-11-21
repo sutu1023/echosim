@@ -39,7 +39,7 @@ class EngineSettingsTests(unittest.TestCase):
     def test_only_graph_missing(self) -> None:
         settings = EngineSettings.from_env(
             {
-                "MODEL_API_BASE_URL": "https://example.invalid/v1",
+                "MODEL_API_BASE_URL": "https://model.test.local/v1",
                 "MODEL_API_KEY": "k",
                 "MODEL_NAME": "m",
             }
@@ -62,10 +62,24 @@ class EngineSettingsTests(unittest.TestCase):
         self.assertEqual(len(settings.missing_model), 3)
         self.assertEqual(len(settings.missing_graph), 2)
 
+    def test_placeholders_are_treated_as_missing(self) -> None:
+        settings = EngineSettings.from_env(
+            {
+                "MODEL_API_BASE_URL": "https://model.example.invalid/v1",
+                "MODEL_API_KEY": "replace-with-model-key",
+                "MODEL_NAME": "replace-with-model-name",
+                "ZEP_API_KEY": "replace-with-zep-key",
+                "ZEP_ACCEPTANCE_GRAPH_ID": "00000000-0000-0000-0000-000000000000",
+            }
+        )
+
+        self.assertEqual(len(settings.missing_model), 3)
+        self.assertEqual(len(settings.missing_graph), 2)
+
     def test_public_dict_excludes_secrets(self) -> None:
         settings = EngineSettings.from_env(
             {
-                "MODEL_API_BASE_URL": "https://example.invalid/v1",
+                "MODEL_API_BASE_URL": "https://model.test.local/v1",
                 "MODEL_API_KEY": "super-secret",
                 "MODEL_NAME": "model",
                 "ZEP_API_KEY": "zep-secret",

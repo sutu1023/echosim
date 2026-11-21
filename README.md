@@ -279,7 +279,7 @@ worker 复用同一镜像但没有 HTTP 端口，因此 Compose 用“心跳文�
 make smoke-live
 ```
 
-`make smoke-live` 默认在工作树存在未提交改动时拒绝执行；本地调试可显式使用 `ALLOW_DIRTY=1 make smoke-live`，报告会记录 `dirty=true`，但不能作为签收证据。
+`make smoke-live` 默认在工作树存在未提交改动时拒绝执行；本地调试可显式使用 `ALLOW_DIRTY=1 make smoke-live`，报告会记录 `dirty=true`，但不能作为签收证据。该命令不会自动创建或复制 `.env`；`.env.example` 中的 `replace-with-*`、`*.example.invalid` 与全零 UUID 会按“未配置”处理，不会触发外部调用。
 
 真实联调使用隔离的 `engine` 镜像与 `live` Compose profile；`make up`、默认 `make verify` 和 CI 都不会构建或启动它。引擎镜像只包含 `app/engines/`、显式配置与 `runtime/smoke-live` 报告目录，不挂载整仓、`.env`、私有材料或历史报告。
 
@@ -289,6 +289,8 @@ make smoke-live
 
 - `MODEL_API_BASE_URL`、`MODEL_NAME`、`MODEL_API_KEY`：Chat Completions 兼容接口。根地址可包含 `/v1`，拼接后只出现一次 `/chat/completions`。
 - `ZEP_API_KEY`、`ZEP_ACCEPTANCE_GRAPH_ID`：固定验收专用图谱，后者必须是 `graph_uuid`。
+
+明显占位值（`replace-with-*`、`*.example.invalid`、全零 UUID）会被视为未配置，避免误触发外部调用。
 
 模型首次请求使用 `model`、`messages` 与 `response_format={"type":"json_object"}`，字段、类型、UTF-16 偏移、原文引用与运行标识由 EchoSim 校验。只有上游 400/422 明确指出不支持 `response_format` 时才移除参数重试一次；所有重试与 SDK 内置重试共用 30 秒、最多 2 次实际 HTTP 请求的预算。
 
