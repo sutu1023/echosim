@@ -6,6 +6,7 @@ import { messagesFor } from '../i18n'
 import {
   failureKey,
   formatBytes,
+  formatPageLimit,
   isProcessing,
   kindLabelKey,
   paragraphLabel,
@@ -28,6 +29,7 @@ const router = useRouter()
 const t = computed(() => messagesFor(props.lang).materials)
 
 const documents = ref<MaterialDocument[]>([])
+const limits = ref({ maxBytes: 20 * 1024 * 1024, maxPages: 2000 })
 const listState = ref<'loading' | 'ready' | 'error'>('loading')
 const listError = ref('')
 const selected = ref<MaterialDocument | null>(null)
@@ -84,8 +86,14 @@ async function loadList(showLoading = true): Promise<void> {
   }
   listError.value = ''
   try {
-    const data = await api.get<{ documents: MaterialDocument[] }>(basePath())
+    const data = await api.get<{
+      documents: MaterialDocument[]
+      limits?: { maxBytes: number; maxPages: number }
+    }>(basePath())
     documents.value = data.documents
+    if (data.limits) {
+      limits.value = data.limits
+    }
     listState.value = 'ready'
     refreshError.value = ''
   } catch (caught) {
@@ -301,9 +309,22 @@ function statusLabel(document: MaterialDocument): string {
 
 function failureText(document: MaterialDocument): string {
   const code = document.failure?.code ?? 'parse_error'
+  if (code === 'too_many_pages') {
+    return formatPageLimit(
+      t.value.failure.tooManyPagesDetail,
+      document.pageCount,
+      limits.value.maxPages,
+    )
+  }
   const key = failureKey(code) as keyof typeof t.value.failure
   return t.value.failure[key] ?? document.failure?.message ?? ''
 }
+
+const limitHint = computed(() =>
+  t.value.limitHint
+    .replace('{size}', formatBytes(limits.value.maxBytes))
+    .replace('{pages}', String(limits.value.maxPages)),
+)
 
 function hasMore(): boolean {
   if (!selected.value) {
@@ -395,7 +416,7 @@ watch(
       </button>
       <span class="fine-print">{{ t.uploadHint }}</span>
     </div>
-    <p class="fine-print">{{ t.limitHint }}</p>
+    <p class="fine-print">{{ limitHint }}</p>
     <p v-if="uploadError" class="error" role="alert">{{ uploadError }}</p>
     <p v-if="notice" class="notice" role="status">{{ notice }}</p>
     <p v-if="refreshError" class="error" role="status">{{ refreshError }}</p>

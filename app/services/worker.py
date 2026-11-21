@@ -594,7 +594,12 @@ async def _commit_ingest_step(
 
 
 async def _commit_ingest_failure(
-    db: AsyncSession, claim: Claim, *, code: str, message: str
+    db: AsyncSession,
+    claim: Claim,
+    *,
+    code: str,
+    message: str,
+    page_count: int | None = None,
 ) -> str:
     """失败、终态事件与材料失败同事务写入。"""
     try:
@@ -627,11 +632,16 @@ async def _commit_ingest_failure(
         await db.execute(
             text(
                 "UPDATE documents SET status = 'failed', failure_code = :code, "
-                "failure_message = :message, chunk_count = 0, page_count = NULL, "
-                "ready_at = NULL, updated_at = now() "
+                "failure_message = :message, chunk_count = 0, "
+                "page_count = :page_count, ready_at = NULL, updated_at = now() "
                 "WHERE id = :document_id AND status IN ('queued', 'parsing')"
             ),
-            {"document_id": claim.document_id, "code": code, "message": message},
+            {
+                "document_id": claim.document_id,
+                "code": code,
+                "message": message,
+                "page_count": page_count,
+            },
         )
         await _finish(db, claim, next_step, status="failed", reason=code)
         await db.commit()
@@ -703,9 +713,18 @@ async def execute_ingest(
             )
         except Exception as exc:  # noqa: BLE001 - 解析失败是业务终态
             code, message = ingest_failure(exc)
+            page_count = (
+                exc.pages
+                if isinstance(exc, document_extract.TooManyPages)
+                else None
+            )
             async with session_factory() as db:
                 return await _commit_ingest_failure(
-                    db, claim, code=code, message=message
+                    db,
+                    claim,
+                    code=code,
+                    message=message,
+                    page_count=page_count,
                 )
 
         if stop_event is not None and stop_event.is_set():

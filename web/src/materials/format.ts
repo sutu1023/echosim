@@ -118,3 +118,14 @@ export function paragraphLabel(chunk: MaterialChunk): string | null {
   }
   return `${chunk.paragraphStart}–${chunk.paragraphEnd}`
 }
+
+/** 用模板填充“实际页数 + 配置上限”，两种语言共用。 */
+export function formatPageLimit(
+  template: string,
+  pages: number | null,
+  limit: number,
+): string {
+  return template
+    .replace('{pages}', pages === null ? '?' : String(pages))
+    .replace('{limit}', String(limit))
+}

@@ -52,6 +52,19 @@ test('状态与失败码映射到稳定的文案键', async () => {
   assert.equal(formatBytes(20971520), '20.0 MiB')
 })
 
+test('页数超限文案带上实际页数与配置上限', async () => {
+  const { formatPageLimit } = await loadTypeScriptModule('format.ts')
+
+  assert.equal(
+    formatPageLimit('该 PDF 共 {pages} 页，超过当前上限 {limit} 页。', 4, 3),
+    '该 PDF 共 4 页，超过当前上限 3 页。',
+  )
+  assert.equal(
+    formatPageLimit('This PDF has {pages} pages, above limit {limit}.', null, 3),
+    'This PDF has ? pages, above limit 3.',
+  )
+})
+
 test('段落标签覆盖单段与区间', async () => {
   const { paragraphLabel } = await loadTypeScriptModule('format.ts')
   const base = {

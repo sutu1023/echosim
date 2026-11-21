@@ -43,8 +43,9 @@ export function describeError(error: unknown): string {
   return '网络请求失败，请检查连接后重试。'
 }
 
-function isJsonBody(body: unknown): boolean {
-  return body !== undefined
+function hasJsonBody(body: BodyInit | null | undefined): boolean {
+  // 只有字符串请求体才由我们设置 JSON 头；FormData 必须让浏览器生成 multipart 边界。
+  return typeof body === 'string'
 }
 
 async function failFrom(response: Response): Promise<never> {
@@ -62,7 +63,7 @@ async function failFrom(response: Response): Promise<never> {
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   const headers = new Headers(init.headers)
   headers.set('Accept', 'application/json')
-  if (isJsonBody(init.body)) {
+  if (hasJsonBody(init.body)) {
     headers.set('Content-Type', 'application/json')
   }
 

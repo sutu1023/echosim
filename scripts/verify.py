@@ -2169,6 +2169,20 @@ def scenario_document_page_limit(
         failure = over.get("failure") or {}
         require(failure.get("code") == "too_many_pages", f"失败原因不符：{failure}")
         require("3" in str(failure.get("message")), "失败说明应包含当前上限 3")
+        require(
+            int(over.get("pageCount") or 0) == 4,
+            f"失败材料应保留实际页数 4，实际 {over.get('pageCount')}",
+        )
+        status_limits, _, limits_body = api_call(
+            "GET", document_path(project_id), token
+        )
+        require(status_limits == 200, f"材料列表期望 200，实际 {status_limits}")
+        assert isinstance(limits_body, dict)
+        limits = limits_body.get("limits") or {}
+        require(
+            int(limits.get("maxPages") or 0) == 3,
+            f"材料列表应返回配置上限 3，实际 {limits}",
+        )
         record_document_evidence(
             report,
             "document-page-limit",
@@ -2176,6 +2190,8 @@ def scenario_document_page_limit(
             over_document_id=over["documentId"],
             failure_code=failure.get("code"),
             failure_message=failure.get("message"),
+            page_count=over.get("pageCount"),
+            configured_max_pages=limits.get("maxPages"),
         )
         entry["detail"] = "以 DOCUMENT_MAX_PAGES=3 验证：3 页就绪、4 页 too_many_pages 且说明含 3"
     finally:

@@ -130,6 +130,7 @@ export interface WorkbenchMessages {
       noTextLayer: string
       originalMissing: string
       tooManyPages: string
+      tooManyPagesDetail: string
       parseError: string
       canceled: string
     }
@@ -260,7 +261,7 @@ const messages: Record<Lang, WorkbenchMessages> = {
       emptyTitle: '还没有材料',
       emptyBody: '上传第一份材料后，证据图谱才能开始构建。',
       limitHint:
-        '支持 PDF、Markdown、TXT，单文件不超过 20 MiB；PDF 页数上限按服务配置（默认 2000 页）。',
+        '支持 PDF、Markdown、TXT，单文件不超过 {size}；PDF 页数上限 {pages} 页。',
       listTitle: '材料列表',
       loading: '正在读取材料…',
       loadFailed: '材料列表读取失败。',
@@ -301,6 +302,7 @@ const messages: Record<Lang, WorkbenchMessages> = {
         noTextLayer: '该 PDF 没有文字层，请上传文本型 PDF。',
         originalMissing: '原件不可读取，请重新上传。',
         tooManyPages: '该 PDF 页数超过当前上限。',
+        tooManyPagesDetail: '该 PDF 共 {pages} 页，超过当前上限 {limit} 页。',
         parseError: '解析失败，请重试或更换文件。',
         canceled: '入库已取消。',
       },
@@ -438,7 +440,7 @@ const messages: Record<Lang, WorkbenchMessages> = {
       emptyTitle: 'No materials yet',
       emptyBody: 'Upload the first material before the evidence graph can be built.',
       limitHint:
-        'PDF, Markdown and TXT are supported, up to 20 MiB per file; the PDF page limit follows the service configuration (2000 by default).',
+        'PDF, Markdown and TXT are supported, up to {size} per file; the PDF page limit is {pages} pages.',
       listTitle: 'Materials',
       loading: 'Loading materials…',
       loadFailed: 'Could not load the material list.',
@@ -479,6 +481,7 @@ const messages: Record<Lang, WorkbenchMessages> = {
         noTextLayer: 'This PDF has no text layer. Upload a text-based PDF.',
         originalMissing: 'The original file is unreadable. Upload it again.',
         tooManyPages: 'This PDF exceeds the current page limit.',
+        tooManyPagesDetail: 'This PDF has {pages} pages, above the current limit of {limit} pages.',
         parseError: 'Parsing failed. Retry or choose another file.',
         canceled: 'Intake was canceled.',
       },

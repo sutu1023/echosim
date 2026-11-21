@@ -238,7 +238,7 @@ worker 复用同一镜像但没有 HTTP 端口，因此 Compose 用“心跳文�
 | 方法 | 路径 | 说明 | 成功 | 失败 |
 | --- | --- | --- | --- | --- |
 | POST | `/api/projects/{projectId}/documents` | multipart 字段 `file`；PDF、Markdown 或 TXT，单文件 ≤ 20 MiB | 新建 `201`；同项目同内容 `200` + `deduplicated:true`，返回同一 `documentId` | `400` 空文件 / `401` / `404` / `413` 超限 / `415` 类型 / `503` |
-| GET | `/api/projects/{projectId}/documents` | 项目材料列表 | `200 {"documents":[…]}` | `401` / `404` / `503` |
+| GET | `/api/projects/{projectId}/documents` | 项目材料列表，附带当前 `limits.maxBytes` 与 `limits.maxPages` | `200 {"documents":[…],"limits":{…}}` | `401` / `404` / `503` |
 | GET | `/api/projects/{projectId}/documents/{documentId}` | 材料详情：状态、页数、分块数、失败原因、`jobId`/`runId` | `200` | `404` 材料不存在 |
 | GET | `/api/projects/{projectId}/documents/{documentId}/chunks?after=<序号>&limit=<≤50>` | 摘录分页（按分块序号升序） | `200 {chunks,total,ready}` | `401` / `404` / `422` / `503` |
 | GET | `/api/projects/{projectId}/documents/{documentId}/source` | 文本原文视图（UTF-8、未清洗，用于段落定位） | `200 text/plain` | `409` PDF 材料 / `404` |

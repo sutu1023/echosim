@@ -148,7 +148,13 @@ async def list_documents(
         db, actor_id=user.id, project_id=project_id
     )
     items = await document_service.list_documents(db, project_id=project.id)
-    return {"documents": [document_service.document_body(item) for item in items]}
+    return {
+        "documents": [document_service.document_body(item) for item in items],
+        "limits": {
+            "maxBytes": settings.document_max_bytes,
+            "maxPages": settings.document_max_pages,
+        },
+    }
 
 
 @router.get("/{document_id}")
