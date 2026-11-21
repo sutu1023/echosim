@@ -2116,7 +2116,12 @@ def scenario_document_boundaries(
     )
 
     no_text = upload_and_wait(
-        state, fixtures, "no-text.pdf", fixtures.no_text_pdf, "application/pdf"
+        state,
+        fixtures,
+        "no-text.pdf",
+        fixtures.no_text_pdf,
+        "application/pdf",
+        expect_ready=False,
     )
     require(no_text["status"] == "failed", "无文字层 PDF 应失败")
     failure = no_text.get("failure") or {}
