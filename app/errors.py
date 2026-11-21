@@ -31,6 +31,14 @@ class JobNotFound(Exception):
     """任务不存在或不属于已解析项目，对外统一 404。"""
 
 
+class DocumentNotFound(Exception):
+    """材料不存在、属于其他项目或 ID 非法，对外统一 404。"""
+
+
+class DocumentNotText(Exception):
+    """对 PDF 材料请求原文视图，对外统一 409。"""
+
+
 class InvalidCursor(Exception):
     """事件流游标非法，对外统一 400。"""
 

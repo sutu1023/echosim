@@ -15,7 +15,10 @@ import concurrent.futures
 import http.cookiejar
 import json
 import os
+import hashlib
+import re
 import secrets
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -657,7 +660,8 @@ def scenario_relogin_keeps_project(
 
 
 CHANGE_ID = "2026-11-21-track-background-jobs"
-KNOWN_CHANGES = {CHANGE_ID}
+DOCUMENT_CHANGE_ID = "2026-11-21-ingest-seed-documents"
+KNOWN_CHANGES = {CHANGE_ID, DOCUMENT_CHANGE_ID}
 VERIFY_STEP_DELAY_MS = "800"
 JOB_TIMEOUT_SECONDS = 90.0
 JOB_EVENT_TIMEOUT_SECONDS = 60.0
@@ -1540,8 +1544,876 @@ def scenario_job_cancel_race(
     )
 
 
+
+# ---------------------------------------------------------------- 材料验收
+
+DOCUMENT_TIMEOUT_SECONDS = 90
+DOCUMENT_PAGE = "/api/projects/{project_id}/documents"
+
+
+def record_document_evidence(
+    report: dict[str, Any], scenario_id: str, **fields: object
+) -> None:
+    report["document_evidence"].append({"scenario": scenario_id, **fields})
+
+
+def build_pdf_bytes(pages: list[list[str]]) -> bytes:
+    """与 tests/pdf_fixtures.py 相同的最小 PDF，保持验收脚本零第三方依赖。"""
+    page_count = len(pages)
+    font_number = 3 + page_count * 2
+    objects: dict[int, bytes] = {}
+    kids = " ".join(f"{3 + index * 2} 0 R" for index in range(page_count))
+    objects[1] = b"<< /Type /Catalog /Pages 2 0 R >>"
+    objects[2] = (
+        f"<< /Type /Pages /Kids [{kids}] /Count {page_count} >>".encode("utf-8")
+    )
+    for index, lines in enumerate(pages):
+        page_number = 3 + index * 2
+        content_number = page_number + 1
+        objects[page_number] = (
+            f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] "
+            f"/Resources << /Font << /F1 {font_number} 0 R >> >> "
+            f"/Contents {content_number} 0 R >>"
+        ).encode("utf-8")
+        stream = _pdf_content(lines)
+        objects[content_number] = (
+            f"<< /Length {len(stream)} >>\nstream\n".encode("utf-8")
+            + stream
+            + b"\nendstream"
+        )
+    objects[font_number] = b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>"
+
+    output = bytearray(b"%PDF-1.4\n")
+    offsets: dict[int, int] = {}
+    for number in sorted(objects):
+        offsets[number] = len(output)
+        output += f"{number} 0 obj\n".encode("utf-8")
+        output += objects[number]
+        output += b"\nendobj\n"
+    xref_offset = len(output)
+    output += f"xref\n0 {len(objects) + 1}\n".encode("utf-8")
+    output += b"0000000000 65535 f \n"
+    for number in sorted(objects):
+        output += f"{offsets[number]:010d} 00000 n \n".encode("utf-8")
+    output += (
+        f"trailer\n<< /Size {len(objects) + 1} /Root 1 0 R >>\n"
+        f"startxref\n{xref_offset}\n%%EOF\n"
+    ).encode("utf-8")
+    return bytes(output)
+
+
+def _pdf_content(lines: list[str]) -> bytes:
+    if not lines:
+        return b""
+    escaped = [line.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)") for line in lines]
+    parts = ["BT", "/F1 12 Tf", "72 780 Td"]
+    for index, line in enumerate(escaped):
+        if index:
+            parts.append("0 -18 Td")
+        parts.append(f"({line}) Tj")
+    parts.append("ET")
+    return "\n".join(parts).encode("utf-8")
+
+
+def pdf_page_contains(data: bytes, page_index: int, marker: bytes) -> bool:
+    """按 /Kids 顺序取指定页对象，检查其内容流包含标记。"""
+    kids = re.search(rb"/Kids\s*\[(.*?)\]", data, re.S)
+    if kids is None:
+        return False
+    refs = re.findall(rb"(\d+)\s+0\s+R", kids.group(1))
+    if len(refs) <= page_index:
+        return False
+    page_ref = refs[page_index]
+    page_obj = re.search(
+        rb"(?m)^" + page_ref + rb"\s+0\s+obj(.*?)endobj", data, re.S
+    )
+    if page_obj is None:
+        return False
+    contents = re.search(rb"/Contents\s+(\d+)\s+0\s+R", page_obj.group(1))
+    if contents is None:
+        return False
+    stream = re.search(
+        rb"(?m)^" + contents.group(1) + rb"\s+0\s+obj(.*?)endobj", data, re.S
+    )
+    return bool(stream and marker in stream.group(1))
+
+
+def padded_text(size: int) -> bytes:
+    """少量正文 + 可折叠空白，精确补齐到 size 字节。"""
+    output = bytearray("验收材料：以下为少量正文与可折叠空白。\n".encode("utf-8"))
+    filler = ("填补行" + " " * 4000 + "\n").encode("utf-8")
+    while len(output) + len(filler) <= size:
+        output += filler
+    output += b" " * (size - len(output))
+    return bytes(output)
+
+
+class DocumentFixtures:
+    """本次执行生成的全部材料夹具；结束时整体删除。"""
+
+    def __init__(self) -> None:
+        self.suffix = secrets.token_hex(4).upper()
+        self.small_text = "验收材料第一段。\n\n验收材料第二段。".encode("utf-8")
+        self.three_page = build_pdf_bytes(
+            [
+                [f"PAGE-ONE-ECHOSIM-MARKER-{self.suffix}"],
+                [],
+                [f"PAGE-THREE-ECHOSIM-MARKER-{self.suffix}"],
+            ]
+        )
+        self.three_page_marker = f"PAGE-THREE-ECHOSIM-MARKER-{self.suffix}"
+        self.slow_pdf = build_pdf_bytes(
+            [
+                [f"SLOW-PAGE-ONE-{self.suffix}"],
+                [],
+                [f"SLOW-PAGE-THREE-{self.suffix}"],
+            ]
+        )
+        self.header_footer = build_pdf_bytes(
+            [
+                [f"REPEATED-HEADER-{self.suffix}", f"BODY-ONE-{self.suffix}", "file:///tmp/print-one.pdf"],
+                [f"REPEATED-HEADER-{self.suffix}", f"BODY-TWO-{self.suffix}", "file:///tmp/print-two.pdf"],
+                [f"REPEATED-HEADER-{self.suffix}", f"BODY-THREE-{self.suffix}", "file:///tmp/print-three.pdf"],
+            ]
+        )
+        self.no_text_pdf = build_pdf_bytes([[]])
+        self.page_limit_exact = build_pdf_bytes(
+            [[f"LIMIT-A-{self.suffix}"], [f"LIMIT-B-{self.suffix}"], [f"LIMIT-C-{self.suffix}"]]
+        )
+        self.page_limit_over = build_pdf_bytes(
+            [
+                [f"LIMIT-A-{self.suffix}"],
+                [f"LIMIT-B-{self.suffix}"],
+                [f"LIMIT-C-{self.suffix}"],
+                [f"LIMIT-D-{self.suffix}"],
+            ]
+        )
+        self.emoji_text = (
+            "开头 emoji 😀😀 段落。\r\n\r\n"
+            "第二段包含合法路径 C:\\data\\report.csv 与 file:///tmp/a.txt。\r\n\r\n"
+            "第三段结尾。"
+        ).encode("utf-8")
+        self.gb18030_text = "中文材料第一段。\n\n中文材料第二段。".encode("gb18030")
+        self.limit_text = 20 * 1024 * 1024
+        self.exact_limit = padded_text(self.limit_text)
+        self.over_limit = self.exact_limit + b" "
+
+
+def document_path(project_id: str, document_id: str | None = None) -> str:
+    base = DOCUMENT_PAGE.format(project_id=project_id)
+    return base if document_id is None else f"{base}/{document_id}"
+
+
+def upload_document(
+    token: str,
+    project_id: str,
+    filename: str,
+    data: bytes,
+    content_type: str,
+) -> tuple[int, dict[str, str], object | None]:
+    boundary = "----echosim" + secrets.token_hex(8)
+    body = b"".join(
+        [
+            f"--{boundary}\r\n".encode("ascii"),
+            (
+                'Content-Disposition: form-data; name="file"; '
+                f'filename="{filename}"\r\n'
+            ).encode("ascii"),
+            f"Content-Type: {content_type}\r\n\r\n".encode("ascii"),
+            data,
+            b"\r\n",
+            f"--{boundary}--\r\n".encode("ascii"),
+        ]
+    )
+    request = urllib.request.Request(
+        BASE_URL + document_path(project_id), data=body, method="POST"
+    )
+    request.add_header("Content-Type", f"multipart/form-data; boundary={boundary}")
+    request.add_header("Cookie", f"{SESSION_COOKIE}={token}")
+    request.add_header("Origin", BASE_URL)
+    request.add_header("Accept", "application/json")
+    try:
+        with urllib.request.urlopen(request, timeout=60) as response:
+            status = response.status
+            headers = {key.lower(): value for key, value in response.headers.items()}
+            raw = response.read()
+    except urllib.error.HTTPError as exc:
+        status = exc.code
+        headers = {key.lower(): value for key, value in exc.headers.items()}
+        raw = exc.read()
+    try:
+        payload = json.loads(raw) if raw else None
+    except json.JSONDecodeError:
+        payload = None
+    return status, headers, payload
+
+
+def fetch_document(
+    token: str, project_id: str, document_id: str
+) -> dict[str, object]:
+    status, _, body = api_call(
+        "GET", document_path(project_id, document_id), token
+    )
+    require(status == 200, f"材料详情期望 200，实际 {status}：{body}")
+    require(isinstance(body, dict) and "document" in body, f"材料详情缺少 document：{body}")
+    return body["document"]  # type: ignore[index]
+
+
+def list_documents(token: str, project_id: str) -> list[dict[str, object]]:
+    status, _, body = api_call("GET", document_path(project_id), token)
+    require(status == 200, f"材料列表期望 200，实际 {status}：{body}")
+    require(isinstance(body, dict) and isinstance(body.get("documents"), list), f"材料列表格式异常：{body}")
+    return body["documents"]  # type: ignore[return-value]
+
+
+def fetch_chunks(
+    token: str,
+    project_id: str,
+    document_id: str,
+    *,
+    after: int = 0,
+    limit: int = 50,
+) -> dict[str, object]:
+    status, _, body = api_call(
+        "GET",
+        f"{document_path(project_id, document_id)}/chunks?after={after}&limit={limit}",
+        token,
+    )
+    require(status == 200, f"材料分块期望 200，实际 {status}：{body}")
+    require(isinstance(body, dict), f"材料分块不是对象：{body}")
+    return body
+
+
+def fetch_document_bytes(
+    token: str, path: str
+) -> tuple[int, dict[str, str], bytes]:
+    request = urllib.request.Request(BASE_URL + path)
+    request.add_header("Cookie", f"{SESSION_COOKIE}={token}")
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            return response.status, {
+                key.lower(): value for key, value in response.headers.items()
+            }, response.read()
+    except urllib.error.HTTPError as exc:
+        return exc.code, {
+            key.lower(): value for key, value in exc.headers.items()
+        }, exc.read()
+
+
+def wait_document(
+    token: str,
+    project_id: str,
+    document_id: str,
+    predicate: Callable[[dict[str, object]], bool],
+    *,
+    timeout: float = DOCUMENT_TIMEOUT_SECONDS,
+) -> dict[str, object]:
+    def probe() -> dict[str, object] | None:
+        try:
+            document = fetch_document(token, project_id, document_id)
+        except AssertionError:
+            return None
+        return document if predicate(document) else None
+
+    result = wait_for(probe, timeout=timeout, interval=0.3)
+    require(result is not None, f"材料 {document_id} 未在 {timeout}s 内满足条件")
+    return result  # type: ignore[return-value]
+
+
+def upload_and_wait(
+    state: dict[str, Any],
+    fixtures: DocumentFixtures,
+    filename: str,
+    data: bytes,
+    content_type: str,
+    *,
+    expect_ready: bool = True,
+) -> dict[str, object]:
+    token, project_id = state["token_a"], state["project_id"]
+    status, _, body = upload_document(token, project_id, filename, data, content_type)
+    require(status in (200, 201), f"上传 {filename} 期望 200/201，实际 {status}：{body}")
+    assert isinstance(body, dict)
+    document = body["document"]  # type: ignore[index]
+    document_id = str(document["documentId"])
+    final = wait_document(
+        token,
+        project_id,
+        document_id,
+        lambda item: item["status"] in (("ready",) if expect_ready else ("ready", "failed")),
+    )
+    return final
+
+
+def recreate_worker(overrides: dict[str, str]) -> None:
+    """用指定环境重建 worker（不影响 app），并等待健康。"""
+    saved = {key: os.environ.get(key) for key in overrides}
+    os.environ.update(overrides)
+    try:
+        result = compose("up", "-d", "--no-deps", "worker")
+    finally:
+        for key, value in saved.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+    require(result.returncode == 0, f"重建 worker 失败：{result.stderr.strip()[-400:]}")
+
+    def healthy() -> bool:
+        check = compose("ps", "--format", "{{.Health}}", "worker")
+        return check.returncode == 0 and check.stdout.strip() == "healthy"
+
+    require(wait_for(healthy, timeout=60, interval=1.0), "worker 未在 60s 内恢复健康")
+
+
+def restore_worker_defaults() -> None:
+    """尽力把 worker 恢复为默认配置，避免失败运行留下测试参数。"""
+    try:
+        compose("up", "-d", "--no-deps", "worker")
+        compose("start", "worker")
+    except Exception:  # noqa: BLE001 - 收尾不掩盖主流程
+        pass
+
+
+def scenario_documents_smoke(
+    entry: dict[str, Any],
+    state: dict[str, Any],
+    report: dict[str, Any],
+    fixtures: DocumentFixtures,
+) -> None:
+    """默认流程的轻量材料回归：上传小 TXT 到 ready，列表与分块可见，匿名 401。"""
+    token, project_id = state["token_a"], state["project_id"]
+    before = len(list_documents(token, project_id))
+    document = upload_and_wait(
+        state, fixtures, "smoke.txt", fixtures.small_text, "text/plain"
+    )
+    require(document["status"] == "ready", f"材料未就绪：{document['status']}")
+    require(int(document["chunkCount"]) >= 1, "就绪材料应至少有一个分块")
+
+    after = list_documents(token, project_id)
+    require(len(after) == before + 1, "上传后材料列表数量应加一")
+    chunks = fetch_chunks(token, project_id, str(document["documentId"]))
+    require(len(chunks["chunks"]) >= 1, "分块读取应至少返回一项")  # type: ignore[arg-type]
+
+    anonymous_status, _, anonymous_body = raw_request(
+        "GET", document_path(project_id)
+    )
+    require(anonymous_status == 401, f"匿名材料列表期望 401，实际 {anonymous_status}")
+    require(
+        json.loads(anonymous_body) == {"detail": "未登录"},
+        "匿名材料列表响应体不符合契约",
+    )
+    record_document_evidence(
+        report,
+        "documents-smoke",
+        document_id=document["documentId"],
+        job_id=document.get("jobId"),
+        run_id=document.get("runId"),
+        chunk_count=document["chunkCount"],
+        anonymous_status=anonymous_status,
+    )
+    entry["detail"] = (
+        f"小 TXT 上传后到达 ready，列表可见且 {document['chunkCount']} 个分块；匿名列表 401"
+    )
+
+
+def scenario_document_pdf_pages(
+    entry: dict[str, Any],
+    state: dict[str, Any],
+    report: dict[str, Any],
+    fixtures: DocumentFixtures,
+) -> None:
+    token, project_id = state["token_a"], state["project_id"]
+    document = upload_and_wait(
+        state, fixtures, "three-pages.pdf", fixtures.three_page, "application/pdf"
+    )
+    require(int(document["pageCount"] or 0) == 3, f"总页数应为 3，实际 {document['pageCount']}")
+    chunks = fetch_chunks(token, project_id, str(document["documentId"]))["chunks"]
+    assert isinstance(chunks, list)
+    pages = [chunk["pageNo"] for chunk in chunks]
+    require(pages == [1, 3], f"分块页码应为 [1, 3]，实际 {pages}")
+    third = next(chunk for chunk in chunks if chunk["pageNo"] == 3)
+    require(
+        third["text"] == fixtures.three_page_marker,
+        f"第 3 页文本不符：{third['text']!r}",
+    )
+    require(
+        str(third["sourceUrl"]).endswith("#page=3"),
+        f"来源链接未指向第 3 页：{third['sourceUrl']}",
+    )
+
+    status, headers, payload = fetch_document_bytes(
+        token, str(third["sourceUrl"]).split("#", 1)[0]
+    )
+    require(status == 200, f"原件期望 200，实际 {status}")
+    require(headers.get("content-type") == "application/pdf", "原件类型不是 PDF")
+    digest = hashlib.sha256(payload).hexdigest()
+    require(digest == hashlib.sha256(fixtures.three_page).hexdigest(), "原件字节与上传不一致")
+    require(
+        pdf_page_contains(payload, 2, fixtures.three_page_marker.encode("ascii")),
+        "按 /Kids 顺序第 3 个页对象不含第 3 页标记",
+    )
+    second_page = fetch_chunks(
+        token, project_id, str(document["documentId"]), after=0, limit=50
+    )["chunks"]
+    require(
+        all(chunk["pageNo"] != 2 for chunk in second_page),  # type: ignore[index]
+        "空白页不应产生分块",
+    )
+    record_document_evidence(
+        report,
+        "document-pdf-pages",
+        document_id=document["documentId"],
+        job_id=document.get("jobId"),
+        run_id=document.get("runId"),
+        page_count=document["pageCount"],
+        chunk_count=document["chunkCount"],
+        page3_chunk_page_no=third["pageNo"],
+        page3_source_url=third["sourceUrl"],
+        original_sha256=digest,
+    )
+    entry["detail"] = (
+        "三页 PDF：pageCount=3、第 2 页 0 块、第 3 页 pageNo=3 且来源 #page=3、原件哈希一致"
+    )
+    state["three_page_document_id"] = str(document["documentId"])
+    state["three_page_sha256"] = digest
+
+
+def scenario_document_pdf_cleaning(
+    entry: dict[str, Any],
+    state: dict[str, Any],
+    report: dict[str, Any],
+    fixtures: DocumentFixtures,
+) -> None:
+    token, project_id = state["token_a"], state["project_id"]
+    document = upload_and_wait(
+        state, fixtures, "cleaning.pdf", fixtures.header_footer, "application/pdf"
+    )
+    chunks = fetch_chunks(token, project_id, str(document["documentId"]))["chunks"]
+    assert isinstance(chunks, list)
+    joined = "\n".join(str(chunk["text"]) for chunk in chunks)
+    require("REPEATED-HEADER" not in joined, "重复页眉未被清理")
+    require("file:///tmp/print" not in joined, "打印路径未被清理")
+    for marker in ("BODY-ONE", "BODY-TWO", "BODY-THREE"):
+        require(f"{marker}-{fixtures.suffix}" in joined, f"正文 {marker} 被误删")
+    require(
+        [chunk["pageNo"] for chunk in chunks] == [1, 2, 3],
+        "清理后物理页码不应改变",
+    )
+    record_document_evidence(
+        report,
+        "document-pdf-cleaning",
+        document_id=document["documentId"],
+        page_count=document["pageCount"],
+        chunk_count=document["chunkCount"],
+    )
+    entry["detail"] = "PDF 页眉、页脚打印路径被清理，正文与物理页码保留"
+
+
+def scenario_document_text(
+    entry: dict[str, Any],
+    state: dict[str, Any],
+    report: dict[str, Any],
+    fixtures: DocumentFixtures,
+) -> None:
+    token, project_id = state["token_a"], state["project_id"]
+    document = upload_and_wait(
+        state, fixtures, "emoji.txt", fixtures.emoji_text, "text/plain"
+    )
+    document_id = str(document["documentId"])
+    chunks = fetch_chunks(token, project_id, document_id)["chunks"]
+    assert isinstance(chunks, list) and chunks
+    text = "\n".join(str(chunk["text"]) for chunk in chunks)
+    require("C:\\data\\report.csv" in text, "正文合法路径被误删")
+    require("file:///tmp/a.txt" in text, "正文合法 URL 被误删")
+
+    source_status, source_headers, source_bytes = fetch_document_bytes(
+        token, document_path(project_id, document_id) + "/source"
+    )
+    require(source_status == 200, f"原文视图期望 200，实际 {source_status}")
+    require(
+        source_headers.get("content-type", "").startswith("text/plain"),
+        "原文视图类型不是纯文本",
+    )
+    source = source_bytes.decode("utf-8")
+    first = chunks[0]
+    start, end = int(first["sourceStart"]), int(first["sourceEnd"])
+    encoded_source = source.encode("utf-16-le")
+    sliced = encoded_source[start * 2 : end * 2].decode("utf-16-le")
+    require(
+        re.sub(r"\s+", "", sliced)[:16]
+        == re.sub(r"\s+", "", str(first["text"]))[:16],
+        "含 emoji 的偏移在原文中切片不一致",
+    )
+
+    gb_document = upload_and_wait(
+        state, fixtures, "chinese.txt", fixtures.gb18030_text, "text/plain"
+    )
+    gb_id = str(gb_document["documentId"])
+    file_status, file_headers, file_bytes = fetch_document_bytes(
+        token, document_path(project_id, gb_id) + "/file"
+    )
+    require(file_status == 200, f"GB18030 原件期望 200，实际 {file_status}")
+    require(
+        file_headers.get("x-content-type-options") == "nosniff",
+        "原件缺少 nosniff",
+    )
+    require(
+        hashlib.sha256(file_bytes).hexdigest()
+        == hashlib.sha256(fixtures.gb18030_text).hexdigest(),
+        "GB18030 原件字节与上传不一致",
+    )
+    _, _, gb_source = fetch_document_bytes(
+        token, document_path(project_id, gb_id) + "/source"
+    )
+    require(
+        gb_source.decode("utf-8") == fixtures.gb18030_text.decode("gb18030"),
+        "GB18030 原文视图解码不一致",
+    )
+    record_document_evidence(
+        report,
+        "document-text",
+        document_id=document_id,
+        chunk_count=document["chunkCount"],
+        gb18030_document_id=gb_id,
+        emoji_source_start=start,
+        emoji_source_end=end,
+    )
+    entry["detail"] = "文本：换行与空白归一、合法路径保留、emoji 偏移与 /source 一致、GB18030 原件与原文分别正确"
+
+
+def scenario_document_boundaries(
+    entry: dict[str, Any],
+    state: dict[str, Any],
+    report: dict[str, Any],
+    fixtures: DocumentFixtures,
+) -> None:
+    token, project_id = state["token_a"], state["project_id"]
+    before = len(list_documents(token, project_id))
+
+    document = upload_and_wait(
+        state, fixtures, "exact-20mib.txt", fixtures.exact_limit, "text/plain"
+    )
+    require(document["status"] == "ready", "恰好 20 MiB 的材料应最终 ready")
+    after_upload = len(list_documents(token, project_id))
+    require(after_upload == before + 1, "恰好 20 MiB 首次上传应新增一份材料")
+
+    over_status, _, over_body = upload_document(
+        token, project_id, "over-limit.txt", fixtures.over_limit, "text/plain"
+    )
+    require(over_status == 413, f"20 MiB + 1 期望 413，实际 {over_status}")
+    assert isinstance(over_body, dict)
+    require(over_body.get("code") == "file_too_large", f"超限原因标识不符：{over_body}")
+
+    empty_status, _, empty_body = upload_document(
+        token, project_id, "empty.txt", b"", "text/plain"
+    )
+    require(empty_status == 400, f"空文件期望 400，实际 {empty_status}")
+    assert isinstance(empty_body, dict)
+    require(empty_body.get("code") == "empty_file", f"空文件原因标识不符：{empty_body}")
+    require(
+        len(list_documents(token, project_id)) == after_upload,
+        "被拒绝的上传不应新增材料",
+    )
+
+    no_text = upload_and_wait(
+        state, fixtures, "no-text.pdf", fixtures.no_text_pdf, "application/pdf"
+    )
+    require(no_text["status"] == "failed", "无文字层 PDF 应失败")
+    failure = no_text.get("failure") or {}
+    require(failure.get("code") == "no_text_layer", f"失败原因不符：{failure}")
+    require(int(no_text["chunkCount"]) == 0, "失败材料不应有分块")
+
+    record_document_evidence(
+        report,
+        "document-boundaries",
+        document_id=document["documentId"],
+        page_count=document.get("pageCount"),
+        chunk_count=document["chunkCount"],
+        over_status=over_status,
+        empty_status=empty_status,
+        no_text_code=failure.get("code"),
+    )
+    entry["detail"] = (
+        "恰好 20 MiB 新增并 ready；20 MiB + 1 返回 413、空文件 400 且不新增；"
+        "无文字层 PDF 失败为 no_text_layer 且 0 块"
+    )
+
+
+def scenario_document_page_limit(
+    entry: dict[str, Any],
+    state: dict[str, Any],
+    report: dict[str, Any],
+    fixtures: DocumentFixtures,
+) -> None:
+    recreate_worker({"DOCUMENT_MAX_PAGES": "3"})
+    try:
+        token, project_id = state["token_a"], state["project_id"]
+        exact = upload_and_wait(
+            state, fixtures, "limit-3.pdf", fixtures.page_limit_exact, "application/pdf"
+        )
+        require(exact["status"] == "ready", "恰好 3 页应正常解析")
+        over = upload_and_wait(
+            state, fixtures, "limit-4.pdf", fixtures.page_limit_over, "application/pdf"
+        )
+        require(over["status"] == "failed", "4 页应因超过上限失败")
+        failure = over.get("failure") or {}
+        require(failure.get("code") == "too_many_pages", f"失败原因不符：{failure}")
+        require("3" in str(failure.get("message")), "失败说明应包含当前上限 3")
+        record_document_evidence(
+            report,
+            "document-page-limit",
+            exact_document_id=exact["documentId"],
+            over_document_id=over["documentId"],
+            failure_code=failure.get("code"),
+            failure_message=failure.get("message"),
+        )
+        entry["detail"] = "以 DOCUMENT_MAX_PAGES=3 验证：3 页就绪、4 页 too_many_pages 且说明含 3"
+    finally:
+        recreate_worker({})
+
+
+def scenario_document_dedup_isolation(
+    entry: dict[str, Any],
+    state: dict[str, Any],
+    report: dict[str, Any],
+    fixtures: DocumentFixtures,
+) -> None:
+    token, project_id = state["token_a"], state["project_id"]
+    document_id = state["three_page_document_id"]
+    before = list_documents(token, project_id)
+    before_count = len(before)
+    before_chunks = int(fetch_document(token, project_id, document_id)["chunkCount"])
+
+    status, _, body = upload_document(
+        token, project_id, "three-pages.pdf", fixtures.three_page, "application/pdf"
+    )
+    require(status == 200, f"重复上传期望 200，实际 {status}")
+    assert isinstance(body, dict)
+    require(body.get("deduplicated") is True, "重复上传应标记 deduplicated=true")
+    require(
+        body["document"]["documentId"] == document_id,  # type: ignore[index]
+        "重复上传应返回同一材料标识",
+    )
+    after = list_documents(token, project_id)
+    require(len(after) == before_count, "重复上传不应新增材料")
+    require(
+        int(fetch_document(token, project_id, document_id)["chunkCount"]) == before_chunks,
+        "重复上传不应新增分块",
+    )
+
+    file_path = document_path(project_id, document_id) + "/file"
+    chunks_path = document_path(project_id, document_id) + "/chunks"
+    for path in (document_path(project_id), file_path, chunks_path):
+        anonymous_status, _, anonymous_body = raw_request("GET", path)
+        require(anonymous_status == 401, f"匿名 {path} 期望 401，实际 {anonymous_status}")
+        require(
+            json.loads(anonymous_body) == {"detail": "未登录"},
+            f"匿名 {path} 响应体不符合契约",
+        )
+
+    client_b = HttpClient()
+    b_status, _, _ = client_b.request(
+        "POST",
+        "/api/auth/login",
+        payload={"email": ACCOUNT_B, "password": state["password"]},
+        headers={"Origin": BASE_URL},
+    )
+    require(b_status == 200, f"B 登录期望 200，实际 {b_status}")
+    token_b = client_b.cookie_value()
+    require(bool(token_b), "B 登录未设置会话 Cookie")
+
+    random_id = str(uuid.uuid4())
+    for suffix in ("/file", "/chunks"):
+        status_a, _, body_a = api_call("GET", document_path(project_id, document_id) + suffix, token_b)
+        status_random, _, body_random = api_call(
+            "GET", document_path(project_id, random_id) + suffix, token_b
+        )
+        require(status_a == 404, f"B 访问 A 的材料{suffix} 期望 404，实际 {status_a}")
+        require(status_random == 404, f"随机材料{suffix} 期望 404，实际 {status_random}")
+        require(body_a == body_random, f"他人材料与不存在材料的响应体不一致：{suffix}")
+
+    record_document_evidence(
+        report,
+        "document-dedup-isolation",
+        document_id=document_id,
+        dedup_status=status,
+        material_count=len(after),
+        chunk_count=before_chunks,
+    )
+    entry["detail"] = (
+        "重复上传返回 200/同一 documentId，材料与分块数量不变；"
+        "匿名 401；B 访问 A 的原件与分块为与随机标识一致的 404"
+    )
+
+
+def scenario_document_cancel(
+    entry: dict[str, Any],
+    state: dict[str, Any],
+    report: dict[str, Any],
+    fixtures: DocumentFixtures,
+) -> None:
+    token, project_id = state["token_a"], state["project_id"]
+    stopped = compose("stop", "worker")
+    require(stopped.returncode == 0, f"停止 worker 失败：{stopped.stderr.strip()}")
+    try:
+        payload = f"CANCEL-ME-{fixtures.suffix}".encode("utf-8")
+        status, _, body = upload_document(
+            token, project_id, "cancel.txt", payload, "text/plain"
+        )
+        require(status == 201, f"上传期望 201，实际 {status}")
+        assert isinstance(body, dict)
+        queued_id = str(body["document"]["documentId"])
+        job_id = str(body["jobId"])
+        job = fetch_job(token, project_id, job_id)
+        require(job["status"] == "queued", f"worker 停止时任务应为 queued，实际 {job['status']}")
+
+        cancel_status, _, cancel_body = api_call(
+            "POST", f"{job_path(project_id, job_id)}/cancel", token
+        )
+        require(cancel_status == 200, f"取消期望 200，实际 {cancel_status}")
+        assert isinstance(cancel_body, dict)
+        require(cancel_body.get("cancelApplied") is True, "取消应立即生效")
+
+        cancelled = fetch_document(token, project_id, queued_id)
+        require(cancelled["status"] == "failed", "取消后材料应为 failed")
+        failure = cancelled.get("failure") or {}
+        require(failure.get("code") == "canceled", f"取消原因不符：{failure}")
+        require(int(cancelled["chunkCount"]) == 0, "取消后不应有分块")
+        require(
+            fetch_chunks(token, project_id, queued_id)["chunks"] == [],
+            "取消后分块读取应为空",
+        )
+
+        status_again, _, body_again = upload_document(
+            token, project_id, "cancel.txt", payload, "text/plain"
+        )
+        require(status_again == 201, f"取消后重传期望 201，实际 {status_again}")
+        assert isinstance(body_again, dict)
+        new_id = str(body_again["document"]["documentId"])
+        require(new_id != queued_id, "重传应创建新的材料标识")
+    finally:
+        started = compose("start", "worker")
+        require(started.returncode == 0, f"启动 worker 失败：{started.stderr.strip()}")
+
+    ready = wait_document(token, project_id, new_id, lambda item: item["status"] == "ready")
+    require(int(ready["chunkCount"]) >= 1, "重传的材料应解析出分块")
+
+    completed_job = str(ready["jobId"])
+    status_done, _, done_body = api_call(
+        "POST", f"{job_path(project_id, completed_job)}/cancel", token
+    )
+    require(status_done == 200, f"完成后取消期望 200，实际 {status_done}")
+    assert isinstance(done_body, dict)
+    require(done_body["job"]["status"] == "succeeded", "完成先提交时取消应返回 succeeded")
+    require(
+        fetch_document(token, project_id, new_id)["status"] == "ready",
+        "完成先提交时材料应保持 ready",
+    )
+    record_document_evidence(
+        report,
+        "document-cancel",
+        canceled_document_id=queued_id,
+        canceled_job_id=job_id,
+        failure_code=failure.get("code"),
+        reupload_document_id=new_id,
+        completed_status=done_body["job"]["status"],
+    )
+    entry["detail"] = (
+        "worker 停止时取消 queued 任务立即得到 canceled 事件与 failed(canceled)、0 块并成功重传；"
+        "完成后再取消保持 ready/succeeded"
+    )
+
+
+def scenario_document_slow_parse(
+    entry: dict[str, Any],
+    state: dict[str, Any],
+    report: dict[str, Any],
+    fixtures: DocumentFixtures,
+) -> None:
+    recreate_worker(
+        {
+            "JOB_LEASE_SECONDS": "2",
+            "JOB_HEARTBEAT_SECONDS": "1",
+            "DOCUMENT_INGEST_DELAY_MS": "8000",
+        }
+    )
+    try:
+        token, project_id = state["token_a"], state["project_id"]
+        status, _, body = upload_document(
+            token, project_id, "slow.pdf", fixtures.slow_pdf, "application/pdf"
+        )
+        require(status == 201, f"上传期望 201，实际 {status}")
+        assert isinstance(body, dict)
+        document_id = str(body["document"]["documentId"])
+        job_id = str(body["jobId"])
+
+        running = wait_job(
+            token, project_id, job_id, lambda item: item["status"] == "running"
+        )
+        require(not running["awaitingTakeover"], "刚领取的任务不应等待接手")
+        observed = []
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            current = fetch_job(token, project_id, job_id)
+            observed.append(current["attempts"])
+            require(
+                current["status"] == "running",
+                f"慢解析期间状态应为 running，实际 {current['status']}",
+            )
+            require(
+                not current["awaitingTakeover"],
+                "解析期间租约未被持续续期（出现 awaitingTakeover）",
+            )
+            require(
+                int(current["attempts"]) == 1,
+                f"正常慢解析不应增加 attempts，实际 {current['attempts']}",
+            )
+            time.sleep(0.5)
+
+        stopped = compose("stop", "-t", "1", "worker")
+        require(stopped.returncode == 0, f"停止 worker 失败：{stopped.stderr.strip()}")
+        takeover = wait_job(
+            token,
+            project_id,
+            job_id,
+            lambda item: bool(item["awaitingTakeover"]),
+            timeout=15,
+        )
+        require(
+            fetch_chunks(token, project_id, document_id)["chunks"] == [],
+            "接手前不应出现分块",
+        )
+    finally:
+        restore_worker_defaults()
+
+    ready = wait_document(token, project_id, document_id, lambda item: item["status"] == "ready")
+    final_job = fetch_job(token, project_id, job_id)
+    require(int(final_job["attempts"]) >= 2, "接手后 attempts 应增加")
+    page_nos = [
+        chunk["pageNo"]
+        for chunk in fetch_chunks(token, project_id, document_id, limit=50)["chunks"]  # type: ignore[index]
+    ]
+    require(page_nos == [1, 3], f"接手后分块页码应仍为 [1, 3]，实际 {page_nos}")
+    record_document_evidence(
+        report,
+        "document-slow-parse",
+        document_id=document_id,
+        job_id=job_id,
+        attempts_during_parse=observed[:3],
+        attempts_after_takeover=final_job["attempts"],
+        awaiting_takeover=bool(takeover["awaitingTakeover"]),
+        chunk_count=ready["chunkCount"],
+        page_nos=page_nos,
+    )
+    entry["detail"] = (
+        "慢解析期间租约持续续期（attempts 保持 1、未等待接手）；停止 worker 后进入等待接手，"
+        f"恢复后 attempts={final_job['attempts']} 且分块仍为 [1, 3]"
+    )
+
+
 def run_acceptance(report: dict[str, Any], change: str | None = None) -> bool:
     state: dict[str, Any] = {}
+    fixtures = DocumentFixtures()
     try:
         with scenario(report, "compose-up"):
             scenario_compose_up()
@@ -1589,6 +2461,8 @@ def run_acceptance(report: dict[str, Any], change: str | None = None) -> bool:
             scenario_user_b_isolation(entry, state)
         with scenario(report, "relogin-keeps-project") as entry:
             scenario_relogin_keeps_project(entry, state)
+        with scenario(report, "documents-smoke") as entry:
+            scenario_documents_smoke(entry, state, report, fixtures)
         with scenario(report, "container-identity-stable") as entry:
             scenario_identity_stable(entry, report)
         with scenario(report, "homepage-after-recovery") as entry:
@@ -1618,6 +2492,23 @@ def run_acceptance(report: dict[str, Any], change: str | None = None) -> bool:
                 scenario_job_restart_after_terminal(entry, state, report)
             with scenario(report, "job-cancel-final-race") as entry:
                 scenario_job_cancel_race(entry, state, report)
+        if change == DOCUMENT_CHANGE_ID:
+            with scenario(report, "document-pdf-pages") as entry:
+                scenario_document_pdf_pages(entry, state, report, fixtures)
+            with scenario(report, "document-pdf-cleaning") as entry:
+                scenario_document_pdf_cleaning(entry, state, report, fixtures)
+            with scenario(report, "document-text") as entry:
+                scenario_document_text(entry, state, report, fixtures)
+            with scenario(report, "document-boundaries") as entry:
+                scenario_document_boundaries(entry, state, report, fixtures)
+            with scenario(report, "document-page-limit") as entry:
+                scenario_document_page_limit(entry, state, report, fixtures)
+            with scenario(report, "document-dedup-isolation") as entry:
+                scenario_document_dedup_isolation(entry, state, report, fixtures)
+            with scenario(report, "document-cancel") as entry:
+                scenario_document_cancel(entry, state, report, fixtures)
+            with scenario(report, "document-slow-parse") as entry:
+                scenario_document_slow_parse(entry, state, report, fixtures)
     except ScenarioFailed:
         return False
     return True
@@ -1707,6 +2598,7 @@ def new_report(expected_sha: str | None) -> dict[str, Any]:
         "expected_sha": expected_sha,
         "change": None,
         "job_evidence": [],
+        "document_evidence": [],
         "started_at": utc_now(),
         "finished_at": None,
         "exit_code": None,
@@ -1806,6 +2698,7 @@ def run(report: dict[str, Any], args: argparse.Namespace) -> int:
         passed = run_acceptance(report, change)
     finally:
         restore_database()
+        restore_worker_defaults()
 
     return finalize(report, 0 if passed else 1)
 

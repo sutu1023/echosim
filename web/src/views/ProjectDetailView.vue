@@ -1,9 +1,12 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { api, ApiError, describeError, type Project } from '../api'
+import { buildMaterialQuery } from '../materials/format'
 import { markLoggedOut } from '../session'
+import { normalizeLang } from '../workbench/stage-links'
 import { defaultStage } from '../workbench/stages'
+import MaterialsPanel from './MaterialsPanel.vue'
 
 const route = useRoute()
 const router = useRouter()
@@ -11,6 +14,17 @@ const project = ref<Project | null>(null)
 const loading = ref(true)
 const notFound = ref(false)
 const error = ref('')
+const lang = computed(() => normalizeLang(route.query.lang))
+const documentId = computed(() =>
+  typeof route.query.document === 'string' ? route.query.document : null,
+)
+
+function selectMaterial(id: string | null): void {
+  void router.replace({
+    path: route.path,
+    query: buildMaterialQuery(route.query, id),
+  })
+}
 
 async function load(): Promise<void> {
   loading.value = true
@@ -82,4 +96,12 @@ onMounted(() => {
       </nav>
     </template>
   </section>
+
+  <MaterialsPanel
+    v-if="project && !loading && !notFound && !error"
+    :project-id="project.id"
+    :lang="lang"
+    :document-id="documentId"
+    @select="selectMaterial"
+  />
 </template>

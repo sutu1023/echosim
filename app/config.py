@@ -25,6 +25,12 @@ class Settings(BaseSettings):
     - JOB_HEARTBEAT_SECONDS：执行中的续租间隔，必须小于租约时长。
     - WORKER_POLL_INTERVAL_SECONDS：worker 空闲时的领取轮询间隔。
     - TEST_TASK_STEP_DELAY_MS：测试任务每步之间的间隔，用于放大验收窗口。
+    - DOCUMENT_STORAGE_DIR：材料原件存储根目录，按项目与材料标识分目录。
+    - DOCUMENT_MAX_BYTES：单份材料字节上限，默认 20 MiB。
+    - DOCUMENT_MAX_PAGES：单份 PDF 页数上限，默认 2000 页。
+    - DOCUMENT_CHUNK_TARGET_CHARS：分块目标长度（字符）。
+    - DOCUMENT_CHUNK_OVERLAP_CHARS：同一段落被拆开时的重叠长度（字符）。
+    - DOCUMENT_INGEST_DELAY_MS：解析前的可控延迟，仅用于验收放大慢解析窗口。
     """
 
     model_config = SettingsConfigDict(case_sensitive=False, extra="ignore")
@@ -38,6 +44,12 @@ class Settings(BaseSettings):
     job_heartbeat_seconds: float = 2.0
     worker_poll_interval_seconds: float = 0.25
     test_task_step_delay_ms: int = 250
+    document_storage_dir: Path = PROJECT_ROOT / "data" / "documents"
+    document_max_bytes: int = 20 * 1024 * 1024
+    document_max_pages: int = 2000
+    document_chunk_target_chars: int = 1200
+    document_chunk_overlap_chars: int = 120
+    document_ingest_delay_ms: int = 0
 
 
 settings = Settings()

@@ -145,6 +145,11 @@ echosim_session=<随机令牌>; HttpOnly; Path=/; SameSite=lax
 | `JOB_HEARTBEAT_SECONDS` | `2` | worker 执行中的续租间隔，必须小于租约时长 |
 | `WORKER_POLL_INTERVAL_SECONDS` | `0.25` | worker 空闲时领取任务的轮询间隔 |
 | `TEST_TASK_STEP_DELAY_MS` | `250` | 测试任务每步间隔（毫秒），仅用于连通性自检与放大验收窗口 |
+| `DOCUMENT_MAX_BYTES` | `20971520` | 单份材料字节上限（20 MiB），恰好等于上限仍通过 |
+| `DOCUMENT_MAX_PAGES` | `2000` | 单份 PDF 页数上限，超过即以“页数过多”失败 |
+| `DOCUMENT_CHUNK_TARGET_CHARS` | `1200` | 分块目标长度（字符） |
+| `DOCUMENT_CHUNK_OVERLAP_CHARS` | `120` | 同一段落被拆开时的重叠长度（字符） |
+| `DOCUMENT_INGEST_DELAY_MS` | `0` | 解析前的可控延迟（毫秒），仅用于验收放大慢解析窗口 |
 
 覆盖端口示例：
 
@@ -222,6 +227,36 @@ docker compose start worker          # 租约到期后自动接手未完成任�
 
 worker 复用同一镜像但没有 HTTP 端口，因此 Compose 用“心跳文件 15 秒内更新”的探针**替换**镜像继承的 `/livez` 探针；`app` 的探针保持不变。worker 不对外发布端口。
 
+## 材料入库与来源定位
+
+材料属于项目私有数据：原件保存在 Compose 卷 `echosim-documents`，数据库只记录 SHA-256 与相对路径；解析由独立 `worker` 执行。清洗后的文本只用于阅读摘录，查看来源时以原件为准：PDF 使用上传的原始字节，文本使用按解析编码解码后的未清洗原文。
+
+### 接口
+
+先鉴权，再经 `resolve_owned_project` 校验项目归属，最后解析材料标识；匿名请求不访问数据库，他人项目与他人材料对外不可区分。
+
+| 方法 | 路径 | 说明 | 成功 | 失败 |
+| --- | --- | --- | --- | --- |
+| POST | `/api/projects/{projectId}/documents` | multipart 字段 `file`；PDF、Markdown 或 TXT，单文件 ≤ 20 MiB | 新建 `201`；同项目同内容 `200` + `deduplicated:true`，返回同一 `documentId` | `400` 空文件 / `401` / `404` / `413` 超限 / `415` 类型 / `503` |
+| GET | `/api/projects/{projectId}/documents` | 项目材料列表 | `200 {"documents":[…]}` | `401` / `404` / `503` |
+| GET | `/api/projects/{projectId}/documents/{documentId}` | 材料详情：状态、页数、分块数、失败原因、`jobId`/`runId` | `200` | `404` 材料不存在 |
+| GET | `/api/projects/{projectId}/documents/{documentId}/chunks?after=<序号>&limit=<≤50>` | 摘录分页（按分块序号升序） | `200 {chunks,total,ready}` | `401` / `404` / `422` / `503` |
+| GET | `/api/projects/{projectId}/documents/{documentId}/source` | 文本原文视图（UTF-8、未清洗，用于段落定位） | `200 text/plain` | `409` PDF 材料 / `404` |
+| GET | `/api/projects/{projectId}/documents/{documentId}/file` | 原件字节；PDF `application/pdf`、文本 `text/plain`，带 `nosniff` | `200` | `401` / `404` / `503` |
+
+上传成功响应另含 `jobId`、`runId`，可用于查询或取消解析任务；已就绪材料的重复上传不带任务标识。
+
+### 状态、解析与定位
+
+- 材料状态只有 `queued`、`parsing`、`ready`、`failed` 四种；失败原因包括 `empty_file`、`file_too_large`、`unsupported_type`、`decode_failed`、`no_text_layer`、`original_missing`、`too_many_pages`、`parse_error` 与 `canceled`。
+- 上传在请求内完成大小、类型与空文件校验；解析是后台任务，`runs.kind = document.ingest`，不会出现在“测试任务”面板的列表里。
+- PDF 逐页读取，物理页码从 1 开始且等于页对象顺序；空白页计入总页数并产生 0 个分块。重复页眉、页脚与打印路径只从分块文本中移除，页码不变。
+- Markdown/TXT 优先 UTF-8（含 BOM），其次带 BOM 的 UTF-16 与可可靠识别的 GB18030；无法可靠解码时材料失败并说明原因。正文中的路径与 URL 不会被当作页眉清理。
+- 每个分块都带 `pageNo`（PDF）或 `paragraphStart`/`paragraphEnd`（文本）以及 `sourceStart`/`sourceEnd`。偏移单位是 **UTF-16 代码单元**、区间左闭右开，浏览器可直接用它切片与高亮。
+- 同一项目内相同内容只保留一套有效材料与分块；失败材料不阻止重新上传。分块与 `ready` 在同一事务内发布，中断接手不会留下半成品或重复分块。
+- 取消解析在取消事务内同时写入 job `canceled`、终态事件与材料失败；worker 停止时取消排队任务也立即生效。
+- 材料深链接就是完整地址：`/projects/<项目 ID>/workbench/evidence-graph?layout=split&lang=zh&document=<材料 ID>`，刷新或粘贴后回到同一材料，`layout` 与 `lang` 保持不变。
+
 ## 数据库迁移
 
 迁移文件位于 `app/migrations/*.sql`，按文件名顺序执行，版本记录在 `schema_migrations`。容器启动时先执行 `python -m app.migrate` 再启动 Uvicorn，因此 `make up` 会自动升级已有数据卷。
@@ -247,6 +282,8 @@ make verify
 - 控制台与工作台路由场景：`/`、`/projects` 与五条工作台阶段深链接均返回 200 且包含 `EchoSim`；`/api/projects` 仍返回 JSON 与既有状态码，没有被 SPA 回退吞掉。
 - 查询参数回归：`web/tests/stage-links.test.mjs` 用 `node --test` 断言阶段链接显式保留 `layout` 与 `lang`，覆盖“报告 `graph/en` → 深度互动 → 后退回报告”的 URL 构造。
 - 任务底座场景（默认执行）：开始返回 202 与 `jobId`/`runId`、确定性任务到 `succeeded` 且事件 1–10、匿名任务接口全部 401、B 的任务与事件与不存在项目同为 404、停库期间带 Cookie 返回 503 且不清 Cookie、只停 worker 时 `/health` 与 `/livez` 仍为 200 且 `app` 容器身份不变。
+- 材料冒烟场景（默认执行，因为 CI 运行这个入口）：上传自制小 TXT，worker 解析到 `ready`，材料列表可见且至少一个分块，匿名读取列表返回 401；连续两次执行都要通过。
+- 材料变更专属场景（`make verify CHANGE=2026-11-21-ingest-seed-documents`）：三页 PDF 的总页数 3、第 2 页零分块、第 3 页 `pageNo=3` 与 `#page=3` 来源链接、原件哈希与页对象结构；PDF 页眉/页脚/打印路径清理；文本换行与空白归一、合法路径保留、emoji 偏移与 GB18030 原件/原文；恰好 20 MiB 通过、20 MiB + 1 与空文件被拒且不新增材料、无文字层失败；页数上限边界；重复上传只留一套；匿名 401 与他人 404；worker 停止时取消排队任务；慢解析续租与中断接手。
 - 任务变更专属场景（`make verify CHANGE=2026-11-21-track-background-jobs`）：真实 PostgreSQL 下两个任务互不影响、并发开始只新增一对 job/run、读到第 4 条后断开并以游标补到第 10 条（两段序号分别记录）、`Last-Event-ID` 优先、终态 `after=lastSeq` 立即结束、worker 中断后接手、旧租约令牌续租与写第 6 步被拒、运行中取消（3 步后 `seq=4`）、受控失败（`failAtStep=3` 持久化后仍生效）、终态后新任务、取消与最后一步竞态只留一个终态。
 
 > HTTP 200 加 `EchoSim` HTML 只证明 SPA 入口可达。阶段内容、布局、语言、截图与浏览器后退行为以实际浏览器结果为准。
@@ -261,11 +298,12 @@ make verify
 ```bash
 EXPECTED_SHA=$(git rev-parse HEAD) make verify
 EXPECTED_SHA=$(git rev-parse HEAD) make verify CHANGE=2026-11-21-track-background-jobs
+EXPECTED_SHA=$(git rev-parse HEAD) make verify CHANGE=2026-11-21-ingest-seed-documents
 ```
 
 未注册的 `CHANGE` 会以退出码 2 结束，并在报告里写明原因。
 
-- 机器可读报告字段包括 `result`、`tested_sha`、`dirty`、`started_at`/`finished_at`、逐场景 `scenarios[]`、`acceptance_accounts`、`isolation_project` 与 `app` 容器身份。
+- 机器可读报告字段包括 `result`、`tested_sha`、`dirty`、`started_at`/`finished_at`、逐场景 `scenarios[]`、`acceptance_accounts`、`isolation_project`、`app` 容器身份、`job_evidence` 与材料场景的 `document_evidence`。
 - CI 成功与失败运行都会上传 `verify-report-<sha>`；报告缺失会让工作流失败。可用手动触发执行受控失败演练：
 
 ```bash
@@ -292,6 +330,11 @@ CI 在干净检出上执行同一命令，并断言报告中的 `tested_sha` 等
 9. 在工作台任一阶段的“测试任务”面板开始任务：日志应先出现 1–4，随后在浏览器 DevTools 中断网（或停掉网络），确认出现“连接已中断，正在从第 N 条重连”；恢复网络后从网络恢复时刻起 10 秒内补齐到 10 条且无重复（记录两段实际序号）。
 10. 任务执行中 `docker compose stop worker`：确认面板在租约到期后出现“执行进程已中断，任务等待接手”，界面不显示失败或取消；`docker compose start worker` 后 10 秒内继续出事件并到终态，`attempts` 变大而日志仍为 1–10。
 11. 分别触发受控失败（`failAtStep=3`）与运行中取消，确认面板分别显示“测试任务失败”和“已取消（第 N 步之后）”，终态来自持久化事件；切换阶段、布局与语言后开始/取消任务，确认地址中的项目、阶段、`layout`、`lang` 均未改变。
+12. 材料入口：访客在控制台点击材料入口应先登录（`next=/projects`），登录后进入项目列表；已登录用户直接进入项目列表，控制台本身不出现项目名、材料列表或上传控件。
+13. 上传自制三页 PDF（第 1、3 页有正文、第 2 页空白）：列表显示总页数 3；第 2 页没有摘录；从第 3 页摘录点击“查看原件”，浏览器 PDF 阅读器应停在第 3 页（记录实际落页）。
+14. 上传含 emoji 与路径的 TXT：从摘录“查看原文”应高亮对应段落且不偏移；刷新或粘贴带 `document` 的完整地址回到同一材料；未登录打开该地址登录后回到原地址；用 B 打开应显示“项目不存在”；切换材料后 `layout` 与 `lang` 保留。
+15. 上传恰好 20 MiB 的 TXT 应成功并最终就绪；20 MiB + 1、空文件、无文字层 PDF 与超过页数上限的 PDF 应分别给出可读原因；同一文件重复上传只出现一份材料。
+16. 用项目作者的 Mac 浏览器上传 25 页私有样本：核对总页数，并从第 1、3 页摘录跳回原件确认实际落页；样本与其正文不得提交、不得出现在 `runtime/` 或 CI 产物中。
 
 人工验收记录放在 [`docs/acceptance/`](docs/acceptance/README.md)，与被 CI 上传的 `runtime/verify/` 产物严格分离；Pi 验收技能见 [`.pi/skills/echosim-acceptance/SKILL.md`](.pi/skills/echosim-acceptance/SKILL.md)。
 

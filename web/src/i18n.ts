@@ -77,6 +77,63 @@ export interface WorkbenchMessages {
     backProjects: string
     backConsole: string
   }
+  materials: {
+    title: string
+    intro: string
+    uploadHint: string
+    chooseFile: string
+    uploading: string
+    emptyTitle: string
+    emptyBody: string
+    limitHint: string
+    listTitle: string
+    loading: string
+    loadFailed: string
+    retry: string
+    open: string
+    back: string
+    status: {
+      queued: string
+      parsing: string
+      ready: string
+      failed: string
+    }
+    kind: {
+      pdf: string
+      markdown: string
+      text: string
+    }
+    pageCount: string
+    chunkCount: string
+    excerpts: string
+    excerptsEmpty: string
+    excerptsLoading: string
+    loadMore: string
+    noMore: string
+    pageNumber: string
+    paragraphs: string
+    viewOriginal: string
+    viewSource: string
+    sourceTitle: string
+    sourceClose: string
+    sourceFailed: string
+    sourceOnlyText: string
+    refreshFailed: string
+    serviceUnavailable: string
+    retryUpload: string
+    dedupNotice: string
+    failure: {
+      emptyFile: string
+      fileTooLarge: string
+      unsupportedType: string
+      decodeFailed: string
+      noTextLayer: string
+      originalMissing: string
+      tooManyPages: string
+      parseError: string
+      canceled: string
+    }
+  }
   statusbar: string
   logoutFailed: string
   job: {
@@ -154,21 +211,22 @@ const messages: Record<Lang, WorkbenchMessages> = {
     empty: {
       materialsTitle: '还没有材料',
       materialsBody:
-        '当前版本尚未开放材料入库，因此无法构建证据图谱。可以先去控制台查看材料入口说明。',
+        '上传 PDF、Markdown 或 TXT 后即可阅读摘录；证据图谱的构建属于后续变更。',
       missingTitle: '缺少前置步骤',
       missingBody: '请先完成前一阶段，再回到这里继续。',
-      goMaterials: '查看材料入口',
+      goMaterials: '前往材料区',
       goPrevious: '前往上一阶段',
     },
     canvas: {
       title: '证据图谱画布',
-      body: '材料入库与图谱数据将在后续变更接入，这里不会展示示例节点或虚假进度。',
+      body: '材料入库已开放；证据图谱的构建属于后续变更，这里不会展示示例节点或虚假进度。',
       summary: '画布占位 · 无真实数据',
     },
     context: {
       materialsTitle: '材料入口',
-      materialsBody: '材料入库尚未开放，当前不能上传或保存材料。',
-      materialsLink: '查看控制台材料说明',
+      materialsBody:
+        '材料在当前项目内上传与查看；就绪后可阅读摘录并回到原件。',
+      materialsLink: '前往材料区',
       questionsTitle: '推演问题',
       questions: [
         '哪些证据真正改变了判断？',
@@ -192,7 +250,62 @@ const messages: Record<Lang, WorkbenchMessages> = {
       backProjects: '返回项目列表',
       backConsole: '返回控制台',
     },
-    statusbar: '工作台外壳就绪 · 阶段数据尚未接入',
+    materials: {
+      title: '项目材料',
+      intro:
+        '材料只属于当前项目。上传后由后台进程解析，就绪后可以阅读摘录并回到原件。',
+      uploadHint: '选择 PDF、Markdown 或 TXT 文件后立即上传。',
+      chooseFile: '选择文件',
+      uploading: '正在上传…',
+      emptyTitle: '还没有材料',
+      emptyBody: '上传第一份材料后，证据图谱才能开始构建。',
+      limitHint:
+        '支持 PDF、Markdown、TXT，单文件不超过 20 MiB；PDF 页数上限按服务配置（默认 2000 页）。',
+      listTitle: '材料列表',
+      loading: '正在读取材料…',
+      loadFailed: '材料列表读取失败。',
+      retry: '重试读取',
+      open: '查看摘录',
+      back: '返回材料列表',
+      status: {
+        queued: '排队中',
+        parsing: '解析中',
+        ready: '就绪',
+        failed: '失败',
+      },
+      kind: { pdf: 'PDF', markdown: 'Markdown', text: 'TXT' },
+      pageCount: '总页数 {count}',
+      chunkCount: '分块 {count}',
+      excerpts: '阅读摘录',
+      excerptsEmpty: '还没有可阅读的摘录。',
+      excerptsLoading: '正在读取摘录…',
+      loadMore: '加载更多摘录',
+      noMore: '已经读到末尾。',
+      pageNumber: '第 {page} 页',
+      paragraphs: '第 {range} 段',
+      viewOriginal: '查看原件',
+      viewSource: '查看原文',
+      sourceTitle: '原件原文（未清洗）',
+      sourceClose: '关闭原文',
+      sourceFailed: '原文读取失败，请重试。',
+      sourceOnlyText: 'PDF 材料请在原件中查看对应页。',
+      refreshFailed: '暂时无法刷新材料状态，已保留当前内容。',
+      serviceUnavailable: '服务暂时不可用，请稍后重试；登录状态已保留。',
+      retryUpload: '重新选择文件上传',
+      dedupNotice: '该内容已在项目中，直接打开已有材料。',
+      failure: {
+        emptyFile: '文件为空，请选择有内容的文件。',
+        fileTooLarge: '文件超过 20 MiB 上限。',
+        unsupportedType: '仅支持 PDF、Markdown 与 TXT。',
+        decodeFailed: '无法以 UTF-8 或可识别的中文编码解码。',
+        noTextLayer: '该 PDF 没有文字层，请上传文本型 PDF。',
+        originalMissing: '原件不可读取，请重新上传。',
+        tooManyPages: '该 PDF 页数超过当前上限。',
+        parseError: '解析失败，请重试或更换文件。',
+        canceled: '入库已取消。',
+      },
+    },
+    statusbar: '工作台外壳就绪 · 证据图谱待构建',
     logoutFailed: '退出失败，请稍后重试。',
     job: {
       title: '测试任务（连通性自检）',
@@ -274,22 +387,22 @@ const messages: Record<Lang, WorkbenchMessages> = {
     empty: {
       materialsTitle: 'No materials yet',
       materialsBody:
-        'Material intake is not available in this version, so the evidence graph cannot be built yet. Open the console to read the material entry note.',
+        'Upload a PDF, Markdown or TXT file to read excerpts; building the evidence graph arrives in a later change.',
       missingTitle: 'A prerequisite is missing',
       missingBody: 'Complete the previous stage first, then return here.',
-      goMaterials: 'View material entry',
+      goMaterials: 'Go to materials',
       goPrevious: 'Go to previous stage',
     },
     canvas: {
       title: 'Evidence graph canvas',
-      body: 'Material intake and graph data will arrive in a later change. No sample nodes or fake progress are shown here.',
+      body: 'Material intake is available; building the evidence graph arrives in a later change. No sample nodes or fake progress are shown here.',
       summary: 'Canvas placeholder · no real data',
     },
     context: {
       materialsTitle: 'Material entry',
       materialsBody:
-        'Material intake is not available yet; nothing can be uploaded or saved here.',
-      materialsLink: 'Read the console material note',
+        'Materials are uploaded and read inside this project; ready items can be traced back to the original.',
+      materialsLink: 'Go to materials',
       questionsTitle: 'Simulation questions',
       questions: [
         'Which evidence actually changed the judgment?',
@@ -315,7 +428,62 @@ const messages: Record<Lang, WorkbenchMessages> = {
       backProjects: 'Back to projects',
       backConsole: 'Back to console',
     },
-    statusbar: 'Workbench shell ready · stage data not connected',
+    materials: {
+      title: 'Project materials',
+      intro:
+        'Materials belong to this project only. Uploads are parsed by the background worker; ready materials can be read as excerpts and traced back to the original.',
+      uploadHint: 'Choose a PDF, Markdown or TXT file to upload.',
+      chooseFile: 'Choose file',
+      uploading: 'Uploading…',
+      emptyTitle: 'No materials yet',
+      emptyBody: 'Upload the first material before the evidence graph can be built.',
+      limitHint:
+        'PDF, Markdown and TXT are supported, up to 20 MiB per file; the PDF page limit follows the service configuration (2000 by default).',
+      listTitle: 'Materials',
+      loading: 'Loading materials…',
+      loadFailed: 'Could not load the material list.',
+      retry: 'Retry',
+      open: 'Read excerpts',
+      back: 'Back to materials',
+      status: {
+        queued: 'Queued',
+        parsing: 'Parsing',
+        ready: 'Ready',
+        failed: 'Failed',
+      },
+      kind: { pdf: 'PDF', markdown: 'Markdown', text: 'TXT' },
+      pageCount: 'Pages {count}',
+      chunkCount: 'Chunks {count}',
+      excerpts: 'Excerpts',
+      excerptsEmpty: 'No excerpts to read yet.',
+      excerptsLoading: 'Loading excerpts…',
+      loadMore: 'Load more excerpts',
+      noMore: 'End of excerpts.',
+      pageNumber: 'Page {page}',
+      paragraphs: 'Paragraphs {range}',
+      viewOriginal: 'View original',
+      viewSource: 'View source text',
+      sourceTitle: 'Original text (uncleaned)',
+      sourceClose: 'Close source',
+      sourceFailed: 'Could not read the source text. Please retry.',
+      sourceOnlyText: 'Open the original PDF to view the matching page.',
+      refreshFailed: 'Material status could not be refreshed; the current content is kept.',
+      serviceUnavailable: 'Service temporarily unavailable. Your session is kept; retry shortly.',
+      retryUpload: 'Choose another file',
+      dedupNotice: 'This content already exists in the project; opening the existing material.',
+      failure: {
+        emptyFile: 'The file is empty. Choose a file with content.',
+        fileTooLarge: 'The file exceeds the 20 MiB limit.',
+        unsupportedType: 'Only PDF, Markdown and TXT are supported.',
+        decodeFailed: 'The file could not be decoded as UTF-8 or a recognizable Chinese encoding.',
+        noTextLayer: 'This PDF has no text layer. Upload a text-based PDF.',
+        originalMissing: 'The original file is unreadable. Upload it again.',
+        tooManyPages: 'This PDF exceeds the current page limit.',
+        parseError: 'Parsing failed. Retry or choose another file.',
+        canceled: 'Intake was canceled.',
+      },
+    },
+    statusbar: 'Workbench shell ready · evidence graph pending',
     logoutFailed: 'Sign out failed. Please try again.',
     job: {
       title: 'Test job (connectivity self-check)',

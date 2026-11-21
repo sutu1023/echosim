@@ -75,18 +75,35 @@ async def run(stop_event: asyncio.Event) -> None:
             continue
 
         try:
-            outcome = await worker_service.execute_job(
-                claim,
-                session_factory=SessionLocal,
-                stop_event=stop_event,
-                lease_seconds=lease_seconds,
-                heartbeat_seconds=heartbeat_seconds,
-                step_delay_seconds=step_delay,
-            )
+            if claim.kind == "document.ingest":
+                outcome = await worker_service.execute_ingest(
+                    claim,
+                    session_factory=SessionLocal,
+                    stop_event=stop_event,
+                    lease_seconds=lease_seconds,
+                    heartbeat_seconds=heartbeat_seconds,
+                    storage_root=settings.document_storage_dir,
+                    max_pages=settings.document_max_pages,
+                    chunk_target=settings.document_chunk_target_chars,
+                    chunk_overlap=settings.document_chunk_overlap_chars,
+                    parse_delay_ms=settings.document_ingest_delay_ms,
+                )
+            else:
+                outcome = await worker_service.execute_job(
+                    claim,
+                    session_factory=SessionLocal,
+                    stop_event=stop_event,
+                    lease_seconds=lease_seconds,
+                    heartbeat_seconds=heartbeat_seconds,
+                    step_delay_seconds=step_delay,
+                )
             logger.info(
-                "任务结局 job_id=%s run_id=%s attempt=%s outcome=%s",
+                "任务结局 job_id=%s run_id=%s kind=%s document_id=%s "
+                "attempt=%s outcome=%s",
                 claim.job_id,
                 claim.run_id,
+                claim.kind,
+                claim.document_id,
                 claim.attempt,
                 outcome,
             )

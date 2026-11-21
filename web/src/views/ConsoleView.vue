@@ -162,8 +162,8 @@ onMounted(() => {
       <p class="eyebrow">EchoSim 控制台</p>
       <h2>从材料出发，沿五个阶段完成一次双平台推演。</h2>
       <p class="muted">
-        控制台对所有访客开放；进入真实项目仍需要登录。当前版本可以创建并打开项目，
-        材料、运行与报告能力将在后续变更接入。
+        控制台对所有访客开放；进入真实项目仍需要登录。材料入库已开放，
+        运行与报告能力将在后续变更接入。
       </p>
     </section>
 
@@ -238,11 +238,15 @@ onMounted(() => {
         <section id="materials" class="card material-card">
           <div class="card-heading">
             <h3>材料入口</h3>
-            <span class="pill">后续变更</span>
+            <span class="pill">已开放</span>
           </div>
           <p class="muted">
-            材料入库尚未开放。当前版本不能上传、保存或解析材料，也不会显示上传成功提示。
+            支持 PDF、Markdown 与 TXT，单文件不超过 20 MiB。材料在项目内上传，
+            就绪后可阅读摘录并回到原件。
           </p>
+          <RouterLink class="primary material-cta" to="/projects">
+            进入我的项目上传材料
+          </RouterLink>
           <p class="fine-print">
             材料入库后，证据图谱会从这里开始构建。
           </p>
@@ -272,7 +276,7 @@ onMounted(() => {
     </div>
 
     <p class="console-boundary">
-      当前版本只承诺登录、创建并打开项目。材料入库、后台任务、真实推演、报告与案例回放不在本版本范围内。
+      当前版本支持登录、项目、材料入库与摘录来源定位。证据图谱、真实推演、报告与案例回放不在本版本范围内。
     </p>
     <p v-if="sessionState === 'guest'" class="muted">
       已有账户？

@@ -21,6 +21,8 @@ def build_claim() -> worker.Claim:
         stage="dual-platform-run",
         fail_at_step=None,
         simulated_epoch=None,  # type: ignore[arg-type]
+        kind="test.simulation",
+        document_id=None,
     )
 
 

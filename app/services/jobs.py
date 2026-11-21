@@ -17,7 +17,7 @@ from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..errors import JobNotFound, ServiceUnavailable
-from . import run_events
+from . import documents, run_events
 
 logger = logging.getLogger(__name__)
 
@@ -233,7 +233,7 @@ async def list_jobs(
         result = await db.execute(
             text(
                 f"SELECT {JOB_COLUMNS} {JOB_SOURCE} "
-                "WHERE j.project_id = :project_id "
+                "WHERE j.project_id = :project_id AND r.kind = 'test.simulation' "
                 "ORDER BY j.created_at DESC, j.id DESC LIMIT :limit"
             ),
             {"project_id": project_id, "limit": limit},
@@ -268,7 +268,7 @@ async def cancel_job(
         result = await db.execute(
             text(
                 "SELECT j.status, j.run_id, j.next_step, r.total_steps, r.stage, "
-                "r.simulated_epoch "
+                "r.simulated_epoch, r.kind, r.document_id "
                 "FROM jobs j JOIN runs r ON r.id = j.run_id "
                 "WHERE j.id = :job_id AND j.project_id = :project_id "
                 "FOR UPDATE OF j"
@@ -311,6 +311,8 @@ async def cancel_job(
             # 极少数竞态：回滚连同刚追加的事件一起撤销，保持单一终态。
             await db.rollback()
             return await get_job(db, project_id=project_id, job_id=parsed), False
+        if row.kind == "document.ingest" and row.document_id is not None:
+            await documents.cancel_for_run(db, run_id=row.run_id)
         await db.commit()
     except DB_ERRORS as exc:
         await db.rollback()

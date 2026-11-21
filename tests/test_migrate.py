@@ -120,6 +120,43 @@ class RepositoryMigrationTests(unittest.TestCase):
         self.assertIn("0002_jobs_runs_events", versions)
         self.assertLess(versions.index("0001_identity_and_projects"), versions.index("0002_jobs_runs_events"))
 
+    def test_0003_is_discovered_after_0002(self) -> None:
+        versions = [m.version for m in discover_migrations(Path("app/migrations"))]
+
+        self.assertIn("0003_documents", versions)
+        self.assertLess(
+            versions.index("0002_jobs_runs_events"),
+            versions.index("0003_documents"),
+        )
+
+    def test_0003_statements_cover_documents_and_kind_extension(self) -> None:
+        migration = next(
+            m
+            for m in discover_migrations(Path("app/migrations"))
+            if m.version == "0003_documents"
+        )
+        statements = split_sql_statements(migration.path.read_text(encoding="utf-8"))
+        joined = "\n".join(statements)
+
+        self.assertIn("CREATE TABLE documents", joined)
+        self.assertIn("CREATE TABLE document_chunks", joined)
+        self.assertIn("documents_project_content_idx", joined)
+        self.assertIn("WHERE status IN ('queued', 'parsing', 'ready')", joined)
+        self.assertIn("ALTER TABLE runs", joined)
+        self.assertIn("DROP CONSTRAINT runs_kind_check", joined)
+        self.assertIn("'document.ingest'", joined)
+
+    def test_0003_alters_stay_in_one_migration_transaction(self) -> None:
+        migration = next(
+            m
+            for m in discover_migrations(Path("app/migrations"))
+            if m.version == "0003_documents"
+        )
+        statements = split_sql_statements(migration.path.read_text(encoding="utf-8"))
+        alters = [statement for statement in statements if statement.startswith("ALTER TABLE runs")]
+
+        self.assertEqual(len(alters), 3)
+
     def test_0002_statements_cover_jobs_tables_and_indexes(self) -> None:
         migration = next(
             m
