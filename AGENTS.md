@@ -65,7 +65,7 @@ make user EMAIL=a@example.com  # 从标准输入读取密码，创建/更新账�
 - PostgreSQL 是任务队列、进度与事件的唯一事实来源；`app` 不得在请求内执行长任务，长任务只能由独立 `worker` 进程执行。
 - 任务状态只有 `queued`、`running`、`succeeded`、`failed`、`canceled` 五种；`succeeded`/`failed`/`canceled` 为终态，只能以先提交事务的结果为准。
 - 只有一份“做到第几步”的权威来源：`run_steps` 与 `jobs.next_step`，二者必须与该步事件在同一事务提交。
-- 每次领取必须生成新的 `lease_token`；所有进度、续租、取消与终态写入必须同时限定 `jobId` 与该令牌，并用数据库时间判断租约是否有效。旧令牌的续租与写入必须被拒绝。
+- 每次领取必须生成新的 `lease_token`；所有进度、续租、取消与终态写入必须同时限定 `jobId` 与该令牌。租约有效性必须在**锁定任务行之后**用独立的 `clock_timestamp()` 语句判断；不得使用 `now()`（事务开始时间），否则锁等待跨过到期点会让过期写入通过。旧令牌的续租与写入必须被拒绝。
 - 不依赖“归还扫描”进程：只有一个 worker 且它停止时，持久状态可以保持 `running`，由查询按 `lease_expires_at <= now()` 返回 `awaitingTakeover`；领取语句必须能原子接手“`queued` 或租约已过期的 `running`”。
 - 同一项目同一操作的活动任务最多一个；两个并发开始必须得到一个 202 与一个 200，且只新增一对 job/run（冲突路径整体回滚，不得留下孤立 run）。
 - 事件必须先与业务变更同事务落库再推送；`seq` 在同一 run 内从 1 连续递增，`(run_id, seq)` 唯一，终态事件计入序号，SSE 心跳与 `stream-end` 不计入。
@@ -114,7 +114,7 @@ make user EMAIL=a@example.com  # 从标准输入读取密码，创建/更新账�
 - `make verify` 必须保留 Change 01 的故障恢复与进程身份场景，并包含 A/B 双账号隔离路径：登录、创建、列表、详情、停库鉴权边界、退出失效、他人不可见、重新登录仍可见；准备账号与命名项目必须幂等，连续两次执行都要通过。
 - `make verify` 还必须验证 `/`、`/projects` 与五条工作台阶段深链接返回 `EchoSim` HTML，并断言 `/api/*` 未被 SPA 回退吞掉；阶段链接的 `layout`/`lang` 保留由 `cd web && npm test` 覆盖。
 - `make verify` 必须包含任务底座场景：开始 202、状态查询、确定性任务成功且事件 1–10、匿名 401、他人 404、停库 503 保留 Cookie、只停 worker 时 `/health`/`/livez` 不变。
-- `make verify CHANGE=2026-11-21-track-background-jobs` 必须在同一 SHA 上追加：真实 SSE 两段序号（1–4 与 5–10）、`Last-Event-ID` 优先、终态重连立即结束、并发开始只新增一对 job/run、worker 中断接手、真实 PostgreSQL 旧令牌拒绝回归、取消（含 `canceled seq=4`）、受控失败与取消/完成竞态。未注册的 `CHANGE` 必须以退出码 2 结束。
+- `make verify CHANGE=2026-11-21-track-background-jobs` 必须在同一 SHA 上追加：真实 SSE 两段序号（1–4 与 5–10）、`Last-Event-ID` 优先、终态重连立即结束、并发开始只新增一对 job/run、worker 中断接手、真实 PostgreSQL 锁等待跨过期点与旧令牌拒绝回归、取消（含 `canceled seq=4`）、受控失败与取消/完成竞态。未注册的 `CHANGE` 必须以退出码 2 结束。
 - 报告必须在 `job_evidence` 中记录 `jobId`、`runId`、两段序号、接手前后 `attempts`、副作用计数与旧令牌结果；页面提示、布局、语言与断线时序仍只写入 `docs/acceptance/`。
 - 工作树存在未忽略改动时 `make verify` 默认拒绝执行；仅在本地调试时可用 `ALLOW_DIRTY=1`，此时报告记录 `dirty: true`，**不得**作为干净克隆证据。
 - CI 必须调用与本地相同的 `make verify`，并断言报告 `tested_sha` 等于触发 SHA；不得在 CI 中重复实现验收逻辑。

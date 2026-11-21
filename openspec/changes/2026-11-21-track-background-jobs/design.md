@@ -194,9 +194,10 @@ RETURNING j.id, j.run_id, j.next_step, j.attempts, j.lease_token;
 
 ```sql
 BEGIN;
-SELECT status, lease_owner, lease_token, lease_expires_at, next_step, run_id,
-       now() AS db_now                              -- 租约是否有效以数据库当前时间为准
+SELECT status, lease_owner, lease_token, lease_expires_at, next_step, run_id
   FROM jobs WHERE id = :job_id FOR UPDATE;          -- 行锁：与取消、接管互斥
+-- 拿到行锁之后再开一条独立语句读取实际时钟：
+SELECT clock_timestamp() AS db_now;
 -- 守卫：status='running' AND lease_token=:token AND lease_expires_at > db_now
 --       AND next_step = :step - 1
 INSERT INTO run_steps (run_id, step_index, step_key, payload)
@@ -208,8 +209,8 @@ INSERT INTO run_events (run_id, seq, type, stage, simulated_at, payload)
      VALUES (:run_id, :seq, :type, :stage, :simulated_at, :payload);  -- PK 兜底防重
 UPDATE jobs
    SET next_step = :step,
-       lease_expires_at = now() + make_interval(secs => :lease_seconds),
-       updated_at = now()
+       lease_expires_at = clock_timestamp() + make_interval(secs => :lease_seconds),
+       updated_at = clock_timestamp()
  WHERE id = :job_id AND lease_token = :token AND status = 'running';
 -- 若上一句影响 0 行 → ROLLBACK（令牌已失效）
 COMMIT;
@@ -218,12 +219,17 @@ COMMIT;
 心跳与终态写入同样带令牌，且**只用数据库时间**判断租约仍然有效，过期的心跳不可能把旧租约续活：
 
 ```sql
+SELECT status, lease_token, lease_expires_at FROM jobs
+ WHERE id = :job_id FOR UPDATE;                     -- 先锁行，等待期间不会读到旧时钟
+SELECT clock_timestamp() AS db_now;                 -- 持锁后的实际时钟
 UPDATE jobs
-   SET lease_expires_at = now() + make_interval(secs => :lease_seconds), updated_at = now()
+   SET lease_expires_at = clock_timestamp() + make_interval(secs => :lease_seconds),
+       updated_at = clock_timestamp()
  WHERE id = :job_id AND lease_token = :token AND status = 'running'
-   AND lease_expires_at > now()
 RETURNING id;
 ```
+
+**为什么必须用 `clock_timestamp()` 而不是 `now()`**：PostgreSQL 的 `now()` 固定为事务开始时间。若请求在租约到期前开始、但 `FOR UPDATE` 等待行锁一直到到期之后才拿到锁，`now()` 仍然返回到期前的时间，过期心跳会把租约续活、过期步骤也会写进库。因此顺序固定为“先锁行 → 再单独读 `clock_timestamp()` → 再判断令牌/状态/到期时间”，失败即 `ROLLBACK`；续租与步骤推进的到期时间也一律用 `clock_timestamp()` 计算。
 
 返回 0 行即失去租约（或租约已过期），worker 置 `lost` 标志并退出该任务，不再写任何数据。失败/完成写入使用同一条 `UPDATE … WHERE id = :job_id AND lease_token = :token AND status='running'` 守卫，因此：
 
@@ -344,12 +350,13 @@ worker 复用同一镜像，而 `Dockerfile` 的 `HEALTHCHECK` 访问 `127.0.0.1
 4. `job-last-event-id-priority`：对同一 run 带 `Last-Event-ID: <runId>:7` 与 `after=4` 订阅，断言只收到 8–10（证明头部优先）；另测非法游标 `after=lastSeq+1` 返回 400 JSON、匿名 401、B 404。
 5. `job-terminal-reconnect`：对已终态任务用 `after=10` 订阅，断言不等待新事件、2 秒内收到 `stream-end` 并关闭。
 6. `job-worker-crash-takeover`：新建任务，轮询到 `stepsApplied >= 2`；`docker compose stop worker`；记录停止时的 `jobId`、`runId`、`stepsAtStop`、`attempts`，确认持久状态仍为 `running` 而 `awaitingTakeover=true`；`docker compose start worker` 后跟踪到终态；断言 `attempts` 递增、`/effects` 返回 `total=10`、`distinctSteps=10`、`steps=[1..10]`，事件 `seq` 仍为 1–10。
-7. `job-lease-probe-takeover`：`python -m app.lease_probe --mode takeover --job-id <id>`：领取 A 提交到第 3 步 → 强制租约过期 → 领取 B 提交到第 5 步 → A 用旧令牌续租与写第 6 步；断言两次均被拒绝、进度/事件/副作用无变化，B 完成 6–10。
-8. `job-cancel-running`：轮询到 `stepsApplied >= 3` 后 POST cancel；断言 200、状态 `canceled`、`cancelApplied=true`、终态事件为 `canceled` 且 `seq=4`、无 `completed`、副作用数等于已提交步数；再次 cancel 断言 `cancelApplied=false` 且无新事件。
-9. `job-cancel-final-race`：`python -m app.lease_probe --mode cancel-race` 在真实 PostgreSQL 中用两个连接让“最后一步提交”与“取消”竞争，重复 5 次；每次断言恰好一个终态事件，且 `succeeded` 对应无 `canceled`、`canceled` 对应无 `completed`。
-10. `job-fail-controlled-persisted`：`docker compose stop worker` 后以 `failAtStep=3` 开始，再 `start worker`；断言重启后的 worker 在 `fail_at_step=3` 失败；终态 `failed`、终态事件 `seq=3`、无 `completed`、`stepsApplied=2`。
-11. `job-restart-after-terminal`：对已终态任务再次开始；断言新 `jobId`/`runId`，新 run 的 `seq` 从 1 开始。
-12. `worker-isolation`：只停 worker 时 `/health` 200、`/livez` 200、`app` 容器身份不变；记录均值的轮询与断言耗时供人工对比。
+7. `job-lease-lock-wait`：停 worker 后运行 `python -m app.lease_probe --mode lease-wait --project-id <id>`：请求在到期前开始、`FOR UPDATE` 等待行锁跨过到期点，期间无新 worker 接手；断言 `heartbeat=false`、`commit_step=lost`、租约未被延长、步骤与事件数不变。
+8. `job-lease-probe-takeover`：`python -m app.lease_probe --mode takeover --job-id <id>`：领取 A 提交到第 3 步 → 强制租约过期 → 领取 B 提交到第 5 步 → A 用旧令牌续租与写第 6 步；断言两次均被拒绝、进度/事件/副作用无变化，B 完成 6–10。
+9. `job-cancel-running`：轮询到 `stepsApplied >= 3` 后 POST cancel；断言 200、状态 `canceled`、`cancelApplied=true`、终态事件为 `canceled` 且 `seq=4`、无 `completed`、副作用数等于已提交步数；再次 cancel 断言 `cancelApplied=false` 且无新事件。
+10. `job-cancel-final-race`：`python -m app.lease_probe --mode cancel-race` 在真实 PostgreSQL 中用两个连接让“最后一步提交”与“取消”竞争，重复 5 次；每次断言恰好一个终态事件，且 `succeeded` 对应无 `canceled`、`canceled` 对应无 `completed`。
+11. `job-fail-controlled-persisted`：`docker compose stop worker` 后以 `failAtStep=3` 开始，再 `start worker`；断言重启后的 worker 在 `fail_at_step=3` 失败；终态 `failed`、终态事件 `seq=3`、无 `completed`、`stepsApplied=2`。
+12. `job-restart-after-terminal`：对已终态任务再次开始；断言新 `jobId`/`runId`，新 run 的 `seq` 从 1 开始。
+13. `worker-isolation`：只停 worker 时 `/health` 200、`/livez` 200、`app` 容器身份不变；记录均值的轮询与断言耗时供人工对比。
 
 每个场景都对**详情（状态/attempts/stepsApplied/terminalReason）、终态事件、副作用计数**三者交叉核对；每个场景自带清理（取消遗留活动任务、恢复 worker 与数据库）。
 
@@ -359,7 +366,7 @@ worker 复用同一镜像，而 `Dockerfile` 的 `HEALTHCHECK` 访问 `127.0.0.1
 
 | 能力 | 代表场景 | 验证方式 |
 | --- | --- | --- |
-| `background-job-queue` | 开始 202/200；只新增一对 job/run；两个任务互不影响；租约过期后接受接手；旧令牌写入被拒；取消/失败/完成只留一个终态 | `make verify`（基础 6 项）+ `make verify CHANGE=…`（`lease_probe` 真实 PG 回归、并发开始计数、接手、取消、失败、终态后重启） |
+| `background-job-queue` | 开始 202/200；只新增一对 job/run；两个任务互不影响；租约过期后接受接手；旧令牌写入被拒；锁等待跨过到期点不得续租或写入；取消/失败/完成只留一个终态 | `make verify`（基础 6 项）+ `make verify CHANGE=…`（`lease_probe` 的 lease-wait 与 takeover 真实 PG 回归、并发开始计数、接手、取消、失败、终态后重启） |
 | `run-event-stream` | 两段真实 SSE 分别为 1–4 与 5–10；`Last-Event-ID` 优先于 `after`；`after=lastSeq+1` 为 400；终态 `after=10` 立即 `stream-end`；前端 cursor 与缺口 | 两段 SSE 与游标优先级由 `make verify CHANGE=…` 用真实帧验证；reducer 由 `cd web && npm test` 验证；页面观感由人工走查 |
 | `project-workbench` | 面板标识为测试任务；三种布局、五个阶段内可打开；开始不改变项目/阶段/布局/语言；四类提示可区分 | 人工走查（浏览器）：布局、语言、阶段保持、文案与可测时限 |
 | `project-isolation` | 匿名 SSE 401；B 订阅 A 的事件流 404 且与不存在项目一致；停库 503 保留 Cookie；归属先于游标 | `make verify`（基础）+ `make verify CHANGE=…`（非法游标仍先走归属） |

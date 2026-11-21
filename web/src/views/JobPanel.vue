@@ -20,6 +20,10 @@ import {
   type JobStreamHandle,
   type JobStreamStatus,
 } from '../workbench/job-stream'
+import {
+  clearedOnReadSuccess,
+  pickBannerSource,
+} from '../workbench/job-panel-state'
 
 const props = defineProps<{
   projectId: string
@@ -56,6 +60,8 @@ const log = ref<JobLogState>(createJobLog())
 const streamStatus = ref<JobStreamStatus>('connecting')
 const effects = ref<EffectsBody | null>(null)
 const error = ref('')
+const pollError = ref('')
+const listFailed = ref(false)
 const note = ref('')
 const busy = ref(false)
 let handle: JobStreamHandle | null = null
@@ -82,30 +88,35 @@ const terminalEvent = computed<JobEvent | null>(() => {
 })
 
 const banner = computed<{ kind: string; text: string } | null>(() => {
-  if (error.value) {
-    return { kind: 'service', text: error.value }
-  }
   const terminal = terminalEvent.value
-  if (terminal?.type === 'failed') {
+  const source = pickBannerSource({
+    terminalType: terminal?.type ?? null,
+    streamStatus: streamStatus.value,
+    error: error.value,
+    pollError: pollError.value,
+    awaitingTakeover: Boolean(job.value?.awaitingTakeover),
+    gap: log.value.gap,
+  })
+  if (source === null) {
+    return null
+  }
+  if (source === 'failed') {
     const reason = String(
-      (terminal.payload.reason as string | undefined) ?? 'controlled_failure',
+      (terminal?.payload.reason as string | undefined) ?? 'controlled_failure',
     )
     return {
       kind: 'failed',
       text: t.value.job.failedBanner.replace('{reason}', reason),
     }
   }
-  if (terminal?.type === 'canceled') {
-    const step = String((terminal.payload.stepsApplied as number | undefined) ?? 0)
+  if (source === 'canceled') {
+    const step = String((terminal?.payload.stepsApplied as number | undefined) ?? 0)
     return {
       kind: 'canceled',
       text: t.value.job.canceledBanner.replace('{step}', step),
     }
   }
-  if (
-    streamStatus.value === 'reconnecting' ||
-    streamStatus.value === 'interrupted'
-  ) {
+  if (source === 'stream') {
     return {
       kind: 'stream',
       text: t.value.job.streamInterrupted.replace(
@@ -114,22 +125,25 @@ const banner = computed<{ kind: string; text: string } | null>(() => {
       ),
     }
   }
-  if (job.value?.awaitingTakeover) {
+  if (source === 'error') {
+    return { kind: 'service', text: error.value }
+  }
+  if (source === 'poll') {
+    return { kind: 'service', text: pollError.value }
+  }
+  if (source === 'takeover') {
     return {
       kind: 'takeover',
       text: t.value.job.awaitingTakeover.replace(
         '{seconds}',
-        String(Math.round(job.value.leaseExpiredSeconds)),
+        String(Math.round(job.value?.leaseExpiredSeconds ?? 0)),
       ),
     }
   }
-  if (log.value.gap) {
-    return {
-      kind: 'gap',
-      text: t.value.job.gap.replace('{seq}', String(log.value.cursor)),
-    }
+  return {
+    kind: 'gap',
+    text: t.value.job.gap.replace('{seq}', String(log.value.cursor)),
   }
-  return null
 })
 
 function describeError(caught: unknown): string {
@@ -172,6 +186,10 @@ function attach(current: JobBody, after: number): void {
     after,
     onStatus: (status) => {
       streamStatus.value = status
+      if (status === 'live' || status === 'ended') {
+        // 连接恢复即代表读取路径恢复：清掉轮询错误，避免旧提示压住新状态。
+        pollError.value = ''
+      }
     },
     onEvent: (event) => {
       log.value = applyJobEvent(log.value, event)
@@ -211,21 +229,32 @@ async function refreshJob(): Promise<void> {
   try {
     const data = await api.get<{ job: JobBody }>(detailUrl.value)
     job.value = data.job
+    const cleared = clearedOnReadSuccess()
+    error.value = cleared.error
+    pollError.value = cleared.pollError
+    listFailed.value = false
     if (!isActive(data.job.status)) {
       stopPolling()
     }
   } catch (caught) {
-    error.value = describeError(caught)
+    // 轮询失败单独记录，不覆盖 SSE 重连提示；成功读取时自动清空。
+    pollError.value = describeError(caught)
   }
 }
 
 async function loadJobs(): Promise<void> {
   error.value = ''
+  pollError.value = ''
   note.value = ''
   detach()
   stopPolling()
+  streamStatus.value = 'ended'
   try {
     const data = await api.get<{ jobs: JobBody[] }>(listUrl.value)
+    const cleared = clearedOnReadSuccess()
+    error.value = cleared.error
+    pollError.value = cleared.pollError
+    listFailed.value = false
     const latest = data.jobs[0] ?? null
     job.value = latest
     streamStatus.value = 'ended'
@@ -237,6 +266,8 @@ async function loadJobs(): Promise<void> {
       effects.value = null
     }
   } catch (caught) {
+    // 首次列表读取失败：保留上下文并给出“重试读取”，只发 GET。
+    listFailed.value = true
     error.value = describeError(caught)
   }
 }
@@ -251,6 +282,9 @@ async function start(): Promise<void> {
       stage: props.stage,
     })
     job.value = data.job
+    error.value = ''
+    pollError.value = ''
+    listFailed.value = false
     attach(data.job, 0)
     void loadEffects()
   } catch (caught) {
@@ -272,6 +306,8 @@ async function cancel(): Promise<void> {
       cancelApplied: boolean
     }>(`${listUrl.value}/${encodeURIComponent(job.value.jobId)}/cancel`)
     job.value = data.job
+    error.value = ''
+    pollError.value = ''
     if (!data.cancelApplied) {
       note.value = t.value.job.cancelNotApplied
     }
@@ -288,6 +324,7 @@ async function reconnect(): Promise<void> {
     return
   }
   error.value = ''
+  pollError.value = ''
   attach(job.value, log.value.cursor)
 }
 
@@ -351,9 +388,19 @@ onBeforeUnmount(() => {
 
     <div class="job-actions">
       <button
+        v-if="listFailed"
         type="button"
         class="primary"
-        :disabled="busy || (job ? isActive(job.status) : false)"
+        data-action="retry-list"
+        :disabled="busy"
+        @click="loadJobs"
+      >
+        {{ t.job.retryLoad }}
+      </button>
+      <button
+        type="button"
+        class="primary"
+        :disabled="busy || listFailed || (job ? isActive(job.status) : false)"
         @click="start"
       >
         {{ t.job.start }}

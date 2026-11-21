@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import unittest
 import uuid
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 from app.services import worker
@@ -23,42 +24,57 @@ def build_claim() -> worker.Claim:
     )
 
 
+NOW = datetime(2026, 11, 21, 9, 0, tzinfo=timezone.utc)
+
+
+def lease_row(claim: worker.Claim, *, expires_at: datetime | None) -> SimpleNamespace:
+    return SimpleNamespace(
+        status="running",
+        lease_token=claim.lease_token,
+        lease_expires_at=expires_at,
+    )
+
+
 class LeaseGuardTests(unittest.TestCase):
     def test_matching_token_and_live_lease_passes(self) -> None:
         claim = build_claim()
-        row = SimpleNamespace(
-            status="running", lease_token=claim.lease_token, lease_ok=True
-        )
+        row = lease_row(claim, expires_at=NOW + timedelta(seconds=3))
 
-        self.assertTrue(worker._guard(row, claim))
+        self.assertTrue(worker._lease_valid(row, claim, NOW))
 
     def test_old_token_is_rejected(self) -> None:
         claim = build_claim()
         row = SimpleNamespace(
-            status="running", lease_token=uuid.uuid4(), lease_ok=True
+            status="running",
+            lease_token=uuid.uuid4(),
+            lease_expires_at=NOW + timedelta(seconds=3),
         )
 
-        self.assertFalse(worker._guard(row, claim))
+        self.assertFalse(worker._lease_valid(row, claim, NOW))
 
-    def test_expired_lease_is_rejected(self) -> None:
+    def test_lease_expired_before_clock_read_is_rejected(self) -> None:
+        """事务开始于到期前，但持锁后读到的时间已过到期点。"""
         claim = build_claim()
-        row = SimpleNamespace(
-            status="running", lease_token=claim.lease_token, lease_ok=False
-        )
+        row = lease_row(claim, expires_at=NOW - timedelta(milliseconds=200))
 
-        self.assertFalse(worker._guard(row, claim))
+        self.assertFalse(worker._lease_valid(row, claim, NOW))
+
+    def test_lease_without_expiry_is_rejected(self) -> None:
+        claim = build_claim()
+        row = lease_row(claim, expires_at=None)
+
+        self.assertFalse(worker._lease_valid(row, claim, NOW))
 
     def test_terminal_state_is_rejected(self) -> None:
         claim = build_claim()
         for status in ("succeeded", "failed", "canceled"):
             with self.subTest(status=status):
                 row = SimpleNamespace(
-                    status=status, lease_token=claim.lease_token, lease_ok=True
+                    status=status,
+                    lease_token=claim.lease_token,
+                    lease_expires_at=NOW + timedelta(seconds=3),
                 )
-                self.assertFalse(worker._guard(row, claim))
-
-    def test_missing_row_is_rejected(self) -> None:
-        self.assertFalse(worker._guard(None, build_claim()))
+                self.assertFalse(worker._lease_valid(row, claim, NOW))
 
 
 class StepOutcomeTests(unittest.TestCase):

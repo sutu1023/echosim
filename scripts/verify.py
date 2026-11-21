@@ -1331,6 +1331,52 @@ def scenario_job_lease_probe(
         require(started_worker.returncode == 0, f"恢复 worker 失败：{started_worker.stderr.strip()}")
 
 
+def scenario_job_lease_lock_wait(
+    entry: dict[str, Any], state: dict[str, Any], report: dict[str, Any]
+) -> None:
+    """请求在租约到期前开始、在行锁等待中跨过到期点：不得续租，也不得写入。"""
+    stopped = compose("stop", "worker")
+    require(stopped.returncode == 0, f"停止 worker 失败：{stopped.stderr.strip()}")
+    try:
+        result = run_probe("lease-wait", project_id=state["project_id"])
+    finally:
+        started_worker = compose("start", "worker")
+        require(started_worker.returncode == 0, f"恢复 worker 失败：{started_worker.stderr.strip()}")
+
+    cases = result.get("cases") or []
+    require(len(cases) == 2, f"锁等待回归应覆盖 heartbeat 与 commit_step：{result}")
+    for case in cases:
+        require(case["blocked_on_row"] is True, f"未观察到行锁等待：{case}")
+        require(
+            case["actual"] == case["expected"],
+            f"{case['operation']} 期望 {case['expected']}，实际 {case['actual']}",
+        )
+        require(int(case["steps"]) == 0, f"{case['operation']} 写入了步骤：{case}")
+        require(int(case["events"]) == 0, f"{case['operation']} 写入了事件：{case}")
+        require(case["expiry_extended"] is False, f"{case['operation']} 延长了租约：{case}")
+    require(result.get("ok") is True, f"锁等待回归失败：{result}")
+
+    record_job_evidence(
+        report,
+        "job-lease-lock-wait",
+        cases=[
+            {
+                "operation": case["operation"],
+                "actual": case["actual"],
+                "blocked_on_row": case["blocked_on_row"],
+                "expiry_extended": case["expiry_extended"],
+                "steps": case["steps"],
+                "events": case["events"],
+            }
+            for case in cases
+        ],
+    )
+    entry["detail"] = (
+        "真实 PostgreSQL：到期前开始、锁等待跨过到期点后 heartbeat=false、"
+        "commit_step=lost，租约未延长且无步骤/事件写入"
+    )
+
+
 def scenario_job_cancel(
     entry: dict[str, Any], state: dict[str, Any], report: dict[str, Any]
 ) -> None:
@@ -1562,6 +1608,8 @@ def run_acceptance(report: dict[str, Any], change: str | None = None) -> bool:
                 scenario_job_worker_takeover(entry, state, report)
             with scenario(report, "job-lease-probe-takeover") as entry:
                 scenario_job_lease_probe(entry, state, report)
+            with scenario(report, "job-lease-lock-wait") as entry:
+                scenario_job_lease_lock_wait(entry, state, report)
             with scenario(report, "job-cancel-running") as entry:
                 scenario_job_cancel(entry, state, report)
             with scenario(report, "job-fail-controlled") as entry:

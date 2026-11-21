@@ -107,6 +107,7 @@ export interface WorkbenchMessages {
     serviceUnavailable: string
     cancelNotApplied: string
     loadFailed: string
+    retryLoad: string
   }
 }
 
@@ -228,6 +229,7 @@ const messages: Record<Lang, WorkbenchMessages> = {
       serviceUnavailable: '服务暂时不可用，请稍后重试；已保留登录态与日志。',
       cancelNotApplied: '任务已结束，取消未生效。',
       loadFailed: '暂时无法读取任务，请稍后重试。',
+      retryLoad: '重试读取',
     },
   },
   en: {
@@ -352,6 +354,7 @@ const messages: Record<Lang, WorkbenchMessages> = {
         'Service temporarily unavailable. Your session and log are kept; retry shortly.',
       cancelNotApplied: 'The job already finished, so cancel did not apply.',
       loadFailed: 'The job could not be read. Please retry.',
+      retryLoad: 'Retry loading',
     },
   },
 }

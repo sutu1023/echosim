@@ -19,6 +19,7 @@
 - [x] 3.3 手工验证中断恢复：以 `TEST_TASK_STEP_DELAY_MS=800 make up` 启动，开始一个任务并用 `docker compose stop worker` 在第 2–3 步后中断，记录 `jobId`、`runId`、`stepsApplied`、`attempts`；确认持久状态仍为 `running` 且详情在 `lease_expires_at` 后 2 秒内返回 `awaitingTakeover: true`，`docker compose start worker` 后任务走到终态，`/effects` 返回 `total=10`、`distinctSteps=10`、`steps=[1..10]`，把实际数值写入任务 8 的待签收清单
 - [x] 3.4 验证 worker 隔离：仅 `docker compose stop worker` 时请求 `GET /health` 与 `GET /livez`，确认分别返回 200 与 200 且 `app` 容器 ID/PID/启动时间/重启次数不变；再 `docker compose start worker` 确认任务可继续，结果记入任务 8 清单
 - [x] 3.5 新增验收专用 `app/lease_probe.py`（不出现在 app/worker 正常调用路径）：`--mode two-jobs` 建两个 probe 任务并分别领取，A 提交 1 步后逐列比对 B 的 `status`/`next_step`/`lease_token`/`lease_expires_at`/`attempts` 未变；`--mode counts` 返回项目的 `jobs`/`runs` 行数；`--mode takeover --job-id` 回放“A 提交到 3 → 强制过期 → B 提交到 5 → A 用旧令牌续租与写 6 被拒 → B 完成 6–10”；`--mode cancel-race` 用两个连接让最后一步与取消竞争 5 次并断言只有一个终态；用 `docker compose exec -T app python -m app.lease_probe --mode two-jobs --project-id <id>` 实测并记录 JSON
+- [ ] 3.6 修正租约判断：`heartbeat` 与 `commit_step` 先 `FOR UPDATE` 锁行，再用独立语句读 `clock_timestamp()` 核对令牌/状态/到期时间，失效即回滚；`app/lease_probe.py --mode lease-wait` 在真实 PostgreSQL 中复现“到期前开始、锁等待跨过到期点”，断言 `heartbeat=false`、`commit_step=lost`、租约未延长、步骤与事件数不变；运行 `.venv/bin/python -m unittest tests.test_worker_steps` 通过
 
 ## 4. 事件持久化与 SSE
 
@@ -31,6 +32,8 @@
 - [x] 5.1 新增 `web/src/workbench/job-log.ts`（以“已完整处理的连续 seq”作为 `cursor`、`(runId, seq)` 去重、乱序暂存、忽略其他 run、缺口标记、终态标记）与 `web/tests/job-log.test.mjs`，覆盖“补发 1–4 后实时又来 3、4、5 只显示一次”“已有 1–4 收到 6 时游标仍为 4，收到 5 后连续到 6”“切换任务丢弃旧 run”“终态后不再追加”；运行 `cd web && npm test` 通过，且 `stage-links` 回归仍通过
 - [x] 5.2 新增 `web/src/workbench/job-stream.ts`：用同源 `EventSource` 订阅 `…/events?after=<cursor>`，把帧交给 `job-log` 的同一 reducer，`stream-end` 后 `close()`，`error` 时按 `CONNECTING`/`CLOSED` 区分“自动重连/手动重试”，重连与手动重新同步都使用连续 `cursor` 而非最大 `seq`；运行 `cd web && npm run typecheck` 通过
 - [x] 5.3 新增 `web/src/views/JobPanel.vue` 并在 `web/src/i18n.ts` 增加中英文案：显示 `jobId`、`runId`、状态、`attempts`、已提交/总步数、副作用计数与事件日志，提供开始、取消、重新连接与“这是连通性自检，不产生推演结论”的说明；在 `WorkbenchView.vue` 挂载到共享上下文栏与图谱布局工具条入口（三种布局、五个阶段都可打开），开始/取消时只更新面板状态、不改动路由；运行 `cd web && npm run typecheck && npm run build` 通过
+- [ ] 5.5 修正面板错误状态：SSE 重连提示优先于轮询错误，读取成功后清空轮询错误并保留日志与游标；`web/tests/job-panel-state.test.mjs` 覆盖“断线重连不被 503 覆盖”“成功后无提示”“终态优先”
+- [ ] 5.6 首次任务列表读取失败时提供“重试读取”按钮（`data-action="retry-list"`），只发 GET `/jobs`，成功后恢复已有任务、日志与副作用计数且不改动 URL；在浏览器注入一次列表 503 后验证
 - [x] 5.4 实现面板五种状态提示（SSE 中断 / worker 中断 / 任务失败 / 任务取消 / 服务不可用）与**从可测起点计算**的时限文案（断开后 3 秒内提示、网络恢复时刻起 10 秒内 `cursor == lastSeq`、租约到期后 2 秒内 `awaitingTakeover`、终态事件写入后 2 秒内出现、503 沿用 5 秒），确保连接中断不显示失败、worker 中断不显示取消、失败与取消不显示成功；在浏览器逐项触发并记录实际耗时，写入任务 8 的待签收清单（此任务不写 `docs/acceptance/`）
 
 ## 6. 自动化验收与 CHANGE 选择器

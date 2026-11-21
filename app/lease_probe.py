@@ -204,6 +204,121 @@ async def mode_counts(project_id: uuid.UUID) -> dict[str, Any]:
     return {"mode": "counts", "jobs": jobs, "runs": runs}
 
 
+async def _lease_wait_case(
+    project_id: uuid.UUID, operation: str
+) -> dict[str, Any]:
+    """请求在到期前开始、在锁等待中跨过到期点：不得续租、不得写入。"""
+    lease_head = 0.8
+    async with SessionLocal() as db:
+        job_id, run_id = await _create_probe_job(
+            db,
+            project_id=project_id,
+            operation_key=f"lease-wait-{operation}-{uuid.uuid4().hex[:8]}",
+        )
+        claim = await worker_service.claim_next(
+            db, worker_id="probe-lease", lease_seconds=lease_head, job_id=job_id
+        )
+    if claim is None:
+        raise RuntimeError("锁等待探针任务未被领取")
+
+    async with SessionLocal() as admin, SessionLocal() as contender, SessionLocal() as observer:
+        await admin.execute(
+            text("SELECT id FROM jobs WHERE id = :job_id FOR UPDATE"),
+            {"job_id": job_id},
+        )
+        expiry = (
+            await admin.execute(
+                text("SELECT lease_expires_at FROM jobs WHERE id = :job_id"),
+                {"job_id": job_id},
+            )
+        ).scalar_one()
+
+        started, pid = (
+            await contender.execute(
+                text("SELECT clock_timestamp(), pg_backend_pid()")
+            )
+        ).one()
+        if not started < expiry:
+            raise RuntimeError("探针起点已越过租约到期时间")
+
+        if operation == "heartbeat":
+            request = worker_service.heartbeat(contender, claim, lease_seconds=6.0)
+        else:
+            request = worker_service.commit_step(
+                contender, claim, step=1, lease_seconds=6.0
+            )
+        task = asyncio.create_task(request)
+
+        waited = False
+        for _ in range(50):
+            blocked = (
+                await observer.execute(
+                    text("SELECT cardinality(pg_blocking_pids(:pid))"),
+                    {"pid": pid},
+                )
+            ).scalar_one()
+            if blocked:
+                waited = True
+                break
+            await asyncio.sleep(0.02)
+        if not waited:
+            raise RuntimeError("未观察到行锁等待")
+
+        remaining = (expiry - started).total_seconds()
+        await asyncio.sleep(max(remaining, 0) + 0.4)
+        released = (
+            await admin.execute(text("SELECT clock_timestamp()"))
+        ).scalar_one()
+        if not released > expiry:
+            raise RuntimeError("释放锁时租约尚未到期")
+        await admin.commit()
+        actual = await task
+
+    async with SessionLocal() as check:
+        steps, events, expiry_final = (
+            await check.execute(
+                text(
+                    "SELECT j.next_step, "
+                    "(SELECT COUNT(*) FROM run_events WHERE run_id = :run_id), "
+                    "j.lease_expires_at "
+                    "FROM jobs j WHERE j.id = :job_id"
+                ),
+                {"run_id": run_id, "job_id": job_id},
+            )
+        ).one()
+        await _drop_probe_job(check, [job_id], [run_id])
+
+    actual_value = actual if isinstance(actual, bool) else actual.kind
+    expected = False if operation == "heartbeat" else "lost"
+    return {
+        "operation": operation,
+        "job_id": str(job_id),
+        "run_id": str(run_id),
+        "blocked_on_row": waited,
+        "started": started.isoformat(),
+        "expires": expiry.isoformat(),
+        "unlock_time": released.isoformat(),
+        "actual": actual_value,
+        "expected": expected,
+        "steps": int(steps),
+        "events": int(events),
+        "expiry_extended": expiry_final > expiry,
+        "ok": actual_value == expected and int(steps) == 0 and int(events) == 0 and expiry_final <= expiry,
+    }
+
+
+async def mode_lease_wait(project_id: uuid.UUID) -> dict[str, Any]:
+    cases = [
+        await _lease_wait_case(project_id, "heartbeat"),
+        await _lease_wait_case(project_id, "commit_step"),
+    ]
+    return {
+        "mode": "lease-wait",
+        "cases": cases,
+        "ok": all(case["ok"] for case in cases),
+    }
+
+
 async def mode_takeover(job_id: uuid.UUID) -> dict[str, Any]:
     """旧令牌在接手后不能续租，也不能写第 6 步。"""
     lease = settings.job_lease_seconds
@@ -354,6 +469,8 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
         return await mode_two_jobs(uuid.UUID(args.project_id))
     if args.mode == "takeover":
         return await mode_takeover(uuid.UUID(args.job_id))
+    if args.mode == "lease-wait":
+        return await mode_lease_wait(uuid.UUID(args.project_id))
     if args.mode == "cancel-race":
         return await mode_cancel_race(uuid.UUID(args.project_id), trials=args.trials)
     raise SystemExit(f"未知模式：{args.mode}")
@@ -364,13 +481,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--mode",
         required=True,
-        choices=("two-jobs", "counts", "takeover", "cancel-race"),
+        choices=("two-jobs", "counts", "takeover", "cancel-race", "lease-wait"),
     )
     parser.add_argument("--project-id", default=None)
     parser.add_argument("--job-id", default=None)
     parser.add_argument("--trials", type=int, default=5)
     args = parser.parse_args(argv)
-    if args.mode in ("counts", "two-jobs", "cancel-race") and not args.project_id:
+    if args.mode in ("counts", "two-jobs", "cancel-race", "lease-wait") and not args.project_id:
         parser.error("该模式需要 --project-id")
     if args.mode == "takeover" and not args.job_id:
         parser.error("takeover 模式需要 --job-id")

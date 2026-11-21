@@ -38,7 +38,7 @@ WITH candidate AS (
             OR (
                 status = 'running'
                 AND lease_expires_at IS NOT NULL
-                AND lease_expires_at <= now()
+                AND lease_expires_at <= clock_timestamp()
             )
            )
        AND (CAST(:job_id AS uuid) IS NULL OR id = CAST(:job_id AS uuid))
@@ -50,7 +50,7 @@ UPDATE jobs j
    SET status = 'running',
        lease_owner = :worker_id,
        lease_token = gen_random_uuid(),
-       lease_expires_at = now() + make_interval(secs => %s),
+       lease_expires_at = clock_timestamp() + make_interval(secs => %s),
        attempts = attempts + 1,
        started_at = COALESCE(started_at, now()),
        updated_at = now()
@@ -133,35 +133,57 @@ async def claim_next(
 
 
 async def heartbeat(db: AsyncSession, claim: Claim, *, lease_seconds: float) -> bool:
-    """续租；租约已过期或令牌不符时返回 False（过期心跳不能续活）。"""
-    result = await db.execute(
-        text(
-            "UPDATE jobs SET lease_expires_at = now() + make_interval(secs => "
-            + LEASE_SECONDS_PARAM
-            + "), updated_at = now() "
-            "WHERE id = :job_id AND lease_token = :lease_token "
-            "AND status = 'running' AND lease_expires_at > now() "
-            "RETURNING id"
-        ),
-        {
-            "job_id": claim.job_id,
-            "lease_token": claim.lease_token,
-            "lease_seconds": lease_seconds,
-        },
-    )
-    alive = result.first() is not None
-    await db.commit()
-    if not alive:
-        logger.warning(
-            "租约续期被拒绝 job_id=%s attempt=%s", claim.job_id, claim.attempt
+    """续租；租约已过期或令牌不符时返回 False（过期心跳不能续活）。
+
+    必须先锁住任务行，再用单独的语句读取 ``clock_timestamp()``：事务内的 ``now()``
+    固定为事务开始时间，若请求在到期前开始、在持锁等待中跨过到期点，``now()`` 会让
+    过期心跳错误地续租。读取失败时整事务回滚，租约不被延长。
+    """
+    try:
+        locked = await db.execute(
+            text(
+                "SELECT status, lease_token, lease_expires_at FROM jobs "
+                "WHERE id = :job_id FOR UPDATE"
+            ),
+            {"job_id": claim.job_id},
         )
-    return alive
+        row = locked.first()
+        db_now = await _db_now(db)
+        if row is None or not _lease_valid(row, claim, db_now):
+            await db.rollback()
+            logger.warning(
+                "租约续期被拒绝 job_id=%s attempt=%s", claim.job_id, claim.attempt
+            )
+            return False
+        updated = await db.execute(
+            text(
+                "UPDATE jobs SET lease_expires_at = clock_timestamp() + make_interval("
+                "secs => " + LEASE_SECONDS_PARAM + "), updated_at = clock_timestamp() "
+                "WHERE id = :job_id AND lease_token = :lease_token "
+                "AND status = 'running' RETURNING id"
+            ),
+            {
+                "job_id": claim.job_id,
+                "lease_token": claim.lease_token,
+                "lease_seconds": lease_seconds,
+            },
+        )
+        alive = updated.first() is not None
+        if not alive:
+            await db.rollback()
+            return False
+        await db.commit()
+        return True
+    except DB_ERRORS:
+        await db.rollback()
+        raise
 
 
 async def _locked_job(db: AsyncSession, claim: Claim) -> object | None:
+    """锁住目标任务行；租约是否有效留到持锁后单独读时钟再判断。"""
     result = await db.execute(
         text(
-            "SELECT j.status, j.lease_token, (j.lease_expires_at > now()) AS lease_ok, "
+            "SELECT j.status, j.lease_token, j.lease_expires_at, "
             "j.next_step, r.total_steps, r.stage, r.fail_at_step, r.simulated_epoch "
             "FROM jobs j JOIN runs r ON r.id = j.run_id "
             "WHERE j.id = :job_id FOR UPDATE OF j"
@@ -171,15 +193,22 @@ async def _locked_job(db: AsyncSession, claim: Claim) -> object | None:
     return result.first()
 
 
-def _guard(row: object | None, claim: Claim) -> bool:
-    if row is None:
-        return False
+async def _db_now(db: AsyncSession) -> datetime:
+    """持锁之后读取真实数据库时钟；`now()` 是事务开始时间，不能用于本次判断。"""
+    result = await db.execute(text("SELECT clock_timestamp() AS db_now"))
+    return result.scalar_one()
+
+
+def _lease_valid(row: object, claim: Claim, db_now: datetime) -> bool:
+    """令牌、状态与到期时间三者同时满足才算持有租约。"""
     if row.status in TERMINAL_STATUSES:  # type: ignore[attr-defined]
         return False
+    expires_at = row.lease_expires_at  # type: ignore[attr-defined]
     return (
         row.status == "running"  # type: ignore[attr-defined]
         and row.lease_token == claim.lease_token  # type: ignore[attr-defined]
-        and bool(row.lease_ok)  # type: ignore[attr-defined]
+        and expires_at is not None
+        and expires_at > db_now
     )
 
 
@@ -195,7 +224,9 @@ async def commit_step(
         if row.status in TERMINAL_STATUSES:  # type: ignore[attr-defined]
             await db.rollback()
             return StepOutcome(str(row.status), int(row.next_step))  # type: ignore[attr-defined]
-        if not _guard(row, claim):
+        # 先锁定、再读实际时钟：跨过到期点的等待不能让旧租约继续写入。
+        db_now = await _db_now(db)
+        if not _lease_valid(row, claim, db_now):
             await db.rollback()
             return StepOutcome("lost", claim.next_step)
 
@@ -268,9 +299,9 @@ async def commit_step(
             updated = await db.execute(
                 text(
                     "UPDATE jobs SET next_step = :step, "
-                    "lease_expires_at = now() + make_interval(secs => "
+                    "lease_expires_at = clock_timestamp() + make_interval(secs => "
                     + LEASE_SECONDS_PARAM
-                    + "), updated_at = now() "
+                    + "), updated_at = clock_timestamp() "
                     "WHERE id = :job_id AND lease_token = :lease_token "
                     "AND status = 'running'"
                 ),
@@ -305,8 +336,9 @@ async def _finish(
     result = await db.execute(
         text(
             "UPDATE jobs SET status = :status, next_step = :next_step, "
-            "finished_at = now(), terminal_reason = :reason, lease_owner = NULL, "
-            "lease_token = NULL, lease_expires_at = NULL, updated_at = now() "
+            "finished_at = clock_timestamp(), terminal_reason = :reason, "
+            "lease_owner = NULL, lease_token = NULL, lease_expires_at = NULL, "
+            "updated_at = clock_timestamp() "
             "WHERE id = :job_id AND lease_token = :lease_token AND status = 'running'"
         ),
         {
