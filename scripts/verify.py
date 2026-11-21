@@ -2158,7 +2158,12 @@ def scenario_document_page_limit(
         )
         require(exact["status"] == "ready", "恰好 3 页应正常解析")
         over = upload_and_wait(
-            state, fixtures, "limit-4.pdf", fixtures.page_limit_over, "application/pdf"
+            state,
+            fixtures,
+            "limit-4.pdf",
+            fixtures.page_limit_over,
+            "application/pdf",
+            expect_ready=False,
         )
         require(over["status"] == "failed", "4 页应因超过上限失败")
         failure = over.get("failure") or {}
