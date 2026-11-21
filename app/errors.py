@@ -25,3 +25,15 @@ class AccountExists(Exception):
 
 class ProjectNotFound(Exception):
     """项目不存在、属于他人或 ID 非法，对外统一 404。"""
+
+
+class JobNotFound(Exception):
+    """任务不存在或不属于已解析项目，对外统一 404。"""
+
+
+class InvalidCursor(Exception):
+    """事件流游标非法，对外统一 400。"""
+
+
+class LeaseLost(Exception):
+    """本次领取的租约令牌已失效或任务已进入终态，调用方必须停止写入。"""

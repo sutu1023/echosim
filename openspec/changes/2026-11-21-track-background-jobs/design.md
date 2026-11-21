@@ -315,8 +315,10 @@ worker:
   build: { context: ., dockerfile: Dockerfile }
   image: echosim-skeleton:dev
   command: ["python", "-m", "app.worker"]
-  healthcheck:
-    disable: true                      # 镜像继承了访问 127.0.0.1:8080/livez 的探针，worker 无 HTTP 端口
+  healthcheck:                        # 覆盖（禁用）镜像继承的 /livez HTTP 探针
+    test: ["CMD", "python", "-c", "…心跳文件 mtime < 15s…"]
+    interval: 10s
+    start_period: 10s
   depends_on:
     db: { condition: service_healthy }
     app: { condition: service_healthy }   # 等迁移完成后才开始领取
@@ -324,7 +326,7 @@ worker:
   restart: unless-stopped
 ```
 
-worker 复用同一镜像，而 `Dockerfile` 的 `HEALTHCHECK` 访问 `127.0.0.1:8080/livez`；worker 不监听端口，若不显式 `healthcheck.disable: true` 会被永久标记为 unhealthy。显式禁用只作用于 worker，`app` 的探针保持不变。worker 也不对外发布端口，`docker compose up --wait` 对无探针的服务只要求 running。迁移由 `app` 启动时的 `python -m app.migrate` 完成，worker 依赖 `app: service_healthy` 避免“表还没建就领取”。`app` 不感知 `worker` 存在，因此 `docker compose stop worker` 只影响任务进度，不改变 `/health`、`/livez` 与容器身份。
+worker 复用同一镜像，而 `Dockerfile` 的 `HEALTHCHECK` 访问 `127.0.0.1:8080/livez`；worker 不监听端口，若不覆盖会被永久标记为 unhealthy。因此 worker 在 Compose 中**用自己的探针替换继承探针**：进程内每秒刷新 `/tmp/echosim-worker-heartbeat`，探针检查该文件 15 秒内被更新；这与任务进度无关，也不访问数据库。只覆盖 worker，`app` 的 `/livez` 探针保持不变。`make up` 的 `--wait` 需要每个服务都有可判定的健康状态，这也是不直接 `disable` 的原因。worker 不对外发布端口。迁移由 `app` 启动时的 `python -m app.migrate` 完成，worker 依赖 `app: service_healthy` 避免“表还没建就领取”。`app` 不感知 `worker` 存在，因此 `docker compose stop worker` 只影响任务进度，不改变 `/health`、`/livez` 与容器身份。
 
 ### 7. make verify 的 CHANGE 选择器
 

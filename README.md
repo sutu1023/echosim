@@ -141,6 +141,10 @@ echosim_session=<随机令牌>; HttpOnly; Path=/; SameSite=lax
 | `HEALTH_DB_TIMEOUT_SECONDS` | `4` | `/health` 数据库探测整体超时（秒），需保证 5 秒内返回 503 |
 | `SESSION_TTL_SECONDS` | `604800` | 服务端会话绝对有效期（秒），默认 7 天 |
 | `SESSION_COOKIE_SECURE` | `false` | 是否给会话 Cookie 添加 `Secure`；本地 HTTP 保持 `false` |
+| `JOB_LEASE_SECONDS` | `6` | 任务租约时长；到期后允许任意可用 worker 原子接手 |
+| `JOB_HEARTBEAT_SECONDS` | `2` | worker 执行中的续租间隔，必须小于租约时长 |
+| `WORKER_POLL_INTERVAL_SECONDS` | `0.25` | worker 空闲时领取任务的轮询间隔 |
+| `TEST_TASK_STEP_DELAY_MS` | `250` | 测试任务每步间隔（毫秒），仅用于连通性自检与放大验收窗口 |
 
 覆盖端口示例：
 
@@ -149,6 +153,73 @@ ECHOSIM_PORT=8090 make up
 ```
 
 `.env` 与 `.env.*`（`.env.example` 除外）已被 `.gitignore` 忽略，禁止提交任何真实凭据。
+
+## 后台任务与事件流
+
+`app` 只处理请求，长任务由独立 `worker` 容器执行；PostgreSQL 是队列与进度的唯一事实来源。当前只提供一个**测试任务**（连通性自检，10 步，不产生推演结论、不改变阶段进入条件）。
+
+### 接口
+
+所有接口都在当前用户自有项目下，先鉴权、再校验项目归属，最后解析任务与游标。
+
+| 方法 | 路径 | 说明 | 成功 | 失败 |
+| --- | --- | --- | --- | --- |
+| POST | `/api/projects/{projectId}/jobs` | 开始测试任务，请求体 `{"operation":"test-simulation","stage":"<阶段 slug>","failAtStep":null}` | 新建 `202`；同一项目同一操作已有活动任务时 `200` + `deduplicated:true`，返回同一 `jobId`/`runId` | 401 / 404 / 422 / 503 |
+| GET | `/api/projects/{projectId}/jobs` | 最近 20 个任务 | `200 {"jobs":[…]}` | 401 / 404 / 503 |
+| GET | `/api/projects/{projectId}/jobs/{jobId}` | 任务详情（含 `attempts`、`stepsApplied`、`awaitingTakeover`） | `200` | 401 / 404 项目或任务不存在 / 503 |
+| POST | `/api/projects/{projectId}/jobs/{jobId}/cancel` | 取消；`queued` 立即生效，`running` 在下一步边界生效 | `200 {job, cancelApplied}`，终态任务 `cancelApplied:false` | 401 / 404 / 503 |
+| GET | `/api/projects/{projectId}/jobs/{jobId}/events` | 事件流。默认 SSE；`format=json` 返回同游标的补发结果 | `200` | 400 游标非法 / 401 / 404 / 503 |
+| GET | `/api/projects/{projectId}/jobs/{jobId}/effects` | 测试副作用计数（总数、去重步骤号） | `200` | 401 / 404 / 503 |
+
+### 状态与租约
+
+| 起点 | 触发 | 终点 | 同时发生 |
+| --- | --- | --- | --- |
+| （无） | 开始，且无活动任务 | `queued` | 插入 `runs` + `jobs`，不写事件 |
+| （无） | 开始，但已有活动任务 | 不变 | 返回既有 `jobId`/`runId`，不新增 job/run |
+| `queued` | worker 领取 | `running` | `attempts+1`，生成新租约令牌 |
+| `running` | 第 1–9 步提交 | `running` | 副作用 + `progress` 事件 + `next_step` |
+| `running` | 第 10 步提交 | `succeeded` | 副作用 + `completed` 事件（同一事务） |
+| `running` | 受控失败于第 N 步 | `failed` | `failed` 事件 `seq=N`，不写第 N 步副作用 |
+| `running` | 取消 | `canceled` | `canceled` 事件 `seq = 最后已提交 seq + 1` |
+| `running` | 租约过期 | 仍为 `running` | 查询返回 `awaitingTakeover:true`；下一次领取原子接手 |
+| 终态 | 任何请求 | 不变 | 取消返回现状；允许开始新任务（新 `jobId`/`runId`，`seq` 从 1） |
+
+- 所有进度、续租与终态写入都限定 `jobId` 与本次领取的租约令牌，并用数据库时间判断租约；旧 worker 恢复后续租和写入都会被拒绝。
+- 只有一个 worker 且它停止时，没有进程会改写任务行；租约到期后由查询暴露 `awaitingTakeover`，重启 worker 即可接手。
+- “做到第几步”的唯一依据是 `run_steps` 与 `jobs.next_step`，两者与事件在同一事务提交。
+
+### 事件与 SSE
+
+事件字段固定为 `runId`、`seq`、`type`、`stage`、`simulatedAt`、`payload`；`seq` 在同一 run 内从 1 递增。确定性测试任务共 10 条业务事件：`seq=1..9` 为 `progress`，`seq=10` 为 `completed`（终态事件计入），心跳与 `stream-end` 不计入。
+
+```text
+retry: 1000
+
+id: <runId>:4
+event: run-event
+data: {"runId":"…","seq":4,"type":"progress","stage":"dual-platform-run","simulatedAt":"2026-11-21T09:03:00Z","payload":{"step":4,"stepsApplied":4,"totalSteps":10}}
+
+: keep-alive
+
+event: stream-end
+data: {"runId":"…","lastSeq":10,"terminal":true}
+```
+
+- 游标 = 客户端已完整处理的最后一个连续 `seq`。无游标视为 0；合法范围 `0..当前最大 seq`：`after=4`（最大为 4）继续等待第 5 条，`after=5` 返回 `400 {"detail":"游标无效"}`。
+- `Last-Event-ID: <runId>:7` 优先于 `after`；跨 run 或格式非法的游标返回 400，且鉴权与归属校验始终先于游标校验。
+- 终态任务用 `after=<lastSeq>` 订阅也会先补发（可能为空）再立即收到 `stream-end` 并关闭，不会挂起。
+- 事件先落库再推送；断线期间事件照常写入，重连按游标补齐。前端用一个 reducer 按 `(runId, seq)` 去重、以连续游标重连，遇到缺口先暂存并提示重新同步。
+
+### worker
+
+```bash
+docker compose logs -f worker        # 领取、续期、接手、终态日志（含 jobId/attempt）
+docker compose stop worker           # 只停执行，不影响 /health 与 /livez
+docker compose start worker          # 租约到期后自动接手未完成任务
+```
+
+worker 复用同一镜像但没有 HTTP 端口，因此 Compose 用“心跳文件 15 秒内更新”的探针**替换**镜像继承的 `/livez` 探针；`app` 的探针保持不变。worker 不对外发布端口。
 
 ## 数据库迁移
 
@@ -174,6 +245,8 @@ make verify
 - 账户与隔离场景：幂等准备两个验收账号 A/B；A 登录并创建唯一命名项目、列表与详情可见；仅凭显式注入的 Cookie（服务端会话测试）可访问；停库期间无 Cookie 返回 401、有 Cookie 返回 503 且不清除 Cookie；恢复后原 Cookie 仍可用；A 退出后旧 Cookie 返回 401；B 的列表与历史不含 A 的项目；B 访问 A 的项目 ID 与随机 UUID 得到相同的 404；A 重新登录后仍能打开原项目。
 - 控制台与工作台路由场景：`/`、`/projects` 与五条工作台阶段深链接均返回 200 且包含 `EchoSim`；`/api/projects` 仍返回 JSON 与既有状态码，没有被 SPA 回退吞掉。
 - 查询参数回归：`web/tests/stage-links.test.mjs` 用 `node --test` 断言阶段链接显式保留 `layout` 与 `lang`，覆盖“报告 `graph/en` → 深度互动 → 后退回报告”的 URL 构造。
+- 任务底座场景（默认执行）：开始返回 202 与 `jobId`/`runId`、确定性任务到 `succeeded` 且事件 1–10、匿名任务接口全部 401、B 的任务与事件与不存在项目同为 404、停库期间带 Cookie 返回 503 且不清 Cookie、只停 worker 时 `/health` 与 `/livez` 仍为 200 且 `app` 容器身份不变。
+- 任务变更专属场景（`make verify CHANGE=2026-11-21-track-background-jobs`）：真实 PostgreSQL 下两个任务互不影响、并发开始只新增一对 job/run、读到第 4 条后断开并以游标补到第 10 条（两段序号分别记录）、`Last-Event-ID` 优先、终态 `after=lastSeq` 立即结束、worker 中断后接手、旧租约令牌续租与写第 6 步被拒、运行中取消（3 步后 `seq=4`）、受控失败（`failAtStep=3` 持久化后仍生效）、终态后新任务、取消与最后一步竞态只留一个终态。
 
 > HTTP 200 加 `EchoSim` HTML 只证明 SPA 入口可达。阶段内容、布局、语言、截图与浏览器后退行为以实际浏览器结果为准。
 
@@ -186,7 +259,10 @@ make verify
 
 ```bash
 EXPECTED_SHA=$(git rev-parse HEAD) make verify
+EXPECTED_SHA=$(git rev-parse HEAD) make verify CHANGE=2026-11-21-track-background-jobs
 ```
+
+未注册的 `CHANGE` 会以退出码 2 结束，并在报告里写明原因。
 
 - 机器可读报告字段包括 `result`、`tested_sha`、`dirty`、`started_at`/`finished_at`、逐场景 `scenarios[]`、`acceptance_accounts`、`isolation_project` 与 `app` 容器身份。
 - CI 成功与失败运行都会上传 `verify-report-<sha>`；报告缺失会让工作流失败。可用手动触发执行受控失败演练：
@@ -212,6 +288,9 @@ CI 在干净检出上执行同一命令，并断言报告中的 `tested_sha` 等
 6. 停止数据库后打开工作台，确认显示“服务暂时不可用”且不清 Cookie；恢复数据库后点击重试回到外壳就绪。缺少前置条件与 503 的文案必须可区分。
 7. 用 B 账号确认项目列表与历史均没有 A 的项目；访问 A 的项目详情与工作台，页面应与随机不存在 ID 一样显示“项目不存在”。
 8. 保留 Change 02 回归：刷新保持登录、关闭重开浏览器需重新登录、退出后旧会话失效、重新登录仍能打开原项目。
+9. 在工作台任一阶段的“测试任务”面板开始任务：日志应先出现 1–4，随后在浏览器 DevTools 中断网（或停掉网络），确认出现“连接已中断，正在从第 N 条重连”；恢复网络后从网络恢复时刻起 10 秒内补齐到 10 条且无重复（记录两段实际序号）。
+10. 任务执行中 `docker compose stop worker`：确认面板在租约到期后出现“执行进程已中断，任务等待接手”，界面不显示失败或取消；`docker compose start worker` 后 10 秒内继续出事件并到终态，`attempts` 变大而日志仍为 1–10。
+11. 分别触发受控失败（`failAtStep=3`）与运行中取消，确认面板分别显示“测试任务失败”和“已取消（第 N 步之后）”，终态来自持久化事件；切换阶段、布局与语言后开始/取消任务，确认地址中的项目、阶段、`layout`、`lang` 均未改变。
 
 人工验收记录放在 [`docs/acceptance/`](docs/acceptance/README.md)，与被 CI 上传的 `runtime/verify/` 产物严格分离；Pi 验收技能见 [`.pi/skills/echosim-acceptance/SKILL.md`](.pi/skills/echosim-acceptance/SKILL.md)。
 
@@ -220,7 +299,9 @@ CI 在干净检出上执行同一命令，并断言报告中的 `tested_sha` 等
 ```
 app/                 FastAPI 后端（配置、数据库、健康检查、鉴权、迁移、静态托管）
 app/migrations/      SQL 迁移（前向执行）
-app/services/        账户、会话、项目与历史服务（含统一归属校验）
+app/services/        账户、会话、项目、历史与任务服务（含统一归属校验、worker 执行层）
+app/worker.py        worker 进程入口（无 HTTP 端口）
+app/lease_probe.py   验收专用租约/竞态探针（仅 make verify 调用）
 app/routers/         HTTP 路由
 web/                 Vue 3 + TypeScript + Vite 前端
 tests/               Python 单元测试（unittest）
@@ -257,6 +338,13 @@ docker compose exec -T app python -m app.migrate
 ```
 
 **登录返回 401**：确认邮箱已在容器内创建（`make user`），且密码与创建时一致；错误邮箱与错误密码的响应刻意相同。若刚执行过 `--update-password`，旧会话会失效，需要重新登录。
+
+**任务一直停在排队/等待接手**：确认 worker 容器状态与日志；worker 停止或崩溃时任务不会被伪造为成功。
+
+```bash
+docker compose ps worker
+docker compose logs worker --tail=50
+```
 
 **`/health` 返回 503**：查看数据库容器状态与日志。
 

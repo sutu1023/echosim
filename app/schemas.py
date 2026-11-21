@@ -1,13 +1,24 @@
-"""请求体校验：邮箱、密码与项目字段。"""
+"""请求体校验：邮箱、密码、项目字段与测试任务参数。"""
 
 from __future__ import annotations
 
-from pydantic import BaseModel, field_validator
+from typing import Literal
+
+from pydantic import BaseModel, Field, field_validator
 
 from .security import normalize_email, validate_email
 
 PROJECT_NAME_MAX_LENGTH = 80
 PROJECT_DESCRIPTION_MAX_LENGTH = 500
+
+STAGE_SLUGS = (
+    "evidence-graph",
+    "roles-environment",
+    "dual-platform-run",
+    "report",
+    "interaction",
+)
+TEST_TOTAL_STEPS = 10
 
 
 class LoginRequest(BaseModel):
@@ -56,3 +67,17 @@ class ProjectCreateRequest(BaseModel):
                 f"项目描述长度不能超过 {PROJECT_DESCRIPTION_MAX_LENGTH} 字符"
             )
         return stripped
+
+
+class JobStartRequest(BaseModel):
+    """测试任务开始参数；operation 与 stage 都是封闭枚举。"""
+
+    operation: Literal["test-simulation"]
+    stage: Literal[
+        "evidence-graph",
+        "roles-environment",
+        "dual-platform-run",
+        "report",
+        "interaction",
+    ]
+    failAtStep: int | None = Field(default=None, ge=1, le=TEST_TOTAL_STEPS)

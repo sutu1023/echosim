@@ -998,3 +998,103 @@ button:disabled {
     margin-top: 0.25rem;
   }
 }
+
+/* 测试任务面板：只承载连通性自检，不参与阶段内容状态。 */
+.job-panel h2 {
+  margin-bottom: 4px;
+}
+
+.job-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 10px 0;
+}
+
+.job-banner {
+  margin: 8px 0;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--border, #d8dbe2);
+  background: rgba(240, 180, 60, 0.12);
+  font-size: 0.9rem;
+}
+
+.job-banner[data-kind='failed'] {
+  border-color: #c0392b;
+  background: rgba(192, 57, 43, 0.1);
+}
+
+.job-banner[data-kind='canceled'] {
+  border-color: #7f8c8d;
+  background: rgba(127, 140, 141, 0.12);
+}
+
+.job-banner[data-kind='service'] {
+  border-color: #c0392b;
+  background: rgba(192, 57, 43, 0.08);
+}
+
+.job-meta {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px 12px;
+  margin: 10px 0;
+  font-size: 0.85rem;
+}
+
+.job-meta dt {
+  color: var(--muted, #6b7280);
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.job-meta dd {
+  margin: 2px 0 0;
+  word-break: break-all;
+}
+
+.job-meta code {
+  font-size: 0.72rem;
+}
+
+.job-log ol {
+  max-height: 220px;
+  overflow-y: auto;
+  margin: 8px 0;
+  padding-left: 0;
+  list-style: none;
+  font-size: 0.8rem;
+}
+
+.job-log li {
+  display: grid;
+  grid-template-columns: 48px 84px 1fr auto;
+  gap: 6px;
+  align-items: baseline;
+  padding: 3px 0;
+  border-bottom: 1px dashed rgba(0, 0, 0, 0.08);
+}
+
+.job-seq {
+  font-variant-numeric: tabular-nums;
+  color: var(--muted, #6b7280);
+}
+
+.job-type[data-type='completed'] {
+  color: #1e8449;
+}
+
+.job-type[data-type='failed'] {
+  color: #c0392b;
+}
+
+.job-type[data-type='canceled'] {
+  color: #7f8c8d;
+}
+
+.job-log time {
+  font-size: 0.7rem;
+  white-space: nowrap;
+}

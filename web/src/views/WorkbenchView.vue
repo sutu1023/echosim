@@ -2,6 +2,7 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { RouterLink, useRoute, useRouter } from 'vue-router'
 import { api, ApiError, type Project } from '../api'
+import JobPanel from './JobPanel.vue'
 import { checkHealth, healthState } from '../health'
 import { messagesFor } from '../i18n'
 import { markLoggedOut } from '../session'
@@ -404,6 +405,11 @@ onBeforeUnmount(() => {
           class="wb-context"
           :class="{ 'wb-context--drawer': layout === 'graph' }"
         >
+          <JobPanel
+            :project-id="project.id"
+            :stage="currentStage.slug"
+            :lang="lang"
+          />
           <section class="context-card card">
             <h2>{{ t.context.materialsTitle }}</h2>
             <p class="muted">{{ t.context.materialsBody }}</p>

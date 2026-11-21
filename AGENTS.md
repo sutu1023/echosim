@@ -22,8 +22,10 @@
 | --- | --- |
 | `app/` | FastAPI 后端：配置、数据库、健康检查、鉴权、迁移、静态托管 |
 | `app/migrations/` | 前向 SQL 迁移，版本记录在 `schema_migrations` |
-| `app/services/` | 账户、会话、项目与历史服务；项目归属校验的唯一入口 |
+| `app/services/` | 账户、会话、项目、历史与任务服务；项目归属校验与租约执行的唯一入口 |
 | `app/routers/` | HTTP 路由，只做参数校验、依赖注入与异常映射 |
+| `app/worker.py` | 独立 worker 进程入口（无 HTTP 端口，只从数据库领取任务） |
+| `app/lease_probe.py` | 验收专用租约/终态竞态探针，仅由 `make verify CHANGE=…` 调用 |
 | `web/` | Vue 前端源码与构建配置；`web/dist` 为构建产物（不提交） |
 | `tests/` | Python 单元测试（`unittest`） |
 | `scripts/verify.py` | 可重复验收脚本，仅用 Python 标准库 |
@@ -57,6 +59,23 @@ make user EMAIL=a@example.com  # 从标准输入读取密码，创建/更新账�
 - 健康检查不得回显 DSN、凭据、堆栈或内部主机名；日志只记录异常类型。
 - 每次 `/health` 请求必须确定请求 ID：合法 `X-Request-ID`（1–64 位字母、数字、`.`、`_`、`:`、`-`）复用，缺失或非法时生成随机值；响应头回显该 ID，探测失败日志记录 `request_id`，响应体契约保持不变。
 - 探测路径只读：除 `SELECT 1` 外不得执行任何写操作或修改状态。
+
+## 后台任务与事件流
+
+- PostgreSQL 是任务队列、进度与事件的唯一事实来源；`app` 不得在请求内执行长任务，长任务只能由独立 `worker` 进程执行。
+- 任务状态只有 `queued`、`running`、`succeeded`、`failed`、`canceled` 五种；`succeeded`/`failed`/`canceled` 为终态，只能以先提交事务的结果为准。
+- 只有一份“做到第几步”的权威来源：`run_steps` 与 `jobs.next_step`，二者必须与该步事件在同一事务提交。
+- 每次领取必须生成新的 `lease_token`；所有进度、续租、取消与终态写入必须同时限定 `jobId` 与该令牌，并用数据库时间判断租约是否有效。旧令牌的续租与写入必须被拒绝。
+- 不依赖“归还扫描”进程：只有一个 worker 且它停止时，持久状态可以保持 `running`，由查询按 `lease_expires_at <= now()` 返回 `awaitingTakeover`；领取语句必须能原子接手“`queued` 或租约已过期的 `running`”。
+- 同一项目同一操作的活动任务最多一个；两个并发开始必须得到一个 202 与一个 200，且只新增一对 job/run（冲突路径整体回滚，不得留下孤立 run）。
+- 事件必须先与业务变更同事务落库再推送；`seq` 在同一 run 内从 1 连续递增，`(run_id, seq)` 唯一，终态事件计入序号，SSE 心跳与 `stream-end` 不计入。
+- SSE `id` 固定为 `<runId>:<seq>`；游标是“已完整处理的最后一个连续 seq”，合法范围 `0..当前最大 seq`，`Last-Event-ID` 优先于 `after`，非法游标返回 400 JSON。
+- SSE 必须在发送任何事件字节前完成鉴权、项目归属、任务归属与游标校验；失败返回 JSON，不得建立事件流。
+- 任意事件流实现都不得在 `app` 常驻进程中引入第二条数据库事实来源；通知/轮询只作为唤醒手段。
+- worker 复用同一镜像但无 HTTP 端口：Compose 必须覆盖（禁用）镜像继承的 `/livez` 探针，改用 worker 自己的存活探针；不得因此改变 `app` 的探针。
+- worker 停止、崩溃或重启不得改变 `/health`、`/livez` 语义与 `app` 容器身份；任务可观察性通过 `awaitingTakeover`、`attempts` 与 worker 日志表达。
+- 任务与事件流接口必须复用 `app/services/projects.py` 的 `resolve_owned_project`；他人项目、不存在项目与非法 ID 对外表现一致。
+- 测试任务必须明确标注为连通性自检，不得写入阶段业务数据、不得让阶段显示完成；材料入库、真实推演与案例回放属于后续变更。
 
 ## 控制台与工作台地址
 
@@ -94,6 +113,9 @@ make user EMAIL=a@example.com  # 从标准输入读取密码，创建/更新账�
 - 验收结论必须绑定被测 Git SHA；`runtime/verify/last-run.json` 的 `tested_sha` 必须等于执行时的 `HEAD`。
 - `make verify` 必须保留 Change 01 的故障恢复与进程身份场景，并包含 A/B 双账号隔离路径：登录、创建、列表、详情、停库鉴权边界、退出失效、他人不可见、重新登录仍可见；准备账号与命名项目必须幂等，连续两次执行都要通过。
 - `make verify` 还必须验证 `/`、`/projects` 与五条工作台阶段深链接返回 `EchoSim` HTML，并断言 `/api/*` 未被 SPA 回退吞掉；阶段链接的 `layout`/`lang` 保留由 `cd web && npm test` 覆盖。
+- `make verify` 必须包含任务底座场景：开始 202、状态查询、确定性任务成功且事件 1–10、匿名 401、他人 404、停库 503 保留 Cookie、只停 worker 时 `/health`/`/livez` 不变。
+- `make verify CHANGE=2026-11-21-track-background-jobs` 必须在同一 SHA 上追加：真实 SSE 两段序号（1–4 与 5–10）、`Last-Event-ID` 优先、终态重连立即结束、并发开始只新增一对 job/run、worker 中断接手、真实 PostgreSQL 旧令牌拒绝回归、取消（含 `canceled seq=4`）、受控失败与取消/完成竞态。未注册的 `CHANGE` 必须以退出码 2 结束。
+- 报告必须在 `job_evidence` 中记录 `jobId`、`runId`、两段序号、接手前后 `attempts`、副作用计数与旧令牌结果；页面提示、布局、语言与断线时序仍只写入 `docs/acceptance/`。
 - 工作树存在未忽略改动时 `make verify` 默认拒绝执行；仅在本地调试时可用 `ALLOW_DIRTY=1`，此时报告记录 `dirty: true`，**不得**作为干净克隆证据。
 - CI 必须调用与本地相同的 `make verify`，并断言报告 `tested_sha` 等于触发 SHA；不得在 CI 中重复实现验收逻辑。
 - CI 成功与失败运行都必须上传报告，产物缺失即视为配置错误；使用 `gh workflow run verify -f expected_sha=<错误 SHA>` 执行受控失败演练，验证失败路径与失败报告。
