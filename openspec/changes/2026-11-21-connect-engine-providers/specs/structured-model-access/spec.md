@@ -172,6 +172,12 @@
 - **AND** `providerErrorCode` 留空，因为 1010 不在明确的 `error.code` 或 `error_code` 位置
 - **AND** 实际 HTTP 调用次数为 1
 
+#### Scenario: 纯文本错误码与邮政编码
+
+- **WHEN** 模型端点返回 HTTP 403 和纯文本响应
+- **THEN** 显式的 `error code: 1010` 归类为 `edge_blocked` 并记录 `1010`
+- **AND** 仅有 `Postal code: 1010` 的响应归类为 `auth_failed` 并留空供应商错误码
+
 #### Scenario: 未知或被回显的供应商错误码不回显
 
 - **WHEN** 供应商把假 Key 或其他未知字符串回显到 `error.code`

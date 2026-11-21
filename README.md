@@ -294,6 +294,8 @@ make smoke-live
 
 模型首次请求使用 `model`、`messages` 与 `response_format={"type":"json_object"}`，并固定发送 `User-Agent: EchoSim/0.1.0`；正常调用、移除参数重试与网络重试都使用同一 User-Agent。字段、类型、UTF-16 偏移、原文引用与运行标识由 EchoSim 校验。只有上游 400/422 明确指出不支持 `response_format` 时才移除参数重试一次；所有重试与 SDK 内置重试共用 30 秒、最多 2 次实际 HTTP 请求的预算。
 
+使用 OpenCode Go 的订阅端点时，模型客户端以本次运行标识设置 `x-opencode-session`，同次重试复用该标识。
+
 模型项报告保留精确 `httpStatus` 与兼容字段 `httpStatusClass`；HTTP 402 归类为 `billing_required`，403 且明确 `error.code`/`error_code` 为 1010 时归类为 `edge_blocked`，401 与普通 403 保持 `auth_failed`。这些错误均只调用一次。`providerErrorCode` 只记录允许列表内的 `1010` 与 `insufficient_quota`；未知值或被回显的字符串留空。普通 403 只在无关元数据中出现 1010 时仍为 `auth_failed`。报告不保存密钥、请求头全集或原始响应正文。
 
 图谱使用 `graph.episode.add` 写入固定 `graph_uuid`，每次运行生成不同 `runId` 与唯一 `idempotency_key`；同一次逻辑写入的重试复用原键、原图谱与原请求体。保存服务端返回的 episode UUID，再用 `graph.search_episodes` 核对 UUID、运行标识与唯一事实。写入响应丢失时，搜索未命中不能作为换键重写的依据；预算内仍无法确认则报告 `write_unconfirmed`。

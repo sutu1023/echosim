@@ -177,68 +177,30 @@ def _status_class(status: int) -> str:
     return f"{status // 100}xx"
 
 
-def _sanitize_provider_code(code: object) -> str | None:
-    if not isinstance(code, (str, int, float)):
-        return None
-    value = re.sub(r"[^A-Za-z0-9_.:-]+", "_", str(code))[:80]
-    return value or None
-
-
-def _explicit_provider_error_codes(body: str) -> list[str]:
-    """只从明确的 error 字段提取错误码，不扫描任意元数据。"""
+def _provider_error_code(body: str) -> str | None:
+    """只保留明确错误字段或纯文本错误标记中的已知代码。"""
     try:
         parsed = json.loads(body)
     except json.JSONDecodeError:
-        parsed = None
-
-    codes: list[str] = []
-    if isinstance(parsed, dict):
+        match = re.search(r"\berror\s+code\b\s*[:=]?\s*([a-zA-Z0-9_.:-]+)", body, re.I)
+        candidates = [match.group(1)] if match else []
+    else:
+        if not isinstance(parsed, dict):
+            return None
         error = parsed.get("error")
-        if isinstance(error, dict):
-            for key in ("code", "error_code"):
-                sanitized = _sanitize_provider_code(error.get(key))
-                if sanitized:
-                    codes.append(sanitized)
-        sanitized = _sanitize_provider_code(parsed.get("error_code"))
-        if sanitized:
-            codes.append(sanitized)
-    elif parsed is None:
-        match = re.search(
-            r"(?:error\s*code|code)\s*[:=]\s*([A-Za-z0-9_.:-]{1,80})",
-            body,
-            flags=re.IGNORECASE,
-        )
-        if match:
-            codes.append(match.group(1))
+        candidates = [error.get("code"), error.get("error_code")] if isinstance(error, dict) else []
+        candidates.append(parsed.get("error_code"))
 
-    unique: list[str] = []
-    for code in codes:
-        if code not in unique:
-            unique.append(code)
-    return unique
-
-
-def _provider_error_code(body: str) -> str | None:
-    """只返回已识别且可安全公开的错误码；未知值留空。"""
-    for code in _explicit_provider_error_codes(body):
-        if code in SAFE_PROVIDER_ERROR_CODES:
-            return code
+    for candidate in candidates:
+        if isinstance(candidate, (str, int)) and str(candidate) in SAFE_PROVIDER_ERROR_CODES:
+            return str(candidate)
     return None
 
 
-def _is_cloudflare_1010(body: str) -> bool:
-    if "1010" in _explicit_provider_error_codes(body):
-        return True
-    lowered = body.lower()
-    if "cloudflare" not in lowered:
-        return False
-    return re.search(r"(?:error\s*code|code)\s*[:=]?\s*1010\b", lowered) is not None
-
-
-def _failure_reason(status: int, response: HttpResponse) -> str:
+def _failure_reason(status: int, response: HttpResponse, provider_code: str | None) -> str:
     if status == 402:
         return "billing_required"
-    if status == 403 and _is_cloudflare_1010(response.body):
+    if status == 403 and provider_code == "1010":
         return "edge_blocked"
     if status in {401, 403}:
         return "auth_failed"
@@ -306,6 +268,8 @@ class ModelRunner:
             "Accept": "application/json",
             "User-Agent": USER_AGENT,
         }
+        if url == "https://opencode.ai/inference/go/openai/v1/chat/completions":
+            headers["x-opencode-session"] = f"ses_{material.run_id}"
         deadline = started + self.settings.model_timeout_seconds
         include_response_format = True
         fallback_used = False
@@ -381,16 +345,17 @@ class ModelRunner:
                 continue
             break
 
+        provider_code = _provider_error_code(last_response.body)
         return self._result(
             FAILED,
-            _failure_reason(last_status, last_response),
+            _failure_reason(last_status, last_response, provider_code),
             started,
             requests_used,
             include_response_format,
             fallback_used,
             retry_used,
             last_status,
-            provider_error_code=_provider_error_code(last_response.body),
+            provider_error_code=provider_code,
         )
 
     def _result(

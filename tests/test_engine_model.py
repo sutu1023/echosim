@@ -155,6 +155,26 @@ class ModelRunnerTests(unittest.TestCase):
     def setUp(self) -> None:
         self.material = build_acceptance_material("model-run")
 
+    def test_go_session_header_is_scoped_to_the_subscription_endpoint(self) -> None:
+        for base, expected in (
+            ("https://opencode.ai/inference/go/openai/v1", f"ses_{self.material.run_id}"),
+            ("https://opencode.ai/inference/openai/v1", None),
+            ("https://model.test.local/v1", None),
+        ):
+            with self.subTest(base=base):
+                sessions = []
+                responses = iter([HttpResponse(429), HttpResponse(200, valid_body(self.material))])
+
+                def record(url, headers, payload, timeout):
+                    sessions.append(headers.get("x-opencode-session"))
+                    return next(responses)
+
+                result = ModelRunner(
+                    settings(model_api_base_url=base), transport=record, sleep=lambda _: None
+                ).run(self.material)
+                self.assertEqual(result.status, "passed")
+                self.assertEqual(sessions, [expected, expected])
+
     def test_first_request_uses_json_object_and_model(self) -> None:
         transport = SequenceTransport([HttpResponse(200, valid_body(self.material))])
         result = ModelRunner(settings(), transport=transport).run(self.material)
@@ -342,6 +362,29 @@ class ModelRunnerTests(unittest.TestCase):
         self.assertEqual(result.evidence["httpStatus"], 403)
         self.assertIsNone(result.evidence["providerErrorCode"])
         self.assertEqual(result.calls.real, 1)
+
+    def test_403_postal_code_is_not_an_edge_error(self) -> None:
+        for body in (
+            "Forbidden. Postal code: 1010",
+            json.dumps({
+                "error": {"code": "forbidden"},
+                "metadata": {"gateway": "Cloudflare", "note": "Postal code: 1010"},
+            }),
+        ):
+            with self.subTest(body=body):
+                transport = SequenceTransport([HttpResponse(403, body)])
+                result = ModelRunner(settings(), transport=transport).run(self.material)
+                self.assertEqual(result.reason, "auth_failed")
+                self.assertEqual(result.evidence["httpStatus"], 403)
+                self.assertIsNone(result.evidence["providerErrorCode"])
+                self.assertEqual(len(transport.requests), 1)
+
+    def test_403_explicit_text_error_code_matches_report(self) -> None:
+        transport = SequenceTransport([HttpResponse(403, "error code: 1010")])
+        result = ModelRunner(settings(), transport=transport).run(self.material)
+        self.assertEqual(result.reason, "edge_blocked")
+        self.assertEqual(result.evidence["providerErrorCode"], "1010")
+        self.assertEqual(len(transport.requests), 1)
 
     def test_ordinary_403_keeps_auth_failed(self) -> None:
         transport = SequenceTransport([HttpResponse(403, "forbidden")])
