@@ -71,7 +71,8 @@ BINDING_COLUMNS = (
 BUILD_COLUMNS = (
     "b.id, b.project_id, b.run_id, b.question, b.phase, b.planned_episodes, "
     "b.accepted_episodes, b.confirmed_episodes, b.can_continue, b.failure_code, "
-    "b.failure_message, b.created_at, b.updated_at, b.finished_at, "
+    "b.failure_message, b.provider_calls_real, b.provider_calls_double, "
+    "b.created_at, b.updated_at, b.finished_at, "
     "j.id AS job_id, j.status AS job_status"
 )
 BUILD_SOURCE = "FROM graph_builds b JOIN jobs j ON j.run_id = b.run_id"
