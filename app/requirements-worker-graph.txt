@@ -1,0 +1,8 @@
+# 业务建图 worker 额外依赖（目标 Linux aarch64 / Python 3.11）
+# 只由 Dockerfile 的 worker-graph 目标安装；app 与 engine 镜像不读取本文件。
+# 直接依赖与 app 运行时的 Pydantic 版本保持一致，避免降级应用依赖。
+zep-cloud==4.1.0
+httpx==0.28.1
+pydantic==2.14.4
+pydantic-core==2.50.5
+typing_extensions==4.16.0

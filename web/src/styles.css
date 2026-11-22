@@ -1277,3 +1277,272 @@ button:disabled {
   overflow-wrap: anywhere;
   font-size: 0.82rem;
 }
+
+/* 证据图谱面板：等待索引、增量绘图、完成三态与 D3 画布。 */
+.evidence-graph {
+  min-width: 0;
+}
+
+.evidence-graph--max {
+  position: fixed;
+  inset: 0.5rem;
+  z-index: 60;
+  overflow: auto;
+  margin: 0;
+  background: #0b1224;
+  box-shadow: 0 24px 80px rgb(2 6 23 / 80%);
+}
+
+.evidence-graph .card-heading {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  align-items: flex-start;
+}
+
+.evidence-graph .card-heading h2 {
+  margin: 0 0 0.35rem;
+}
+
+.evidence-graph .card-heading p {
+  margin: 0;
+}
+
+.pill[data-phase='ready'] {
+  border-color: #15803d;
+  background: #14532d;
+  color: #bbf7d0;
+}
+
+.pill[data-phase='failed'] {
+  border-color: #b91c1c;
+  background: #7f1d1d;
+  color: #fecaca;
+}
+
+.graph-controls,
+.graph-progress,
+.graph-legend,
+.graph-next {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.65rem;
+  margin-top: 0.85rem;
+}
+
+.graph-controls button,
+.graph-next button {
+  margin-top: 0;
+}
+
+.graph-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  color: #cbd5e1;
+  font-size: 0.85rem;
+}
+
+.graph-form {
+  display: grid;
+  grid-template-columns: minmax(15rem, 1fr) minmax(16rem, 1.2fr) auto;
+  gap: 1rem;
+  align-items: end;
+  margin-top: 1rem;
+  padding: 0.85rem;
+  border: 1px solid #1e3a8a;
+  border-radius: 0.65rem;
+  background: #0b1224;
+}
+
+.graph-materials {
+  margin: 0;
+  padding: 0;
+  border: 0;
+  min-width: 0;
+}
+
+.graph-materials legend {
+  padding: 0;
+  color: #94a3b8;
+  font-size: 0.82rem;
+}
+
+.graph-material {
+  display: flex;
+  gap: 0.45rem;
+  align-items: center;
+  padding: 0.18rem 0;
+  font-size: 0.88rem;
+  word-break: break-all;
+}
+
+.graph-question {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  min-width: 0;
+  font-size: 0.85rem;
+  color: #94a3b8;
+}
+
+.graph-question textarea {
+  width: 100%;
+  padding: 0.45rem 0.55rem;
+  border: 1px solid #334155;
+  border-radius: 0.5rem;
+  background: #0f172a;
+  color: inherit;
+  font: inherit;
+  resize: vertical;
+}
+
+.graph-form .primary {
+  margin: 0;
+}
+
+.graph-progress {
+  font-size: 0.85rem;
+  color: #cbd5e1;
+}
+
+.graph-state-note {
+  margin: 0.75rem 0 0;
+}
+
+.graph-canvas-wrap {
+  position: relative;
+  min-height: 26rem;
+  margin-top: 0.75rem;
+  border: 1px solid #1e3a8a;
+  border-radius: 0.75rem;
+  background:
+    radial-gradient(circle at 30% 20%, rgb(37 99 235 / 16%), transparent 45%),
+    #0b1224;
+  overflow: hidden;
+}
+
+.evidence-graph--max .graph-canvas-wrap {
+  min-height: calc(100vh - 20rem);
+}
+
+.graph-canvas {
+  display: block;
+  width: 100%;
+  height: 26rem;
+}
+
+.evidence-graph--max .graph-canvas {
+  height: calc(100vh - 20rem);
+}
+
+.graph-placeholder {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  margin: 0;
+  pointer-events: none;
+}
+
+.graph-link {
+  stroke: #334155;
+  stroke-width: 1.6;
+}
+
+.graph-link--material {
+  stroke: #60a5fa;
+}
+
+.graph-link--hypothesis {
+  stroke: #f59e0b;
+  stroke-dasharray: 5 4;
+}
+
+.graph-link-label {
+  fill: #94a3b8;
+  font-size: 9px;
+  pointer-events: none;
+}
+
+.graph-node circle {
+  fill: #1d4ed8;
+  stroke: #93c5fd;
+  stroke-width: 1.6;
+}
+
+.graph-node--hypothesis circle {
+  fill: #92400e;
+  stroke: #fcd34d;
+}
+
+.graph-node-label {
+  fill: #f8fafc;
+  font-size: 9px;
+  pointer-events: none;
+}
+
+.legend-dot {
+  display: inline-block;
+  width: 0.6rem;
+  height: 0.6rem;
+  border-radius: 999px;
+  background: #60a5fa;
+}
+
+.legend-dot--hypothesis {
+  background: #f59e0b;
+}
+
+.graph-detail {
+  margin-top: 1rem;
+  padding: 0.85rem;
+  border: 1px solid #334155;
+  border-radius: 0.65rem;
+  background: #0b1224;
+}
+
+.graph-detail h3,
+.graph-detail h4,
+.graph-detail h5 {
+  margin: 0 0 0.4rem;
+}
+
+.graph-source-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+}
+
+.graph-source-list li {
+  padding-top: 0.55rem;
+  border-top: 1px solid #1e293b;
+}
+
+.graph-source-list blockquote {
+  margin: 0.25rem 0;
+  padding-left: 0.65rem;
+  border-left: 2px solid #2563eb;
+  color: #dbeafe;
+  font-size: 0.88rem;
+}
+
+.graph-next {
+  padding-top: 0.85rem;
+  border-top: 1px solid #1e293b;
+}
+
+.graph-next p {
+  margin: 0;
+}
+
+@media (max-width: 900px) {
+  .graph-form {
+    grid-template-columns: minmax(0, 1fr);
+    align-items: stretch;
+  }
+}

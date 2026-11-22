@@ -2,6 +2,7 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { RouterLink, useRoute, useRouter } from 'vue-router'
 import { api, ApiError, type Project } from '../api'
+import EvidenceGraphPanel from './EvidenceGraphPanel.vue'
 import JobPanel from './JobPanel.vue'
 import MaterialsPanel from './MaterialsPanel.vue'
 import { checkHealth, healthState } from '../health'
@@ -52,15 +53,21 @@ const stageContentState = computed(() =>
   resolveStageContentState(stageHasData),
 )
 
-const missingTitle = computed(() =>
-  currentStage.value?.id === 1
+const missingTitle = computed(() => {
+  if (currentStage.value?.id === 2) {
+    return t.value.empty.rolesTitle
+  }
+  return currentStage.value?.id === 1
     ? t.value.empty.materialsTitle
-    : t.value.empty.missingTitle,
-)
+    : t.value.empty.missingTitle
+})
 
 const missingBody = computed(() => {
   if (!currentStage.value) {
     return ''
+  }
+  if (currentStage.value.id === 2) {
+    return t.value.empty.rolesBody
   }
   if (currentStage.value.id === 1) {
     return t.value.empty.materialsBody
@@ -390,14 +397,20 @@ onBeforeUnmount(() => {
           </section>
 
           <MaterialsPanel
-            v-if="currentStage.id === 1"
+            v-if="currentStage.id === 1 && layout !== 'graph'"
             :project-id="project.id"
             :lang="lang"
             :document-id="documentId"
             @select="selectMaterial"
           />
 
-          <section v-else class="wb-empty card">
+          <EvidenceGraphPanel
+            v-if="currentStage.id === 1"
+            :project-id="project.id"
+            :lang="lang"
+          />
+
+          <section v-if="currentStage.id !== 1" class="wb-empty card">
             <h2>{{ missingTitle }}</h2>
             <p class="muted">{{ missingBody }}</p>
             <button type="button" class="primary" @click="continueStage">
@@ -405,12 +418,12 @@ onBeforeUnmount(() => {
             </button>
           </section>
 
-          <section v-if="layout !== 'workbench'" class="wb-summary card">
+          <section v-if="layout !== 'workbench' && currentStage.id !== 1" class="wb-summary card">
             <strong>{{ t.stage.statusReady }}</strong>
             <span class="muted">{{ t.stage.statusPending }}</span>
           </section>
 
-          <section class="wb-graph-canvas" :aria-label="t.canvas.title">
+          <section v-if="currentStage.id >= 3" class="wb-graph-canvas" :aria-label="t.canvas.title">
             <div class="graph-grid-lines" aria-hidden="true" />
             <div class="graph-copy">
               <p class="eyebrow">{{ t.canvas.summary }}</p>
@@ -425,6 +438,13 @@ onBeforeUnmount(() => {
           class="wb-context"
           :class="{ 'wb-context--drawer': layout === 'graph' }"
         >
+          <MaterialsPanel
+            v-if="layout === 'graph' && currentStage.id === 1"
+            :project-id="project.id"
+            :lang="lang"
+            :document-id="documentId"
+            @select="selectMaterial"
+          />
           <JobPanel
             :project-id="project.id"
             :stage="currentStage.slug"

@@ -16,6 +16,8 @@ from pathlib import Path
 
 from .config import settings
 from .db import SessionLocal, dispose_engine
+from .engines.business_config import BusinessGraphConfig
+from .engines.business_runtime import create_graph_client, create_planner
 from .services import worker as worker_service
 
 logger = logging.getLogger("echosim.worker")
@@ -75,7 +77,40 @@ async def run(stop_event: asyncio.Event) -> None:
             continue
 
         try:
-            if claim.kind == "document.ingest":
+            if claim.kind == "evidence.graph.build":
+                business_config = BusinessGraphConfig.from_env()
+                client_cache: dict[str, object] = {}
+
+                def graph_client_factory():
+                    if "client" not in client_cache:
+                        client_cache["client"] = create_graph_client(
+                            business_config,
+                            zep_api_key=settings.zep_api_key,
+                            zep_api_base_url=settings.zep_api_base_url,
+                            timeout_seconds=settings.graph_write_timeout_seconds,
+                        )
+                    return client_cache["client"]
+
+                outcome = await worker_service.execute_graph_build(
+                    claim,
+                    session_factory=SessionLocal,
+                    stop_event=stop_event,
+                    lease_seconds=lease_seconds,
+                    heartbeat_seconds=heartbeat_seconds,
+                    config=business_config,
+                    planner_factory=lambda question, chunks: create_planner(
+                        business_config,
+                        model_api_base_url=settings.model_api_base_url,
+                        model_api_key=settings.model_api_key,
+                        model_name=settings.model_name,
+                        timeout_seconds=settings.model_timeout_seconds,
+                        question=question,
+                        chunks=chunks,
+                    ),
+                    graph_client_factory=graph_client_factory,
+                    storage_root=settings.document_storage_dir,
+                )
+            elif claim.kind == "document.ingest":
                 outcome = await worker_service.execute_ingest(
                     claim,
                     session_factory=SessionLocal,

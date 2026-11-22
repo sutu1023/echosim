@@ -100,6 +100,22 @@ make user EMAIL=a@example.com  # 从标准输入读取密码，创建/更新账�
 - 材料深链接是完整 URL（含 `document`、`layout`、`lang`）；匿名打开必须先登录并回到原地址，不得丢弃查询参数。
 - 25 页私有样本只用于项目作者在浏览器中的人工验收，必须放在仓库外或已忽略的 `private-inputs/`，不得提交、复制到 `runtime/` 或进入 CI 产物；自动化与测试数据不得引用其文件名、路径或正文。
 
+## 证据图谱构建与来源定位
+
+- 建图任务由独立 `worker` 领取执行，`app` 只负责开始、读取已发布快照与事件流；不得在 HTTP 请求内调用模型或 Zep。
+- 一次 build 固定六步：`bind`、`plan`、`extract`、`write`、`readback`、`publish`。所有步骤必须复用锁定任务行、数据库实际时钟、当前租约令牌、步骤唯一约束与事件事务；`run_steps` 与 `jobs.next_step` 是步骤权威。
+- 项目图谱绑定必须先持久化创建幂等键与稳定参数，再调用 `graph.create`；已有 `graph_id` 直接复用，为空时用原幂等键重试，返回空 UUID 或与已保存值不一致时失败，不得覆盖或回退到验收专用图谱。
+- `0005` 升级前已尝试写入但没有 UUID 的旧 episode 必须先检索确认；`write_outcome=in_flight` 的 episode 只能检索，不得重新 `add`。
+- 写入受理、episode 匹配、`processed` 与节点/边读回是四个独立事实。索引预算与处理预算分别计时；迟到响应不得推进 episode 状态；慢搜索、确认与读回期间必须持续续租。
+- 第 5 步必须按已处理 episode 批次增量读回：某一批稳定且来源可核对后立即发布 `complete=false` 的部分快照，其余批次继续处理；不得等待全部 episode 完成后才发布第一份可视图，也不得由前端定时器或人为拆分制造进度。第 6 步必须在同一事务发布最终快照、`phase=ready`、`can_continue=true`、完成事件与 `succeeded`。候选快照在发布前不得出现在事件或读取接口。
+- 快照必须完整物化；节点、边、来源与计数挂同一 `snapshot_id`，业务读取只返回 `published=true` 的版本。最终快照与最近部分快照保留，更旧的部分快照可清理。
+- 来源映射必须遵循材料入库坐标：文本使用解码后完整原文的 UTF-16 偏移，PDF 使用物理页原始抽取文本与从 1 开始的页码；清洗文本只用于查找引文。引文多次出现且模型偏移不能唯一消歧时返回 `ambiguous_source`，不得取第一次匹配；既有入库材料不得要求重新上传。
+- 节点/边读回必须按本次 build 的 episode UUID 集合过滤并分页到没有下一页；旧 build 记录不得冒充本次结果。读回边必须唯一映射到抽取清单关系与至少一条通过校验的原文来源。
+- 规模上限固定为单次 5 份材料、200 个节点、400 条边、每项 5 条来源；超限明确失败，不得截断发布。
+- 读取接口默认选择活动 build，其次最近 build；`?build=<id>` 打开旧 build。前端必须用 `buildId` 守卫丢弃迟到响应，第二次建图不得显示第一次完成图。
+- `canContinue` 只由服务端根据最终已发布快照判定；前端不得自行推断可继续。
+- 默认 `make up`、默认 `make verify` 与 CI 不得触发业务建图真实外呼；离线走查必须显式启用 `EVIDENCE_GRAPH_ALLOW_STUB=true` 与 stub provider。私有 25 页报告与原创演示材料只留在仓库外，不得进入夹具、日志或报告。
+
 ## 引擎接入与真实联调
 
 - `.env.example` 的 `replace-with-*`、`*.example.invalid` 与全零 UUID 必须按“未配置”处理；`make smoke-live` 不得自动复制 `.env`，避免占位值触发外部调用。
@@ -162,6 +178,8 @@ make user EMAIL=a@example.com  # 从标准输入读取密码，创建/更新账�
 - 默认 `make verify` 必须包含轻量材料回归：自制小 TXT 上传后由 worker 解析到 `ready`、列表可见且至少一个分块、匿名读取列表返回 401；同一环境连续两次执行都必须通过。
 - `make verify CHANGE=2026-11-21-ingest-seed-documents` 必须在默认场景之上追加：三页 PDF 的总页数、空白页零分块、第 3 页 `pageNo` 与 `#page=3` 来源、原件哈希与页对象结构；PDF 页眉页脚与打印路径清理；文本换行/空白归一、合法路径保留、emoji 偏移与 GB18030 原件/原文；20 MiB 边界、空文件、无文字层与页数上限；重复上传只留一套；匿名 401 与他人 404；worker 停止时取消排队任务；慢解析续租与中断接手。
 - `make verify CHANGE=2026-11-21-track-background-jobs` 必须在同一 SHA 上追加：真实 SSE 两段序号（1–4 与 5–10）、`Last-Event-ID` 优先、终态重连立即结束、并发开始只新增一对 job/run、worker 中断接手、真实 PostgreSQL 锁等待跨过期点与旧令牌拒绝回归、取消（含 `canceled seq=4`）、受控失败与取消/完成竞态。未注册的 `CHANGE` 必须以退出码 2 结束。
+- `make verify CHANGE=2026-11-22-build-evidence-graph` 必须在同一 SHA 上追加：原创材料开始/重复/未就绪/六份/空问题/匿名/他人边界；真实 worker 的阶段序列、增量部分快照与最终快照、PDF 第 3 页与文本 UTF-16 来源；绑定响应丢失、未提交、接手；失败原因码与超限不发布；发布/取消竞态；第二次建图隔离；日志/报告脱敏与 worker provider 恢复。未注册的 `CHANGE` 必须以退出码 2 结束。
+- `make verify` 必须使用独立的 Compose 项目、回环端口与数据卷，不得停止或改写本地 8080 工作台；Change 07 默认使用离线 stub provider，不读取真实模型/Zep 凭据。`graph_evidence.calls.real` 必须为 0、`calls.double` 必须大于 0。
 - 报告必须在 `job_evidence` 中记录 `jobId`、`runId`、两段序号、接手前后 `attempts`、副作用计数与旧令牌结果；在 `document_evidence` 中记录材料标识、解析任务标识、页数、分块数、第 3 页页码与来源、原件哈希、重复上传与取消/接手结果；页面提示、布局、语言、断线时序与 PDF 浏览器实际落页仍只写入 `docs/acceptance/`。
 - 工作树存在未忽略改动时 `make verify` 默认拒绝执行；仅在本地调试时可用 `ALLOW_DIRTY=1`，此时报告记录 `dirty: true`，**不得**作为干净克隆证据。
 - CI 必须调用与本地相同的 `make verify`，并断言报告 `tested_sha` 等于触发 SHA；不得在 CI 中重复实现验收逻辑。

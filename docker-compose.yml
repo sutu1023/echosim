@@ -21,7 +21,8 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: echosim-skeleton:dev
+      target: app
+    image: echosim-app:dev
     depends_on:
       db:
         condition: service_healthy
@@ -89,7 +90,8 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: echosim-skeleton:dev
+      target: worker-graph
+    image: echosim-worker-graph:dev
     command: ["python", "-m", "app.worker"]
     depends_on:
       db:
@@ -98,6 +100,24 @@ services:
         condition: service_healthy
     environment:
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-echosim}:${POSTGRES_PASSWORD:-echosim_dev_password}@db:5432/${POSTGRES_DB:-echosim}
+      MODEL_API_BASE_URL: ${MODEL_API_BASE_URL:-}
+      MODEL_API_KEY: ${MODEL_API_KEY:-}
+      MODEL_NAME: ${MODEL_NAME:-}
+      MODEL_TIMEOUT_SECONDS: ${MODEL_TIMEOUT_SECONDS:-30}
+      ZEP_API_KEY: ${ZEP_API_KEY:-}
+      ZEP_API_BASE_URL: ${ZEP_API_BASE_URL:-}
+      ZEP_ACCEPTANCE_GRAPH_FINGERPRINT: ${ZEP_ACCEPTANCE_GRAPH_FINGERPRINT:-}
+      EVIDENCE_GRAPH_MODEL_PROVIDER: ${EVIDENCE_GRAPH_MODEL_PROVIDER:-auto}
+      EVIDENCE_GRAPH_GRAPH_PROVIDER: ${EVIDENCE_GRAPH_GRAPH_PROVIDER:-auto}
+      EVIDENCE_GRAPH_ALLOW_STUB: ${EVIDENCE_GRAPH_ALLOW_STUB:-false}
+      EVIDENCE_GRAPH_MAX_DOCUMENTS: ${EVIDENCE_GRAPH_MAX_DOCUMENTS:-5}
+      EVIDENCE_GRAPH_MAX_NODES: ${EVIDENCE_GRAPH_MAX_NODES:-200}
+      EVIDENCE_GRAPH_MAX_EDGES: ${EVIDENCE_GRAPH_MAX_EDGES:-400}
+      EVIDENCE_GRAPH_MAX_SOURCES_PER_ITEM: ${EVIDENCE_GRAPH_MAX_SOURCES_PER_ITEM:-5}
+      EVIDENCE_GRAPH_QUESTION_MAX_CHARS: ${EVIDENCE_GRAPH_QUESTION_MAX_CHARS:-500}
+      EVIDENCE_GRAPH_BATCH_SIZE: ${EVIDENCE_GRAPH_BATCH_SIZE:-4}
+      EVIDENCE_GRAPH_INDEX_TIMEOUT_SECONDS: ${EVIDENCE_GRAPH_INDEX_TIMEOUT_SECONDS:-60}
+      EVIDENCE_GRAPH_PROCESSING_TIMEOUT_SECONDS: ${EVIDENCE_GRAPH_PROCESSING_TIMEOUT_SECONDS:-120}
       JOB_LEASE_SECONDS: ${JOB_LEASE_SECONDS:-6}
       JOB_HEARTBEAT_SECONDS: ${JOB_HEARTBEAT_SECONDS:-2}
       WORKER_POLL_INTERVAL_SECONDS: ${WORKER_POLL_INTERVAL_SECONDS:-0.25}

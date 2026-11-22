@@ -17,7 +17,7 @@ from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..errors import JobNotFound, ServiceUnavailable
-from . import documents, run_events
+from . import documents, evidence_graph, run_events
 
 logger = logging.getLogger(__name__)
 
@@ -313,6 +313,8 @@ async def cancel_job(
             return await get_job(db, project_id=project_id, job_id=parsed), False
         if row.kind == "document.ingest" and row.document_id is not None:
             await documents.cancel_for_run(db, run_id=row.run_id)
+        if row.kind == "evidence.graph.build":
+            await evidence_graph.cancel_for_run(db, run_id=row.run_id)
         await db.commit()
     except DB_ERRORS as exc:
         await db.rollback()

@@ -48,6 +48,8 @@ export interface WorkbenchMessages {
     missingBody: string
     goMaterials: string
     goPrevious: string
+    rolesTitle: string
+    rolesBody: string
   }
   canvas: {
     title: string
@@ -136,6 +138,65 @@ export interface WorkbenchMessages {
       canceled: string
     }
   }
+  graph: {
+    title: string
+    intro: string
+    materialsTitle: string
+    questionLabel: string
+    questionPlaceholder: string
+    start: string
+    starting: string
+    selected: string
+    maxDocs: string
+    emptyMaterials: string
+    empty: string
+    loading: string
+    loadFailed: string
+    retry: string
+    buildId: string
+    jobId: string
+    runId: string
+    phaseLabel: Record<'preparing' | 'waiting_index' | 'drawing' | 'ready' | 'failed' | 'canceled', string>
+    waitingIndex: string
+    accepted: string
+    confirmed: string
+    drawing: string
+    ready: string
+    failed: string
+    canceled: string
+    revision: string
+    nodes: string
+    edges: string
+    legend: string
+    material: string
+    hypothesis: string
+    zoomHint: string
+    fit: string
+    refresh: string
+    maximize: string
+    restore: string
+    edgeLabels: string
+    details: string
+    node: string
+    edge: string
+    origin: string
+    summary: string
+    sources: string
+    noSources: string
+    openSource: string
+    sourceTitle: string
+    sourceClose: string
+    noSelection: string
+    next: string
+    nextBlocked: string
+    nextHint: string
+    questionRequired: string
+    tooMany: string
+    stale: string
+    serviceUnavailable: string
+    sourceFailed: string
+    failureCodes: Record<string, string>
+  }
   statusbar: string
   logoutFailed: string
   job: {
@@ -218,6 +279,8 @@ const messages: Record<Lang, WorkbenchMessages> = {
       missingBody: '请先完成前一阶段，再回到这里继续。',
       goMaterials: '前往材料区',
       goPrevious: '前往上一阶段',
+      rolesTitle: '角色与环境尚未配置',
+      rolesBody: '证据图谱已完成即可继续；角色、环境与约束将在下一轮变更中接入。',
     },
     canvas: {
       title: '证据图谱画布',
@@ -309,6 +372,92 @@ const messages: Record<Lang, WorkbenchMessages> = {
         canceled: '入库已取消。',
       },
     },
+    graph: {
+      title: '证据图谱',
+      intro: '选择已就绪材料并输入情景问题；建图由后台 worker 执行，完成后可点开材料关系回到原文。',
+      materialsTitle: '选择材料（最多 5 份）',
+      questionLabel: '情景问题',
+      questionPlaceholder: '例如：雨天是否应该增加一班校园接驳车？',
+      start: '开始建图',
+      starting: '正在开始…',
+      selected: '已选 {count} / {max} 份',
+      maxDocs: '单次最多选择 {max} 份材料',
+      emptyMaterials: '还没有已就绪材料，请先在材料区上传并等待解析完成。',
+      empty: '还没有建图记录。选择材料与问题后开始构建。',
+      loading: '正在读取建图…',
+      loadFailed: '建图状态读取失败，请重试。',
+      retry: '重试',
+      buildId: 'buildId',
+      jobId: 'jobId',
+      runId: 'runId',
+      phaseLabel: {
+        preparing: '准备中',
+        waiting_index: '等待索引',
+        drawing: '增量绘图',
+        ready: '完成',
+        failed: '失败',
+        canceled: '已取消',
+      },
+      waitingIndex: '已受理 {accepted} / 已确认 {confirmed} / 计划 {planned}',
+      accepted: '已受理',
+      confirmed: '已确认',
+      drawing: '正在读取节点与边…',
+      ready: '图谱已完成，可以进入下一阶段。',
+      failed: '建图失败',
+      canceled: '建图已取消，已发布的部分快照仍可查看。',
+      revision: '快照版本',
+      nodes: '节点',
+      edges: '关系',
+      legend: '图例',
+      material: '材料陈述',
+      hypothesis: '用户假设',
+      zoomHint: '滚轮缩放，拖动平移；可拖动节点。',
+      fit: '适应画布',
+      refresh: '刷新',
+      maximize: '最大化',
+      restore: '退出最大化',
+      edgeLabels: '关系标签',
+      details: '详情',
+      node: '节点',
+      edge: '关系',
+      origin: '来源类型',
+      summary: '摘要',
+      sources: '原文来源',
+      noSources: '该假设没有原文来源。',
+      openSource: '回到原文',
+      sourceTitle: '原文（未清洗）',
+      sourceClose: '关闭原文',
+      noSelection: '点击节点或关系查看全部来源。',
+      next: '进入角色与环境',
+      nextBlocked: '图谱尚未完成或来源不完整，不能进入下一阶段。',
+      nextHint: '下一阶段将配置角色与环境。',
+      questionRequired: '请输入 1–500 字符的问题。',
+      tooMany: '单次最多选择 5 份材料。',
+      stale: '已忽略上一次建图的迟到响应。',
+      serviceUnavailable: '服务暂时不可用，已保留当前画面。',
+      sourceFailed: '原文读取失败，请重试。',
+      failureCodes: {
+        missing_config: '模型或图谱配置不完整，建图未发起外部调用。',
+        too_many_documents: '材料数量超过上限。',
+        document_not_ready: '所选材料尚未解析完成。',
+        invalid_graph_scope: '所选材料或图谱范围不合法。',
+        invalid_graph_response: '图谱服务返回了不可用的结果。',
+        invalid_model_output: '模型输出未通过结构校验。',
+        source_mismatch: '引文与原文不一致。',
+        ambiguous_source: '引文在材料中多次出现，无法唯一定位。',
+        source_unavailable: '材料原件不可读取，无法定位原文。',
+        model_unavailable: '模型暂时不可用。',
+        graph_unavailable: '图谱服务暂时不可用。',
+        write_unconfirmed: 'episode 写入结果未能确认。',
+        stale_or_foreign_hit: '检索只命中旧记录或其它记录。',
+        index_timeout: '等待索引超时。',
+        processing_timeout: '等待处理或读回超时。',
+        graph_incomplete: '读回结果不足以构成完成图谱。',
+        graph_too_large: '节点或关系超过规模上限，未发布截断结果。',
+        too_many_sources: '单项来源超过上限。',
+        insufficient_graph: '材料节点或材料关系不足。',
+      },
+    },
     statusbar: '工作台外壳就绪 · 证据图谱待构建',
     logoutFailed: '退出失败，请稍后重试。',
     job: {
@@ -396,6 +545,8 @@ const messages: Record<Lang, WorkbenchMessages> = {
       missingBody: 'Complete the previous stage first, then return here.',
       goMaterials: 'Go to materials',
       goPrevious: 'Go to previous stage',
+      rolesTitle: 'Roles and environment are not configured yet',
+      rolesBody: 'The evidence graph is ready. Roles, environment and constraints arrive in a later change.',
     },
     canvas: {
       title: 'Evidence graph canvas',
@@ -487,6 +638,92 @@ const messages: Record<Lang, WorkbenchMessages> = {
         tooManyPagesNoLimit: 'This PDF exceeded the page limit applied when it was parsed.',
         parseError: 'Parsing failed. Retry or choose another file.',
         canceled: 'Intake was canceled.',
+      },
+    },
+    graph: {
+      title: 'Evidence graph',
+      intro: 'Choose ready materials and a scenario question. The worker builds the graph in the background; open a material relation to return to its source.',
+      materialsTitle: 'Choose materials (up to 5)',
+      questionLabel: 'Scenario question',
+      questionPlaceholder: 'For example: should the campus shuttle add a run on rainy days?',
+      start: 'Build graph',
+      starting: 'Starting…',
+      selected: '{count} / {max} selected',
+      maxDocs: 'Up to {max} materials per build',
+      emptyMaterials: 'No ready materials yet. Upload in the materials area and wait for parsing.',
+      empty: 'No graph yet. Choose materials and a question to start.',
+      loading: 'Loading graph…',
+      loadFailed: 'Could not read the graph. Please retry.',
+      retry: 'Retry',
+      buildId: 'buildId',
+      jobId: 'jobId',
+      runId: 'runId',
+      phaseLabel: {
+        preparing: 'Preparing',
+        waiting_index: 'Waiting for index',
+        drawing: 'Drawing incrementally',
+        ready: 'Ready',
+        failed: 'Failed',
+        canceled: 'Canceled',
+      },
+      waitingIndex: 'Accepted {accepted} / confirmed {confirmed} / planned {planned}',
+      accepted: 'Accepted',
+      confirmed: 'Confirmed',
+      drawing: 'Reading nodes and edges…',
+      ready: 'Graph is ready. You can continue to the next stage.',
+      failed: 'Graph build failed',
+      canceled: 'Graph build was canceled. Published partial snapshots remain readable.',
+      revision: 'Snapshot revision',
+      nodes: 'Nodes',
+      edges: 'Relations',
+      legend: 'Legend',
+      material: 'Material statement',
+      hypothesis: 'User hypothesis',
+      zoomHint: 'Scroll to zoom, drag to pan; nodes can be dragged.',
+      fit: 'Fit canvas',
+      refresh: 'Refresh',
+      maximize: 'Maximize',
+      restore: 'Restore',
+      edgeLabels: 'Relation labels',
+      details: 'Details',
+      node: 'Node',
+      edge: 'Relation',
+      origin: 'Origin',
+      summary: 'Summary',
+      sources: 'Original sources',
+      noSources: 'This hypothesis has no original source.',
+      openSource: 'Open source',
+      sourceTitle: 'Original text (uncleaned)',
+      sourceClose: 'Close source',
+      noSelection: 'Select a node or relation to see all sources.',
+      next: 'Continue to roles and environment',
+      nextBlocked: 'The graph is incomplete or sources are missing; the next stage is disabled.',
+      nextHint: 'The next stage configures roles and environment.',
+      questionRequired: 'Enter a question of 1–500 characters.',
+      tooMany: 'Up to 5 materials per build.',
+      stale: 'A late response from the previous build was ignored.',
+      serviceUnavailable: 'Service temporarily unavailable; the current view is kept.',
+      sourceFailed: 'Could not read the source text. Please retry.',
+      failureCodes: {
+        missing_config: 'Model or graph configuration is incomplete; no external call was made.',
+        too_many_documents: 'Too many materials.',
+        document_not_ready: 'A selected material is not ready.',
+        invalid_graph_scope: 'The selected materials or graph scope are invalid.',
+        invalid_graph_response: 'The graph service returned an unusable result.',
+        invalid_model_output: 'Model output failed structural validation.',
+        source_mismatch: 'A quote does not match the original text.',
+        ambiguous_source: 'A quote appears multiple times and cannot be located uniquely.',
+        source_unavailable: 'The original file is unreadable, so sources cannot be located.',
+        model_unavailable: 'The model is temporarily unavailable.',
+        graph_unavailable: 'The graph service is temporarily unavailable.',
+        write_unconfirmed: 'The episode write could not be confirmed.',
+        stale_or_foreign_hit: 'Search matched only stale or foreign records.',
+        index_timeout: 'Timed out waiting for the index.',
+        processing_timeout: 'Timed out waiting for processing or readback.',
+        graph_incomplete: 'Readback is insufficient for a complete graph.',
+        graph_too_large: 'Nodes or relations exceed the limit; no truncated graph was published.',
+        too_many_sources: 'A single item has too many sources.',
+        insufficient_graph: 'There are not enough material nodes or relations.',
       },
     },
     statusbar: 'Workbench shell ready · evidence graph pending',

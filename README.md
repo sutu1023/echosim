@@ -2,7 +2,7 @@
 
 材料驱动的双平台推演工作台。
 
-当前版本提供可启动、可复现的工程骨架，并实现了本地账户登录、服务端会话、项目级隔离，以及公开控制台与按项目/阶段深链接的工作台外壳：每个用户只能看到自己的项目与历史。材料入库、后台任务、真实推演、报告与案例回放尚未实现。
+当前版本提供可启动、可复现的工程骨架，已实现本地账户登录、服务端会话、项目级隔离、材料入库，以及从工作台发起、由独立 worker 执行的证据图谱构建与原文定位。角色与环境、双平台推演、报告与案例回放尚未实现。
 
 ## 前置条件
 
@@ -114,7 +114,7 @@ echosim_session=<随机令牌>; HttpOnly; Path=/; SameSite=lax
 
 控制台把健康、会话与项目列表分开显示：系统状态只由 `/health` 决定；会话查询 503 时账户显示“暂时无法确认”并保留 Cookie；只有会话明确 401 才按访客处理。健康检查 200 但项目列表读取失败时，系统状态仍为“可用”，按钮进入 `/projects` 由项目页提示读取失败并重试。
 
-工作台外壳与阶段数据分开：真实项目加载成功后，项目名、阶段高亮、工具条与三种布局可正常操作；阶段内容可以同时显示“还没有材料”或缺少前置步骤。当前版本没有阶段数据 API，产品页面不会展示示例节点、运行日志或报告。
+工作台外壳与阶段数据分开：真实项目加载成功后，项目名、阶段高亮、工具条与三种布局可正常操作。第一阶段在材料面板旁提供证据图谱面板：选择已就绪材料、输入情景问题、开始建图，页面按“等待索引 → 增量绘图 → 完成”展示服务端已发布快照；点击节点或材料关系可回到 PDF 物理页或文本原文高亮。第二阶段目前只显示“角色与环境尚未配置”。
 
 所有项目接口先鉴权再判断归属，工作台页面也遵循“身份 → 项目归属 → 阶段合法性”的顺序：
 
@@ -150,13 +150,25 @@ echosim_session=<随机令牌>; HttpOnly; Path=/; SameSite=lax
 | `DOCUMENT_CHUNK_TARGET_CHARS` | `1200` | 分块目标长度（字符） |
 | `DOCUMENT_CHUNK_OVERLAP_CHARS` | `120` | 同一段落被拆开时的重叠长度（字符） |
 | `DOCUMENT_INGEST_DELAY_MS` | `0` | 解析前的可控延迟（毫秒），仅用于验收放大慢解析窗口 |
+| `EVIDENCE_GRAPH_MODEL_PROVIDER` | `auto` | 业务建图模型 provider：`auto`、`unconfigured`、`http`、`stub` |
+| `EVIDENCE_GRAPH_GRAPH_PROVIDER` | `auto` | 业务建图图谱 provider：`auto`、`unconfigured`、`zep`、`stub` |
+| `EVIDENCE_GRAPH_ALLOW_STUB` | `false` | 是否允许显式启用测试替身；默认拒绝 stub |
+| `EVIDENCE_GRAPH_MAX_DOCUMENTS` | `5` | 单次业务建图材料上限 |
+| `EVIDENCE_GRAPH_MAX_NODES` | `200` | 单次业务建图节点上限 |
+| `EVIDENCE_GRAPH_MAX_EDGES` | `400` | 单次业务建图边上限 |
+| `EVIDENCE_GRAPH_MAX_SOURCES_PER_ITEM` | `5` | 单个节点或边来源上限 |
+| `EVIDENCE_GRAPH_QUESTION_MAX_CHARS` | `500` | 情景问题去除首尾空白后的最大字符数 |
+| `EVIDENCE_GRAPH_BATCH_SIZE` | `4` | 模型抽取批次大小 |
+| `EVIDENCE_GRAPH_INDEX_TIMEOUT_SECONDS` | `60` | episode 写入后等待索引匹配的预算（秒） |
+| `EVIDENCE_GRAPH_PROCESSING_TIMEOUT_SECONDS` | `120` | episode 处理与读回预算（秒） |
 | `MODEL_API_BASE_URL` | 空 | Chat Completions 兼容 API 根地址，可包含 `/v1`；空表示未配置 |
-| `MODEL_API_KEY` | 空 | 模型密钥；只注入 `engine` 服务 |
+| `MODEL_API_KEY` | 空 | 模型密钥；只注入 `engine` 与业务 `worker` 服务 |
 | `MODEL_NAME` | 空 | 模型名；空表示未配置 |
 | `MODEL_TIMEOUT_SECONDS` | `30` | 模型项总时限（秒），含重试与移除 `response_format` 重试 |
-| `ZEP_API_KEY` | 空 | Zep 密钥；只注入 `engine` 服务 |
+| `ZEP_API_KEY` | 空 | Zep 密钥；只注入 `engine` 与业务 `worker` 服务 |
 | `ZEP_API_BASE_URL` | 空 | 可选 Zep 服务地址；空表示使用 SDK 默认 |
-| `ZEP_ACCEPTANCE_GRAPH_ID` | 空 | 固定验收专用图谱的 `graph_uuid`；空表示未配置 |
+| `ZEP_ACCEPTANCE_GRAPH_ID` | 空 | 固定验收专用图谱的 `graph_uuid`；空表示未配置，只注入 `engine` |
+| `ZEP_ACCEPTANCE_GRAPH_FINGERPRINT` | 空 | 由宿主启动流程从验收图谱 UUID 派生，只注入 `worker`；不要手工填写 |
 | `GRAPH_WRITE_TIMEOUT_SECONDS` | `20` | 单次 episode 写入时限（秒） |
 | `GRAPH_STATUS_TIMEOUT_SECONDS` | `10` | 写入响应丢失后的单次核对时限（秒） |
 | `GRAPH_INDEX_TIMEOUT_SECONDS` | `60` | `graph.search_episodes` 索引等待上限（秒） |
@@ -238,7 +250,7 @@ docker compose stop worker           # 只停执行，不影响 /health 与 /liv
 docker compose start worker          # 租约到期后自动接手未完成任务
 ```
 
-worker 复用同一镜像但没有 HTTP 端口，因此 Compose 用“心跳文件 15 秒内更新”的探针**替换**镜像继承的 `/livez` 探针；`app` 的探针保持不变。worker 不对外发布端口。
+`worker` 由 Dockerfile 的 `worker-graph` 目标构建为 `echosim-worker-graph:dev`，只比 app 多安装 `zep-cloud==4.1.0` 与必要直接依赖；`app` 由 `app` 目标构建为 `echosim-app:dev`，不包含 Zep 或 camel。worker 没有 HTTP 端口，因此 Compose 用“心跳文件 15 秒内更新”的探针替换继承探针；`app` 的 `/livez` 探针保持不变。worker 不对外发布端口。
 
 ## 材料入库与来源定位
 
@@ -271,6 +283,52 @@ worker 复用同一镜像但没有 HTTP 端口，因此 Compose 用“心跳文�
 - 取消解析在取消事务内同时写入 job `canceled`、终态事件与材料失败；worker 停止时取消排队任务也立即生效。
 - 材料深链接就是完整地址：`/projects/<项目 ID>/workbench/evidence-graph?layout=split&lang=zh&document=<材料 ID>`，刷新或粘贴后回到同一材料，`layout` 与 `lang` 保持不变。
 
+## 证据图谱构建
+
+证据图谱由独立 `worker` 执行，`app` 只在请求内创建任务并读取已发布快照，不持有模型或 Zep 凭据。默认启动、默认 `make verify` 与 CI 不发起真实模型或图谱调用；只有显式配置并执行 `make smoke-live` 才使用真实 provider。
+
+### 使用流程
+
+1. 在项目第一阶段上传并等待至少一份材料变为 `ready`。
+2. 在证据图谱面板选择材料（单次最多 5 份），输入 1–500 字符情景问题，点击“开始建图”。
+3. 请求立即返回 `buildId`、`jobId`、`runId`；worker 按 `bind → plan → extract → write → readback → publish` 六步执行。
+4. 页面在 `waiting_index` 显示已受理/已确认数量；第 5 步按已处理 episode 批次读回，某一批稳定且来源可核对后立即发布 `complete=false` 部分快照并进入 `drawing`，其余批次继续处理，后续版本继续更新画面；第 6 步全部完成后在同一事务发布最终快照、`phase=ready`、`canContinue=true`、完成事件与任务成功。
+5. 点击节点或关系查看全部来源。PDF 来源打开 `/file#page=<物理页>`；文本来源打开 `/source` 并按 UTF-16 偏移高亮未清洗原文。
+6. 完成后“进入角色与环境”使用服务端 `canContinue`；未完成、失败或来源不完整时禁用。
+
+默认读取项目当前活动 build；没有活动 build 时读取最近 build。带 `?build=<buildId>` 可打开旧 build，`layout`、`lang` 与 `document` 保留。第二次建图仍在等待时，页面不会显示第一次完成图；`buildId` 不匹配的迟到响应会被丢弃。
+
+### 接口
+
+| 方法 | 路径 | 说明 | 成功响应 | 失败 |
+| --- | --- | --- | --- | --- |
+| POST | `/api/projects/{projectId}/evidence-graph/builds` | 开始建图；材料去重、非空、全部 `ready` 且最多 5 份 | `202` 新建 / `200` 复用活动 build 与 `buildId`/`jobId`/`runId` | `401` / `404` / `409` 材料未就绪 / `422` 参数或材料数 / `503` |
+| GET | `/api/projects/{projectId}/evidence-graph` | 默认活动/最近 build 与最近已发布快照；`?build=` 指定旧 build | `200 {"build":…,"snapshot":…}` | `401` / `404` / `503` |
+| GET | `/api/projects/{projectId}/evidence-graph/builds/{buildId}` | 指定 build 与已发布快照 | `200` | `401` / `404` |
+| GET | `/api/projects/{projectId}/evidence-graph/builds/{buildId}/snapshots/{revision}` | 指定已发布快照版本 | `200` | `400` 版本非法或超出当前范围 / `404` |
+| GET | `/api/projects/{projectId}/jobs/{jobId}/events` | 复用任务 SSE；建图事件含 `buildId`、`phase`、受理/确认/计划 episode 数与 `snapshotRevision` | `text/event-stream` | `401` / `404` / `400` 游标 |
+
+### 状态、上限与原因
+
+- `phase` 固定为 `preparing`、`waiting_index`、`drawing`、`ready`、`failed`、`canceled`；任务状态仍只有 `queued`、`running`、`succeeded`、`failed`、`canceled`。
+- 写入受理、episode 匹配、`processed` 与节点/边读回分开记录；可搜索不等于处理完成，读回不稳定或没有可用边时继续等待并按预算失败，不假完成。
+- 规模上限：单次 5 份材料、200 个节点、400 条边、每项 5 条来源。超限在发布前以 `graph_too_large` 或 `too_many_sources` 失败，不发布截断结果。
+- 常见失败码：`missing_config`、`document_not_ready`、`invalid_graph_scope`、`invalid_model_output`、`source_mismatch`、`ambiguous_source`、`source_unavailable`、`index_timeout`、`processing_timeout`、`graph_incomplete`、`insufficient_graph`、`write_unconfirmed`。失败只保留通用中文说明与原因码，不返回材料正文、密钥或完整外部响应。
+- 同一项目同一操作最多一个活动任务；`graph.create` 绑定使用持久化幂等键与稳定参数，响应丢失或 worker 接手都只保存一个 `graph_id`。
+- 同一引文在材料中出现多次且模型偏移不能唯一消歧时返回 `ambiguous_source`，绝不取第一次匹配；既有入库材料无需重新上传即可定位。
+
+### 离线走查
+
+默认配置使用 `auto`，凭据缺失时在外部调用前失败。需要离线演示时，在本地 `.env` 显式设置：
+
+```bash
+EVIDENCE_GRAPH_MODEL_PROVIDER=stub
+EVIDENCE_GRAPH_GRAPH_PROVIDER=stub
+EVIDENCE_GRAPH_ALLOW_STUB=true
+```
+
+随后 `make up`，在工作台选择原创材料并开始建图。该模式下模型与图谱调用次数记为 `double`，真实调用为 0；私有材料与演示截图不得提交到仓库。
+
 ## 引擎联通验收
 
 本版本的引擎联通只做服务端接入与真实联通证据，不接入正式推演、角色准备或工作台页面。真实调用只由开发者显式执行：
@@ -291,6 +349,10 @@ make smoke-live
 - `ZEP_API_KEY`、`ZEP_ACCEPTANCE_GRAPH_ID`：固定验收专用图谱，后者必须是 `graph_uuid`。
 
 明显占位值（`replace-with-*`、`*.example.invalid`、全零 UUID）会被视为未配置，避免误触发外部调用。
+
+业务建图配置只注入 `worker`：`EVIDENCE_GRAPH_MODEL_PROVIDER=auto` 与 `EVIDENCE_GRAPH_GRAPH_PROVIDER=auto` 只在模型/Zep 凭据完整时解析为真实 provider；占位凭据解析为 `unconfigured`。显式 `stub` 必须同时设置 `EVIDENCE_GRAPH_ALLOW_STUB=true`，否则在发起外部调用前拒绝。
+
+`make up` 会先调用 `docker compose config` 取得 Compose 最终解析后的 `engine` 验收图谱 ID（shell 覆盖优先于 `.env`），再派生规范化 UUID 指纹 `ZEP_ACCEPTANCE_GRAPH_FINGERPRINT`，只通过命令环境传给业务 `worker`；不生成含凭据的额外配置文件。原始 `ZEP_ACCEPTANCE_GRAPH_ID` 仍只注入 `engine` 联调服务，业务 worker 不接收原始值；未配置验收图谱时指纹为空，默认业务图谱不受影响。
 
 模型首次请求使用 `model`、`messages` 与 `response_format={"type":"json_object"}`，并固定发送 `User-Agent: EchoSim/0.1.0`；正常调用、移除参数重试与网络重试都使用同一 User-Agent。字段、类型、UTF-16 偏移、原文引用与运行标识由 EchoSim 校验。只有上游 400/422 明确指出不支持 `response_format` 时才移除参数重试一次；所有重试与 SDK 内置重试共用 30 秒、最多 2 次实际 HTTP 请求的预算。
 
@@ -343,6 +405,8 @@ make migrate
 make verify
 ```
 
+`make verify` 使用独立的 Compose 项目、回环端口与数据卷运行，不会停止或改写本地 8080 工作台；Change 07 场景显式使用离线 stub provider，不读取真实模型/Zep 凭据。连续执行两次以上时可用 `VERIFY_REPORT_LABEL` 保留命名报告；报告仍绑定同一 `tested_sha` 且 `dirty=false`。离线通过不替代人工签收。
+
 `make verify` 会构建并启动环境，依次验证：
 
 - Change 01 保留场景：首页包含 `EchoSim`、`/health` 返回 200、停止数据库后 5 秒内返回 503 且 `/livez` 仍为 200、恢复后重新返回 200、后端容器身份（ID/PID/启动时间/重启次数）全程不变。
@@ -353,6 +417,7 @@ make verify
 - 材料冒烟场景（默认执行，因为 CI 运行这个入口）：上传自制小 TXT，worker 解析到 `ready`，材料列表可见且至少一个分块，匿名读取列表返回 401；连续两次执行都要通过。
 - 材料变更专属场景（`make verify CHANGE=2026-11-21-ingest-seed-documents`）：三页 PDF 的总页数 3、第 2 页零分块、第 3 页 `pageNo=3` 与 `#page=3` 来源链接、原件哈希与页对象结构；PDF 页眉/页脚/打印路径清理；文本换行与空白归一、合法路径保留、emoji 偏移与 GB18030 原件/原文；恰好 20 MiB 通过、20 MiB + 1 与空文件被拒且不新增材料、无文字层失败；页数上限边界；重复上传只留一套；匿名 401 与他人 404；worker 停止时取消排队任务；慢解析续租与中断接手。
 - 任务变更专属场景（`make verify CHANGE=2026-11-21-track-background-jobs`）：真实 PostgreSQL 下两个任务互不影响、并发开始只新增一对 job/run、读到第 4 条后断开并以游标补到第 10 条（两段序号分别记录）、`Last-Event-ID` 优先、终态 `after=lastSeq` 立即结束、worker 中断后接手、旧租约令牌续租与写第 6 步被拒、运行中取消（3 步后 `seq=4`）、受控失败（`failAtStep=3` 持久化后仍生效）、终态后新任务、取消与最后一步竞态只留一个终态。
+- 建图变更专属场景（`make verify CHANGE=2026-11-22-build-evidence-graph`）：原创材料上传与就绪、开始 202/重复 200、未就绪 409、六份/空问题 422、匿名 401、他人 404；真实 worker 六步与 `waiting_index → drawing → ready` 阶段、增量部分快照与最终快照、PDF 第 3 页与文本 UTF-16 来源；图谱绑定响应丢失/未提交/接手、失败原因码、超限不发布、发布/取消竞态、第二次建图隔离；结束后 worker provider 恢复，`graph_evidence.calls.real=0`、`calls.double>0`。
 
 > HTTP 200 加 `EchoSim` HTML 只证明 SPA 入口可达。阶段内容、布局、语言、截图与浏览器后退行为以实际浏览器结果为准。
 
@@ -371,7 +436,7 @@ EXPECTED_SHA=$(git rev-parse HEAD) make verify CHANGE=2026-11-21-ingest-seed-doc
 
 未注册的 `CHANGE` 会以退出码 2 结束，并在报告里写明原因。
 
-- 机器可读报告字段包括 `result`、`tested_sha`、`dirty`、`started_at`/`finished_at`、逐场景 `scenarios[]`、`acceptance_accounts`、`isolation_project`、`app` 容器身份、`job_evidence` 与材料场景的 `document_evidence`。
+- 机器可读报告字段包括 `result`、`tested_sha`、`dirty`、`started_at`/`finished_at`、逐场景 `scenarios[]`、`acceptance_accounts`、`isolation_project`、`app` 容器身份、`job_evidence` 与材料场景的 `document_evidence`。建图场景另写 `graph_evidence`：`mode`、`calls.real`/`calls.double`、阶段序列、部分与最终快照版本/节点/边计数、来源页码与 UTF-16 偏移、绑定尝试与置位结果、失败原因码、发布/取消竞态、第二次 build 身份、日志/报告脱敏结果与 worker provider 恢复结果；不写材料正文、密钥或完整 provider 响应。
 - CI 成功与失败运行都会上传 `verify-report-<sha>`；报告缺失会让工作流失败。可用手动触发执行受控失败演练：
 
 ```bash
@@ -412,6 +477,7 @@ CI 在干净检出上执行同一命令，并断言报告中的 `tested_sha` 等
 app/                 FastAPI 后端（配置、数据库、健康检查、鉴权、迁移、静态托管）
 app/migrations/      SQL 迁移（前向执行）
 app/services/        账户、会话、项目、历史与任务服务（含统一归属校验、worker 执行层）
+app/requirements-worker-graph.txt  worker 专用 Zep 客户端依赖
 app/worker.py        worker 进程入口（无 HTTP 端口）
 app/lease_probe.py   验收专用租约/竞态探针（仅 make verify 调用）
 app/routers/         HTTP 路由
@@ -485,4 +551,4 @@ docker compose logs db
 
 ## 非目标
 
-本阶段不实现自助注册、找回密码、邮箱验证、多因素认证、登录限流与账户锁定；也不实现完整证据图谱、角色准备、正式推演编排、报告生成、工作台页面、生产部署、nginx 反向代理或多环境编排。引擎联通验收只证明一次真实调用与证据可核对，不构成产品推演能力。
+本阶段不实现自助注册、找回密码、邮箱验证、多因素认证、登录限流与账户锁定；也不实现角色与环境配置、双平台正式推演编排、报告生成、深度互动、生产部署、nginx 反向代理或多环境编排。证据图谱当前为项目级单图谱复用，不提供图算法、实体消歧、图谱编辑、跨项目共享或配额计费。引擎联通验收只证明一次真实调用与证据可核对，不构成产品推演能力。

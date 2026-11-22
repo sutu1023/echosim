@@ -19,6 +19,7 @@ import hashlib
 import re
 import secrets
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
@@ -80,7 +81,63 @@ def command(
 def compose(
     *args: str, input_text: str | None = None
 ) -> subprocess.CompletedProcess[str]:
-    return command(["docker", "compose", *args], input_text=input_text)
+    base = ["docker", "compose"]
+    if COMPOSE_PROJECT:
+        base += ["-p", COMPOSE_PROJECT]
+    return command([*base, *args], input_text=input_text)
+
+
+def free_loopback_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
+
+
+def apply_runtime_env(overrides: dict[str, str]) -> dict[str, str | None]:
+    """保存并应用隔离运行环境；调用方负责恢复。"""
+    saved = {key: os.environ.get(key) for key in overrides}
+    os.environ.update(overrides)
+    return saved
+
+
+def restore_runtime_env(saved: dict[str, str | None]) -> None:
+    for key, value in saved.items():
+        if value is None:
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = value
+
+
+def isolated_runtime_env() -> dict[str, str]:
+    """与 8080 开发栈完全隔离，并使用离线/空外部凭据。"""
+    return {
+        "COMPOSE_PROJECT_NAME": COMPOSE_PROJECT,
+        "ECHOSIM_PORT": str(free_loopback_port()),
+        "POSTGRES_USER": "echosim",
+        "POSTGRES_DB": "echosim",
+        "POSTGRES_PASSWORD": secrets.token_urlsafe(18),
+        "MODEL_API_BASE_URL": "",
+        "MODEL_API_KEY": "",
+        "MODEL_NAME": "",
+        "ZEP_API_KEY": "",
+        "ZEP_API_BASE_URL": "",
+        "ZEP_ACCEPTANCE_GRAPH_ID": "",
+        "ZEP_ACCEPTANCE_GRAPH_FINGERPRINT": "",
+        "EVIDENCE_GRAPH_MODEL_PROVIDER": "unconfigured",
+        "EVIDENCE_GRAPH_GRAPH_PROVIDER": "unconfigured",
+        "EVIDENCE_GRAPH_ALLOW_STUB": "false",
+    }
+
+
+def graph_runtime_env() -> dict[str, str]:
+    global REDACTION_SECRET
+    REDACTION_SECRET = "verify-secret-" + secrets.token_hex(16)
+    return {
+        "MODEL_API_KEY": REDACTION_SECRET,
+        "EVIDENCE_GRAPH_MODEL_PROVIDER": "stub",
+        "EVIDENCE_GRAPH_GRAPH_PROVIDER": "stub",
+        "EVIDENCE_GRAPH_ALLOW_STUB": "true",
+    }
 
 
 def git_head() -> str:
@@ -109,6 +166,8 @@ def http_status(path: str, timeout: float = 5.0) -> tuple[int, str]:
 
 
 BASE_URL = "http://127.0.0.1:8080"
+COMPOSE_PROJECT = "echosim-verify"
+REDACTION_SECRET = "verify-secret-unset"
 
 SESSION_COOKIE = "echosim_session"
 ACCOUNT_A = "accept-a@echosim.local"
@@ -662,7 +721,8 @@ def scenario_relogin_keeps_project(
 CHANGE_ID = "2026-11-21-track-background-jobs"
 DOCUMENT_CHANGE_ID = "2026-11-21-ingest-seed-documents"
 ENGINE_CHANGE_ID = "2026-11-21-connect-engine-providers"
-KNOWN_CHANGES = {CHANGE_ID, DOCUMENT_CHANGE_ID, ENGINE_CHANGE_ID}
+GRAPH_CHANGE_ID = "2026-11-22-build-evidence-graph"
+KNOWN_CHANGES = {CHANGE_ID, DOCUMENT_CHANGE_ID, ENGINE_CHANGE_ID, GRAPH_CHANGE_ID}
 VERIFY_STEP_DELAY_MS = "800"
 JOB_TIMEOUT_SECONDS = 90.0
 JOB_EVENT_TIMEOUT_SECONDS = 60.0
@@ -2561,6 +2621,610 @@ def scenario_engine_offline(entry: dict[str, Any], report: dict[str, Any]) -> No
     )
 
 
+
+# ---------------------------------------------------------------- 证据图谱验收
+
+GRAPH_PAGE = "/api/projects/{project_id}/evidence-graph"
+GRAPH_QUESTION = "验收问题：哪些事件、相关方及其关系可以回到原创材料原文？"
+
+
+def record_graph_evidence(
+    report: dict[str, Any], scenario_id: str, **fields: object
+) -> None:
+    if report.get("graph_evidence") is None:
+        report["graph_evidence"] = {
+            "mode": "offline-stub",
+            "calls": {"real": 0, "double": 0},
+            "scenarios": [],
+        }
+    report["graph_evidence"]["scenarios"].append({"scenario": scenario_id, **fields})
+
+
+def graph_path(project_id: str, build_id: str | None = None) -> str:
+    base = GRAPH_PAGE.format(project_id=project_id)
+    return base if build_id is None else f"{base}?build={build_id}"
+
+
+def graph_build_path(project_id: str, build_id: str | None = None) -> str:
+    base = f"{GRAPH_PAGE.format(project_id=project_id)}/builds"
+    return base if build_id is None else f"{base}/{build_id}"
+
+
+def graph_snapshot_path(project_id: str, build_id: str, revision: int) -> str:
+    return f"{graph_build_path(project_id, build_id)}/snapshots/{revision}"
+
+
+def start_graph_build(
+    token: str,
+    project_id: str,
+    document_ids: list[str],
+    question: str = GRAPH_QUESTION,
+) -> tuple[int, dict[str, object] | None]:
+    status, _, body = api_call(
+        "POST",
+        graph_build_path(project_id),
+        token,
+        payload={"documentIds": document_ids, "question": question},
+        headers={"Origin": BASE_URL},
+    )
+    return status, body if isinstance(body, dict) else None
+
+
+def fetch_graph(
+    token: str, project_id: str, build_id: str | None = None
+) -> tuple[dict[str, object], dict[str, object] | None]:
+    status, _, body = api_call("GET", graph_path(project_id, build_id), token)
+    require(status == 200, f"建图读取期望 200，实际 {status}：{body}")
+    require(isinstance(body, dict) and "build" in body, f"建图响应缺少 build：{body}")
+    build = body["build"]  # type: ignore[index]
+    snapshot = body.get("snapshot") if isinstance(body, dict) else None
+    require(isinstance(build, dict), "建图 build 不是对象")
+    return build, snapshot if isinstance(snapshot, dict) else None
+
+
+def graph_sources(snapshot: dict[str, object]) -> list[dict[str, object]]:
+    sources: list[dict[str, object]] = []
+    for collection in ("nodes", "edges"):
+        for item in snapshot.get(collection) or []:
+            for source in item.get("sources") or []:
+                sources.append(source)
+    return sources
+
+
+def utf16_slice(text: str, start: int, end: int) -> str:
+    raw = text.encode("utf-16-le")
+    return raw[start * 2 : end * 2].decode("utf-16-le", "strict")
+
+
+def graph_build_count() -> int:
+    result = compose(
+        "exec",
+        "-T",
+        "db",
+        "psql",
+        "-U",
+        os.environ.get("POSTGRES_USER", "echosim"),
+        "-d",
+        os.environ.get("POSTGRES_DB", "echosim"),
+        "-Atc",
+        "SELECT count(*) FROM graph_builds",
+    )
+    require(result.returncode == 0, f"读取建图数量失败：{result.stderr.strip()}")
+    return int(result.stdout.strip() or "0")
+
+
+def run_graph_probe(
+    mode: str, *, project_id: str, document_id: str | None = None
+) -> dict[str, Any]:
+    args = [
+        "exec",
+        "-T",
+        "app",
+        "python",
+        "-m",
+        "app.graph_probe",
+        "--mode",
+        mode,
+        "--project-id",
+        project_id,
+    ]
+    if document_id:
+        args += ["--document-id", document_id]
+    result = compose(*args)
+    output = (result.stderr or result.stdout).strip()[-1000:]
+    require(result.returncode == 0, f"图谱探针 {mode} 失败：{output}")
+    lines = [line for line in result.stdout.splitlines() if line.strip()]
+    require(bool(lines), f"图谱探针 {mode} 没有 JSON 输出")
+    try:
+        return json.loads(lines[-1])
+    except json.JSONDecodeError as exc:
+        raise AssertionError(f"图谱探针 {mode} 输出不是 JSON") from exc
+
+
+def stop_worker() -> None:
+    result = compose("stop", "worker")
+    require(result.returncode == 0, f"停止 worker 失败：{result.stderr.strip()}")
+
+
+def start_worker() -> None:
+    result = compose("start", "worker")
+    require(result.returncode == 0, f"恢复 worker 失败：{result.stderr.strip()}")
+
+
+def scenario_graph_basic(
+    entry: dict[str, Any],
+    state: dict[str, Any],
+    report: dict[str, Any],
+    fixtures: DocumentFixtures,
+) -> None:
+    token, project_id = state["token_a"], state["project_id"]
+    pdf = upload_and_wait(
+        state, fixtures, f"graph-source-{fixtures.suffix}.pdf",
+        fixtures.three_page, "application/pdf",
+    )
+    text = upload_and_wait(
+        state, fixtures, f"graph-source-{fixtures.suffix}.txt",
+        fixtures.emoji_text, "text/plain",
+    )
+    extras: list[dict[str, object]] = []
+    for index in range(4):
+        extra = (
+            f"EchoSim 原创补充材料 {index} {fixtures.suffix}。\n"
+            "该段只用于六份材料上限与任务拒绝验证。"
+        ).encode("utf-8")
+        extras.append(
+            upload_and_wait(
+                state,
+                fixtures,
+                f"graph-extra-{index}-{fixtures.suffix}.txt",
+                extra,
+                "text/plain",
+            )
+        )
+
+    stop_worker()
+    queued_body = (
+        f"EchoSim 原创排队材料 {fixtures.suffix}。\n"
+        "worker 已停止，该材料应保持 queued。"
+    ).encode("utf-8")
+    queued_status, _, queued_payload = upload_document(
+        token, project_id, f"graph-queued-{fixtures.suffix}.txt", queued_body, "text/plain"
+    )
+    require(queued_status == 201, f"排队材料上传期望 201，实际 {queued_status}")
+    require(isinstance(queued_payload, dict), "排队材料响应不是对象")
+    queued_document = queued_payload["document"]  # type: ignore[index]
+    queued_id = str(queued_document["documentId"])
+    require(queued_document["status"] == "queued", "停止 worker 后新材料应保持 queued")
+
+    pdf_id = str(pdf["documentId"])
+    text_id = str(text["documentId"])
+    not_ready_status, not_ready_body = start_graph_build(
+        token, project_id, [pdf_id, queued_id]
+    )
+    require(not_ready_status == 409, f"未就绪材料期望 409，实际 {not_ready_status}")
+    require(
+        isinstance(not_ready_body, dict)
+        and not_ready_body.get("code") == "document_not_ready",
+        f"未就绪材料原因码异常：{not_ready_body}",
+    )
+
+    status_one, body_one = start_graph_build(token, project_id, [pdf_id, text_id])
+    require(status_one == 202, f"开始建图期望 202，实际 {status_one}：{body_one}")
+    assert body_one is not None
+    build_one = body_one["build"]  # type: ignore[index]
+    build_id_one = str(build_one["buildId"])
+    job_id_one = str(build_one["jobId"])
+    run_id_one = str(build_one["runId"])
+
+    status_two, body_two = start_graph_build(token, project_id, [pdf_id, text_id])
+    require(status_two == 200, f"重复开始期望 200，实际 {status_two}：{body_two}")
+    assert body_two is not None
+    build_two = body_two["build"]  # type: ignore[index]
+    require(
+        (build_two["buildId"], build_two["jobId"], build_two["runId"])
+        == (build_id_one, job_id_one, run_id_one),
+        "重复开始返回了不同 build/job/run",
+    )
+
+    six_ids = [pdf_id, text_id] + [str(item["documentId"]) for item in extras]
+    six_status, _ = start_graph_build(token, project_id, six_ids)
+    require(six_status == 422, f"六份材料期望 422，实际 {six_status}")
+    empty_status, _ = start_graph_build(token, project_id, [pdf_id], "   ")
+    require(empty_status == 422, f"空白问题期望 422，实际 {empty_status}")
+
+    anonymous_status, _, anonymous_body = raw_request("GET", graph_path(project_id))
+    require(anonymous_status == 401, f"匿名建图读取期望 401，实际 {anonymous_status}")
+    require(anonymous_body == '{"detail":"未登录"}', "匿名建图响应体异常")
+
+    client_b = HttpClient()
+    login_status, _, login_body = client_b.request(
+        "POST",
+        "/api/auth/login",
+        payload={"email": ACCOUNT_B, "password": state["password"]},
+        headers={"Origin": BASE_URL},
+    )
+    require(login_status == 200, f"B 登录失败：{login_body[:200]}")
+    status_b, _, body_b = client_b.request("GET", graph_path(project_id))
+    status_b_missing, _, body_b_missing = client_b.request(
+        "GET", graph_path(str(uuid.uuid4()))
+    )
+    require(status_b == 404, f"B 读取他人建图期望 404，实际 {status_b}")
+    require(status_b_missing == 404, "B 读取不存在项目期望 404")
+    require(body_b == body_b_missing == '{"detail":"项目不存在"}', "他人/不存在项目响应体不同")
+
+    state["graph_pdf_id"] = pdf_id
+    state["graph_text_id"] = text_id
+    state["graph_build_one"] = build_id_one
+    state["graph_job_one"] = job_id_one
+    state["graph_run_one"] = run_id_one
+    state["graph_queued_id"] = queued_id
+    record_graph_evidence(
+        report,
+        "graph-basic",
+        build_id=build_id_one,
+        job_id=job_id_one,
+        run_id=run_id_one,
+        duplicate_reused=True,
+        not_ready_status=not_ready_status,
+        six_documents_status=six_status,
+        empty_question_status=empty_status,
+        anonymous_status=anonymous_status,
+        other_user_status=status_b,
+        queued_document_id=queued_id,
+    )
+    entry["detail"] = (
+        f"开始 202、重复 200 且身份一致；未就绪 409、六份/空问题 422、"
+        f"匿名 401、他人 404（buildId={build_id_one}）"
+    )
+
+
+def scenario_graph_complete(
+    entry: dict[str, Any], state: dict[str, Any], report: dict[str, Any]
+) -> None:
+    token, project_id = state["token_a"], state["project_id"]
+    build_id = state["graph_build_one"]
+    start_worker()
+    job = wait_job(
+        token, project_id, state["graph_job_one"],
+        lambda item: item["status"] in ("succeeded", "failed", "canceled"),
+        timeout=120.0,
+    )
+    require(job["status"] == "succeeded", f"建图任务应成功，实际 {job['status']}")
+    build, snapshot = fetch_graph(token, project_id, build_id)
+    require(build["phase"] == "ready", f"建图 phase 应为 ready：{build['phase']}")
+    require(build["canContinue"] is True, "完成建图 canContinue 应为 true")
+    require(snapshot is not None, "完成建图缺少快照")
+    assert snapshot is not None
+    require(snapshot["complete"] is True, "最终快照应 complete=true")
+    require(snapshot["published"] is True, "最终快照应 published=true")
+    require(int(snapshot["nodeCount"]) >= 3, "材料节点应至少 3 个")
+    require(int(snapshot["edgeCount"]) >= 3, "材料关系应至少 3 条")
+    require(
+        int(snapshot["nodeCount"]) == len(snapshot["nodes"]),
+        "节点计数与数组长度不一致",
+    )
+    require(
+        int(snapshot["edgeCount"]) == len(snapshot["edges"]),
+        "关系计数与数组长度不一致",
+    )
+
+    events = fetch_job_events(token, project_id, state["graph_job_one"])
+    seqs = event_seqs(events)
+    require(seqs == list(range(1, len(seqs) + 1)), f"事件序号不连续：{seqs}")
+    types = event_types(events)
+    require(types[-1] == "completed", f"最后事件应为 completed：{types}")
+    require(types.count("completed") == 1, f"completed 应只有一条：{types}")
+    phases = [
+        str(event["payload"].get("phase"))
+        for event in events["events"]  # type: ignore[index]
+        if event["payload"].get("phase")
+    ]
+    for required_phase in ("waiting_index", "drawing", "ready"):
+        require(required_phase in phases, f"阶段序列缺少 {required_phase}：{phases}")
+
+    partial_revisions: list[int] = []
+    for event in events["events"]:  # type: ignore[index]
+        payload = event["payload"]
+        if payload.get("partial") is True and payload.get("snapshotRevision"):
+            revision = int(payload["snapshotRevision"])
+            if revision not in partial_revisions:
+                partial_revisions.append(revision)
+    require(bool(partial_revisions), "未观察到任何 complete=false 部分快照")
+    partial_snapshots = []
+    for revision in partial_revisions:
+        status, _, body = api_call(
+            "GET", graph_snapshot_path(project_id, build_id, revision), token
+        )
+        require(status == 200, f"部分快照 {revision} 读取失败：{status}")
+        partial = body["snapshot"]  # type: ignore[index]
+        require(partial["complete"] is False, f"部分快照 {revision} 不应 complete")
+        require(partial["published"] is True, f"部分快照 {revision} 应已发布")
+        partial_snapshots.append(partial)
+    first_partial = partial_snapshots[0]
+
+    sources = graph_sources(snapshot)
+    pdf_page3 = next(
+        (
+            source
+            for source in sources
+            if source.get("kind") == "pdf"
+            and int(source.get("pageNo") or 0) == 3
+            and str((source.get("locator") or {}).get("url", "")).endswith("#page=3")
+        ),
+        None,
+    )
+    require(pdf_page3 is not None, "缺少 PDF 第 3 页来源与 #page=3 定位")
+    text_source = next(
+        (
+            source
+            for source in sources
+            if source.get("kind") == "text"
+            and int(source.get("sourceEnd") or 0) > int(source.get("sourceStart") or 0)
+        ),
+        None,
+    )
+    require(text_source is not None, "缺少文本来源 UTF-16 偏移")
+    source_url = str((text_source.get("locator") or {}).get("url", ""))
+    source_status, _, source_bytes = fetch_document_bytes(token, source_url)
+    require(source_status == 200, f"文本原文读取失败：{source_status}")
+    source_text = source_bytes.decode("utf-8")
+    sliced = utf16_slice(
+        source_text,
+        int(text_source["sourceStart"]),
+        int(text_source["sourceEnd"]),
+    )
+    visible = lambda value: "".join(str(value).split())
+    require(
+        visible(sliced) == visible(text_source["quote"]),
+        "文本来源 UTF-16 偏移切片与引文不一致",
+    )
+
+    material_nodes = [
+        node for node in snapshot["nodes"] if node.get("origin") == "material"
+    ]
+    material_edges = [
+        edge for edge in snapshot["edges"] if edge.get("origin") == "material"
+    ]
+    require(len(material_nodes) >= 3, "材料节点不足 3 个")
+    require(len(material_edges) >= 3, "材料关系不足 3 条")
+    sample_nodes = [
+        {"key": node["key"], "pageNo": (node.get("sources") or [{}])[0].get("pageNo")}
+        for node in material_nodes[:3]
+    ]
+    sample_edges = [
+        {
+            "key": edge["key"],
+            "pageNo": (edge.get("sources") or [{}])[0].get("pageNo"),
+        }
+        for edge in material_edges[:3]
+    ]
+
+    graph_evidence = report.get("graph_evidence")
+    if not isinstance(graph_evidence, dict):
+        graph_evidence = {
+            "mode": "offline-stub",
+            "calls": {"real": 0, "double": 0},
+            "scenarios": [],
+        }
+        report["graph_evidence"] = graph_evidence
+    graph_evidence.setdefault("calls", {"real": 0, "double": 0})
+    graph_evidence["calls"]["double"] = max(
+        1, int(build["plannedEpisodes"]) + int(build["acceptedEpisodes"])
+    )
+    record_graph_evidence(
+        report,
+        "graph-complete",
+        build_id=build_id,
+        job_id=state["graph_job_one"],
+        run_id=state["graph_run_one"],
+        phase_sequence=phases,
+        event_seqs=seqs,
+        partial_revisions=partial_revisions,
+        first_partial_node_count=int(first_partial["nodeCount"]),
+        first_partial_edge_count=int(first_partial["edgeCount"]),
+        final_revision=int(snapshot["revision"]),
+        final_node_count=int(snapshot["nodeCount"]),
+        final_edge_count=int(snapshot["edgeCount"]),
+        pdf_page_no=3,
+        text_utf16=[
+            int(text_source["sourceStart"]),
+            int(text_source["sourceEnd"]),
+        ],
+        sample_nodes=sample_nodes,
+        sample_edges=sample_edges,
+    )
+    state["graph_final_snapshot"] = snapshot
+    entry["detail"] = (
+        f"阶段含 waiting_index/drawing/ready；部分快照 {len(partial_revisions)} 份，"
+        f"最终 {snapshot['nodeCount']} 节点 / {snapshot['edgeCount']} 关系；"
+        "PDF page3 与文本 UTF-16 来源校验通过"
+    )
+
+
+def scenario_graph_bind_probe(
+    entry: dict[str, Any], state: dict[str, Any], report: dict[str, Any]
+) -> None:
+    stop_worker()
+    result = run_graph_probe(
+        "bind-windows",
+        project_id=state["project_id"],
+        document_id=state["graph_pdf_id"],
+    )
+    cases = result.get("cases") or []
+    require(len(cases) == 3, f"绑定窗口应覆盖 3 种：{result}")
+    for case in cases:
+        require(case["sameIdempotencyKey"] is True, f"幂等键变化：{case}")
+        require(case["singleGraphId"] is True, f"出现多个 graph_id：{case}")
+        require(int(case["bindingRows"]) == 1, f"绑定行数不是 1：{case}")
+        require(int(case["boundRows"]) == 1, f"绑定未完成：{case}")
+    takeover = next(case for case in cases if case["case"] == "takeover_pending_binding")
+    require(int(takeover["takeoverAttempts"]) >= 2, f"未发生接手：{takeover}")
+    record_graph_evidence(report, "graph-bind-windows", cases=cases)
+    entry["detail"] = (
+        "响应丢失、响应到达未提交、接手 pending 绑定均复用同一幂等键且只绑定一个 graph_id"
+    )
+
+
+def scenario_graph_failure_probe(
+    entry: dict[str, Any], state: dict[str, Any], report: dict[str, Any]
+) -> None:
+    result = run_graph_probe(
+        "failure-codes",
+        project_id=state["project_id"],
+        document_id=state["graph_pdf_id"],
+    )
+    codes = {case["case"]: case["code"] for case in result.get("cases") or []}
+    require(codes.get("index_timeout") == "index_timeout", f"index_timeout 分类错误：{codes}")
+    require(codes.get("write_unconfirmed") == "write_unconfirmed", f"write_unconfirmed 分类错误：{codes}")
+    require(codes.get("processing_timeout") == "processing_timeout", f"processing_timeout 分类错误：{codes}")
+    require(
+        codes.get("graph_incomplete") in ("graph_incomplete", "processing_timeout"),
+        f"graph_incomplete 分类错误：{codes}",
+    )
+    limits = {case["case"]: case for case in result.get("limits") or []}
+    require(limits.get("graph_too_large_nodes", {}).get("code") == "graph_too_large", f"节点上限分类错误：{limits}")
+    require(limits.get("graph_too_large_edges", {}).get("code") == "graph_too_large", f"边上限分类错误：{limits}")
+    require(limits.get("too_many_sources", {}).get("code") == "too_many_sources", f"来源上限分类错误：{limits}")
+    no_snapshot = limits.get("no_snapshot_published") or {}
+    require(int(no_snapshot.get("before", -1)) == int(no_snapshot.get("after", -2)), "超限路径发布了快照")
+    record_graph_evidence(report, "graph-failure-codes", cases=codes, limits=limits)
+    entry["detail"] = "失败原因码稳定，超限路径未发布任何快照"
+
+
+def scenario_graph_publish_probe(
+    entry: dict[str, Any], state: dict[str, Any], report: dict[str, Any]
+) -> None:
+    result = run_graph_probe(
+        "publish-race",
+        project_id=state["project_id"],
+        document_id=state["graph_pdf_id"],
+    )
+    publish = result.get("publish_before_cancel") or {}
+    cancel = result.get("cancel_before_publish") or {}
+    require(publish.get("outcome") == "succeeded", f"发布步骤失败：{publish}")
+    require(publish.get("cancelApplied") is False, f"发布后取消不应生效：{publish}")
+    require(publish.get("phase") == "ready", f"发布后 phase 应为 ready：{publish}")
+    require(publish.get("finalComplete") is True, f"最终快照未完成：{publish}")
+    require(int(publish.get("completedEvents", 0)) == 1, f"completed 事件数异常：{publish}")
+    require(cancel.get("outcome") == "canceled", f"取消先于发布应终止：{cancel}")
+    require(cancel.get("cancelApplied") is True, f"取消应先提交：{cancel}")
+    require(cancel.get("candidateVisible") is False, f"候选快照不应可见：{cancel}")
+    require(int(cancel.get("completedEvents", 0)) == 0, f"取消路径不应有 completed：{cancel}")
+    record_graph_evidence(
+        report,
+        "graph-publish-race",
+        publish_before_cancel=publish,
+        cancel_before_publish=cancel,
+    )
+    entry["detail"] = (
+        "发布先于取消时只有一个完成快照与 completed 事件；取消先于发布时候选不可见且无完成事件"
+    )
+
+
+def scenario_graph_second_build(
+    entry: dict[str, Any], state: dict[str, Any], report: dict[str, Any]
+) -> None:
+    token, project_id = state["token_a"], state["project_id"]
+    first_build = state["graph_build_one"]
+    status, body = start_graph_build(
+        token, project_id, [state["graph_pdf_id"], state["graph_text_id"]]
+    )
+    require(status == 202, f"第二次建图期望 202，实际 {status}：{body}")
+    assert body is not None
+    second = body["build"]  # type: ignore[index]
+    second_build = str(second["buildId"])
+    require(second_build != first_build, "第二次建图应产生新 buildId")
+    default_build, _ = fetch_graph(token, project_id)
+    require(
+        default_build["buildId"] == second_build,
+        f"活动 build 应优先，实际 {default_build['buildId']}",
+    )
+    first_build_body, first_snapshot = fetch_graph(token, project_id, first_build)
+    require(first_build_body["buildId"] == first_build, "按旧 buildId 读取失败")
+    require(first_snapshot is not None and first_snapshot["complete"] is True, "旧 build 完成图不可读")
+    start_worker()
+    final_job = wait_job(
+        token,
+        project_id,
+        str(second["jobId"]),
+        lambda item: item["status"] in ("succeeded", "failed", "canceled"),
+        timeout=120.0,
+    )
+    require(final_job["status"] == "succeeded", f"第二次建图未成功：{final_job['status']}")
+    second_build_body, second_snapshot = fetch_graph(token, project_id, second_build)
+    require(second_build_body["phase"] == "ready", "第二次建图未完成")
+    require(second_snapshot is not None and second_snapshot["complete"] is True, "第二次最终快照不可读")
+    record_graph_evidence(
+        report,
+        "graph-second-build",
+        first_build_id=first_build,
+        second_build_id=second_build,
+        default_selected_second=True,
+        first_build_readable=True,
+        second_final_revision=int(second_snapshot["revision"]),
+    )
+    state["graph_build_two"] = second_build
+    entry["detail"] = (
+        f"第二次 buildId={second_build} 等待时默认返回第二次；按第一次 buildId 仍可读取完成图"
+    )
+
+
+def scenario_graph_redaction(
+    entry: dict[str, Any],
+    report: dict[str, Any],
+    fixtures: DocumentFixtures,
+) -> None:
+    logs_result = compose("logs", "--no-color", "app", "worker")
+    logs = (logs_result.stdout or "") + (logs_result.stderr or "")
+    serialized = json.dumps(report, ensure_ascii=False)
+    tokens = [REDACTION_SECRET, fixtures.three_page_marker]
+    require(REDACTION_SECRET != "verify-secret-unset", "未注入唯一测试密钥")
+    for token in tokens:
+        require(token not in logs, "隔离日志包含测试密钥或材料私有标记")
+        require(token not in serialized, "验收报告包含测试密钥或材料私有标记")
+    report["graph_evidence"]["redaction"] = {"passed": True, "tokens": len(tokens)}
+    entry["detail"] = "日志与内存报告均不含唯一测试密钥或原创材料标记"
+
+
+def scenario_graph_not_triggered(
+    entry: dict[str, Any], report: dict[str, Any]
+) -> None:
+    count = graph_build_count()
+    require(count == 0, f"默认验收不应创建建图任务，实际 {count}")
+    report["graph_evidence"] = {
+        "mode": "not-run",
+        "calls": {"real": 0, "double": 0},
+        "builds": count,
+        "scenarios": [],
+    }
+    entry["detail"] = "默认 make verify 未创建任何建图任务，真实与替身调用均为 0"
+
+
+def scenario_graph_worker_restored(
+    entry: dict[str, Any], report: dict[str, Any]
+) -> None:
+    result = compose("config", "--format", "json")
+    require(result.returncode == 0, f"docker compose config 失败：{result.stderr.strip()}")
+    config = json.loads(result.stdout)
+    env = (config.get("services") or {}).get("worker", {}).get("environment") or {}
+    model = str(env.get("EVIDENCE_GRAPH_MODEL_PROVIDER", ""))
+    graph = str(env.get("EVIDENCE_GRAPH_GRAPH_PROVIDER", ""))
+    allow = str(env.get("EVIDENCE_GRAPH_ALLOW_STUB", "")).lower()
+    require(model != "stub", f"worker 模型 provider 未恢复：{model}")
+    require(graph != "stub", f"worker 图谱 provider 未恢复：{graph}")
+    require(allow in ("false", "0", ""), f"worker stub 开关未恢复：{allow}")
+    evidence = report.get("graph_evidence")
+    if isinstance(evidence, dict):
+        evidence["workerRestored"] = {
+            "modelProvider": model,
+            "graphProvider": graph,
+            "stubAllowed": allow not in ("false", "0", ""),
+        }
+    entry["detail"] = (
+        "Change 07 运行结束后 worker 已恢复为非 stub provider，stub 开关为 false"
+    )
+
+
 def run_acceptance(report: dict[str, Any], change: str | None = None) -> bool:
     state: dict[str, Any] = {}
     fixtures = DocumentFixtures()
@@ -2617,6 +3281,9 @@ def run_acceptance(report: dict[str, Any], change: str | None = None) -> bool:
             scenario_identity_stable(entry, report)
         with scenario(report, "homepage-after-recovery") as entry:
             scenario_homepage_after_recovery(entry)
+        if change is None:
+            with scenario(report, "graph-not-triggered") as entry:
+                scenario_graph_not_triggered(entry, report)
         if change == CHANGE_ID:
             with scenario(report, "job-two-jobs-isolation") as entry:
                 scenario_job_two_jobs(entry, state, report)
@@ -2645,6 +3312,21 @@ def run_acceptance(report: dict[str, Any], change: str | None = None) -> bool:
         if change == ENGINE_CHANGE_ID:
             with scenario(report, "engine-offline-contract") as entry:
                 scenario_engine_offline(entry, report)
+        if change == GRAPH_CHANGE_ID:
+            with scenario(report, "graph-basic") as entry:
+                scenario_graph_basic(entry, state, report, fixtures)
+            with scenario(report, "graph-complete") as entry:
+                scenario_graph_complete(entry, state, report)
+            with scenario(report, "graph-bind-windows") as entry:
+                scenario_graph_bind_probe(entry, state, report)
+            with scenario(report, "graph-failure-codes") as entry:
+                scenario_graph_failure_probe(entry, state, report)
+            with scenario(report, "graph-publish-race") as entry:
+                scenario_graph_publish_probe(entry, state, report)
+            with scenario(report, "graph-second-build") as entry:
+                scenario_graph_second_build(entry, state, report)
+            with scenario(report, "graph-redaction") as entry:
+                scenario_graph_redaction(entry, report, fixtures)
         if change == DOCUMENT_CHANGE_ID:
             with scenario(report, "document-pdf-pages") as entry:
                 scenario_document_pdf_pages(entry, state, report, fixtures)
@@ -2705,6 +3387,10 @@ def write_report(report: dict[str, Any]) -> None:
     atomic_write(REPORT_PATH, report)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     atomic_write(REPORT_DIR / f"run-{stamp}.json", report)
+    label = os.environ.get("VERIFY_REPORT_LABEL", "").strip()
+    if label:
+        safe_label = re.sub(r"[^A-Za-z0-9._-]+", "-", label)[:80]
+        atomic_write(REPORT_DIR / f"run-{safe_label}.json", report)
 
 
 def finalize(report: dict[str, Any], exit_code: int) -> int:
@@ -2755,6 +3441,7 @@ def new_report(expected_sha: str | None) -> dict[str, Any]:
         "job_evidence": [],
         "document_evidence": [],
         "engine_evidence": None,
+        "graph_evidence": None,
         "started_at": utc_now(),
         "finished_at": None,
         "exit_code": None,
@@ -2769,6 +3456,10 @@ def new_report(expected_sha: str | None) -> dict[str, Any]:
 
 
 def run(report: dict[str, Any], args: argparse.Namespace) -> int:
+    global COMPOSE_PROJECT
+    COMPOSE_PROJECT = (
+        os.environ.get("VERIFY_COMPOSE_PROJECT", "").strip() or "echosim-verify"
+    )
     allow_dirty = os.environ.get("ALLOW_DIRTY", "").strip().lower() in {"1", "true", "yes"}
 
     try:
@@ -2846,15 +3537,31 @@ def run(report: dict[str, Any], args: argparse.Namespace) -> int:
         )
         return finalize(report, 2)
 
+    isolated_saved = apply_runtime_env(isolated_runtime_env())
+    graph_saved: dict[str, str | None] | None = None
+    if change == GRAPH_CHANGE_ID:
+        graph_saved = apply_runtime_env(graph_runtime_env())
     if change == CHANGE_ID:
         # 放大步骤间隔，让“读到第 4 条后断开”、worker 中断等窗口足够宽。
         os.environ["TEST_TASK_STEP_DELAY_MS"] = VERIFY_STEP_DELAY_MS
 
+    passed = False
     try:
-        passed = run_acceptance(report, change)
+        try:
+            passed = run_acceptance(report, change)
+        finally:
+            restore_database()
+            if graph_saved is not None:
+                restore_runtime_env(graph_saved)
+            restore_worker_defaults()
+        if change == GRAPH_CHANGE_ID and passed:
+            try:
+                with scenario(report, "graph-worker-env-restored") as entry:
+                    scenario_graph_worker_restored(entry, report)
+            except ScenarioFailed:
+                passed = False
     finally:
-        restore_database()
-        restore_worker_defaults()
+        restore_runtime_env(isolated_saved)
 
     return finalize(report, 0 if passed else 1)
 
