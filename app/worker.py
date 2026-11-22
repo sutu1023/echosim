@@ -17,7 +17,11 @@ from pathlib import Path
 from .config import settings
 from .db import SessionLocal, dispose_engine
 from .engines.business_config import BusinessGraphConfig
-from .engines.business_runtime import create_graph_client, create_planner
+from .engines.business_runtime import (
+    ProviderCallMetrics,
+    create_graph_client,
+    create_planner,
+)
 from .services import worker as worker_service
 
 logger = logging.getLogger("echosim.worker")
@@ -79,6 +83,7 @@ async def run(stop_event: asyncio.Event) -> None:
         try:
             if claim.kind == "evidence.graph.build":
                 business_config = BusinessGraphConfig.from_env()
+                metrics = ProviderCallMetrics()
                 client_cache: dict[str, object] = {}
 
                 def graph_client_factory():
@@ -88,6 +93,7 @@ async def run(stop_event: asyncio.Event) -> None:
                             zep_api_key=settings.zep_api_key,
                             zep_api_base_url=settings.zep_api_base_url,
                             timeout_seconds=settings.graph_write_timeout_seconds,
+                            metrics=metrics,
                         )
                     return client_cache["client"]
 
@@ -106,9 +112,11 @@ async def run(stop_event: asyncio.Event) -> None:
                         timeout_seconds=settings.model_timeout_seconds,
                         question=question,
                         chunks=chunks,
+                        metrics=metrics,
                     ),
                     graph_client_factory=graph_client_factory,
                     storage_root=settings.document_storage_dir,
+                    metrics=metrics,
                 )
             elif claim.kind == "document.ingest":
                 outcome = await worker_service.execute_ingest(

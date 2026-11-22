@@ -25,6 +25,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..engines.business_config import BusinessGraphConfig, BusinessGraphConfigError
 from ..engines.business_contracts import GraphResult, SourceRef
+from ..engines.business_runtime import ProviderCallMetrics
 from ..engines.business_graph import (
     BusinessGraphError,
     _classify_exception,
@@ -2878,6 +2879,32 @@ async def _fail_graph_build(
             raise
 
 
+async def _add_provider_calls(
+    claim: Claim,
+    *,
+    session_factory: SessionFactory,
+    real_delta: int,
+    double_delta: int,
+) -> None:
+    if real_delta <= 0 and double_delta <= 0:
+        return
+    async with session_factory() as db:
+        await db.execute(
+            text(
+                "UPDATE graph_builds SET "
+                "provider_calls_real = provider_calls_real + :real_delta, "
+                "provider_calls_double = provider_calls_double + :double_delta, "
+                "updated_at = clock_timestamp() WHERE run_id = :run_id"
+            ),
+            {
+                "real_delta": max(0, real_delta),
+                "double_delta": max(0, double_delta),
+                "run_id": claim.run_id,
+            },
+        )
+        await db.commit()
+
+
 async def execute_graph_build(
     claim: Claim,
     *,
@@ -2889,10 +2916,29 @@ async def execute_graph_build(
     planner_factory: Callable[[str, Sequence[ChunkInput]], BusinessModelPlanner],
     graph_client_factory: Callable[[], Any],
     storage_root: object,
+    metrics: ProviderCallMetrics | None = None,
 ) -> str:
     """按当前步号执行六步业务建图；失败写稳定原因码，取消保留部分快照。"""
     planner: BusinessModelPlanner | None = None
     current = claim.next_step
+    last_real = 0
+    last_double = 0
+
+    async def flush_provider_calls() -> None:
+        nonlocal last_real, last_double
+        if metrics is None:
+            return
+        real_delta = metrics.real - last_real
+        double_delta = metrics.double - last_double
+        await _add_provider_calls(
+            claim,
+            session_factory=session_factory,
+            real_delta=real_delta,
+            double_delta=double_delta,
+        )
+        last_real = metrics.real
+        last_double = metrics.double
+
     try:
         for step in range(current + 1, GRAPH_BUILD_TOTAL_STEPS + 1):
             if stop_event is not None and stop_event.is_set():
@@ -2962,6 +3008,7 @@ async def execute_graph_build(
                     heartbeat_seconds=heartbeat_seconds,
                     config=config,
                 )
+            await flush_provider_calls()
             if outcome in ("succeeded", "completed"):
                 return "succeeded"
             if outcome == "duplicate":
@@ -2975,6 +3022,10 @@ async def execute_graph_build(
         logger.warning(
             "建图失败 job_id=%s code=%s", claim.job_id, exc.code
         )
+        try:
+            await flush_provider_calls()
+        except Exception:  # noqa: BLE001 - 计数失败不掩盖原始失败
+            logger.warning("provider 调用计数写入失败 job_id=%s", claim.job_id)
         return await _fail_graph_build(
             claim,
             session_factory=session_factory,
@@ -2983,6 +3034,10 @@ async def execute_graph_build(
         )
     except BusinessGraphError as exc:
         logger.warning("建图适配失败 job_id=%s code=%s", claim.job_id, exc.code)
+        try:
+            await flush_provider_calls()
+        except Exception:  # noqa: BLE001 - 计数失败不掩盖原始失败
+            logger.warning("provider 调用计数写入失败 job_id=%s", claim.job_id)
         return await _fail_graph_build(
             claim,
             session_factory=session_factory,
@@ -2991,6 +3046,10 @@ async def execute_graph_build(
         )
     except BusinessGraphConfigError as exc:
         logger.warning("建图配置不可用 job_id=%s code=%s", claim.job_id, exc.code)
+        try:
+            await flush_provider_calls()
+        except Exception:  # noqa: BLE001 - 计数失败不掩盖原始失败
+            logger.warning("provider 调用计数写入失败 job_id=%s", claim.job_id)
         return await _fail_graph_build(
             claim,
             session_factory=session_factory,
@@ -2999,6 +3058,10 @@ async def execute_graph_build(
         )
     except GraphBindingConflict as exc:
         logger.warning("图谱绑定冲突 job_id=%s code=%s", claim.job_id, exc.code)
+        try:
+            await flush_provider_calls()
+        except Exception:  # noqa: BLE001 - 计数失败不掩盖原始失败
+            logger.warning("provider 调用计数写入失败 job_id=%s", claim.job_id)
         return await _fail_graph_build(
             claim,
             session_factory=session_factory,
@@ -3007,6 +3070,10 @@ async def execute_graph_build(
         )
     except GraphLimitExceeded as exc:
         logger.warning("建图规模超限 job_id=%s code=%s", claim.job_id, exc.code)
+        try:
+            await flush_provider_calls()
+        except Exception:  # noqa: BLE001 - 计数失败不掩盖原始失败
+            logger.warning("provider 调用计数写入失败 job_id=%s", claim.job_id)
         return await _fail_graph_build(
             claim,
             session_factory=session_factory,
@@ -3017,6 +3084,10 @@ async def execute_graph_build(
         logger.warning(
             "建图异常 job_id=%s: %s", claim.job_id, type(exc).__name__
         )
+        try:
+            await flush_provider_calls()
+        except Exception:  # noqa: BLE001 - 计数失败不掩盖原始失败
+            logger.warning("provider 调用计数写入失败 job_id=%s", claim.job_id)
         return await _fail_graph_build(
             claim,
             session_factory=session_factory,

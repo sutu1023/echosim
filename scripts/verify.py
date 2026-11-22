@@ -2999,6 +2999,10 @@ def scenario_graph_complete(
         for edge in material_edges[:3]
     ]
 
+    provider_calls = build.get("providerCalls") or {}
+    require(int(provider_calls.get("real", -1)) == 0, f"首次建图出现真实调用：{provider_calls}")
+    require(int(provider_calls.get("double", 0)) > 0, f"首次建图缺少替身调用计数：{provider_calls}")
+    state["graph_provider_calls"] = [dict(provider_calls)]
     graph_evidence = report.get("graph_evidence")
     if not isinstance(graph_evidence, dict):
         graph_evidence = {
@@ -3007,10 +3011,6 @@ def scenario_graph_complete(
             "scenarios": [],
         }
         report["graph_evidence"] = graph_evidence
-    graph_evidence.setdefault("calls", {"real": 0, "double": 0})
-    graph_evidence["calls"]["double"] = max(
-        1, int(build["plannedEpisodes"]) + int(build["acceptedEpisodes"])
-    )
     record_graph_evidence(
         report,
         "graph-complete",
@@ -3032,6 +3032,7 @@ def scenario_graph_complete(
         ],
         sample_nodes=sample_nodes,
         sample_edges=sample_edges,
+        provider_calls=provider_calls,
     )
     state["graph_final_snapshot"] = snapshot
     entry["detail"] = (
@@ -3154,6 +3155,25 @@ def scenario_graph_second_build(
     second_build_body, second_snapshot = fetch_graph(token, project_id, second_build)
     require(second_build_body["phase"] == "ready", "第二次建图未完成")
     require(second_snapshot is not None and second_snapshot["complete"] is True, "第二次最终快照不可读")
+    second_calls = second_build_body.get("providerCalls") or {}
+    require(int(second_calls.get("real", -1)) == 0, f"第二次建图出现真实调用：{second_calls}")
+    require(int(second_calls.get("double", 0)) > 0, f"第二次建图缺少替身调用计数：{second_calls}")
+    calls = state.get("graph_provider_calls") or []
+    calls.append(dict(second_calls))
+    measured_real = sum(int(item.get("real", 0)) for item in calls)
+    measured_double = sum(int(item.get("double", 0)) for item in calls)
+    graph_evidence = report.get("graph_evidence")
+    assert isinstance(graph_evidence, dict)
+    graph_evidence["calls"] = {
+        "real": measured_real,
+        "double": measured_double,
+    }
+    graph_evidence["callScope"] = {
+        "buildIds": [first_build, second_build],
+        "builds": len(calls),
+        "source": "provider-boundary",
+        "perBuild": calls,
+    }
     record_graph_evidence(
         report,
         "graph-second-build",
@@ -3162,6 +3182,7 @@ def scenario_graph_second_build(
         default_selected_second=True,
         first_build_readable=True,
         second_final_revision=int(second_snapshot["revision"]),
+        provider_calls=second_calls,
     )
     state["graph_build_two"] = second_build
     entry["detail"] = (

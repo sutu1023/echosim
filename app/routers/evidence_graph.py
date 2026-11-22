@@ -54,6 +54,10 @@ def _build_body(build: graph_store.GraphBuild) -> dict[str, object]:
         "confirmedEpisodes": build.confirmed_episodes,
         "canContinue": build.can_continue,
         "failure": failure,
+        "providerCalls": {
+            "real": build.provider_calls_real,
+            "double": build.provider_calls_double,
+        },
         "createdAt": _iso(build.created_at),
         "updatedAt": _iso(build.updated_at),
         "finishedAt": _iso(build.finished_at),

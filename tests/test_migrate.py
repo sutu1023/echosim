@@ -330,6 +330,7 @@ class PostgresMigrationTests(unittest.IsolatedAsyncioTestCase):
                 "0005_evidence_graph_builds",
                 "0006_graph_episode_write_outcome",
                 "0007_backfill_graph_episode_write_outcome",
+                "0008_graph_build_provider_calls",
             ],
         )
         self.assertEqual(rerun, [])
@@ -403,6 +404,7 @@ class PostgresMigrationTests(unittest.IsolatedAsyncioTestCase):
                 "0005_evidence_graph_builds",
                 "0006_graph_episode_write_outcome",
                 "0007_backfill_graph_episode_write_outcome",
+                "0008_graph_build_provider_calls",
             ],
         )
         self.assertEqual(rerun, [])

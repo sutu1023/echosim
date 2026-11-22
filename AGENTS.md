@@ -179,7 +179,7 @@ make user EMAIL=a@example.com  # 从标准输入读取密码，创建/更新账�
 - `make verify CHANGE=2026-11-21-ingest-seed-documents` 必须在默认场景之上追加：三页 PDF 的总页数、空白页零分块、第 3 页 `pageNo` 与 `#page=3` 来源、原件哈希与页对象结构；PDF 页眉页脚与打印路径清理；文本换行/空白归一、合法路径保留、emoji 偏移与 GB18030 原件/原文；20 MiB 边界、空文件、无文字层与页数上限；重复上传只留一套；匿名 401 与他人 404；worker 停止时取消排队任务；慢解析续租与中断接手。
 - `make verify CHANGE=2026-11-21-track-background-jobs` 必须在同一 SHA 上追加：真实 SSE 两段序号（1–4 与 5–10）、`Last-Event-ID` 优先、终态重连立即结束、并发开始只新增一对 job/run、worker 中断接手、真实 PostgreSQL 锁等待跨过期点与旧令牌拒绝回归、取消（含 `canceled seq=4`）、受控失败与取消/完成竞态。未注册的 `CHANGE` 必须以退出码 2 结束。
 - `make verify CHANGE=2026-11-22-build-evidence-graph` 必须在同一 SHA 上追加：原创材料开始/重复/未就绪/六份/空问题/匿名/他人边界；真实 worker 的阶段序列、增量部分快照与最终快照、PDF 第 3 页与文本 UTF-16 来源；绑定响应丢失、未提交、接手；失败原因码与超限不发布；发布/取消竞态；第二次建图隔离；日志/报告脱敏与 worker provider 恢复。未注册的 `CHANGE` 必须以退出码 2 结束。
-- `make verify` 必须使用独立的 Compose 项目、回环端口与数据卷，不得停止或改写本地 8080 工作台；Change 07 默认使用离线 stub provider，不读取真实模型/Zep 凭据。`graph_evidence.calls.real` 必须为 0、`calls.double` 必须大于 0。
+- `make verify` 必须使用独立的 Compose 项目、回环端口与数据卷，不得停止或改写本地 8080 工作台；Change 07 默认使用离线 stub provider，不读取真实模型/Zep 凭据。`graph_evidence.calls.real` 必须为 0、`calls.double` 必须大于 0；计数必须来自 provider 调用边界的逐 build 持久化值，并在 `callScope` 中列出覆盖的 buildId，不得用计划数、节点数或快照大小推算。
 - 报告必须在 `job_evidence` 中记录 `jobId`、`runId`、两段序号、接手前后 `attempts`、副作用计数与旧令牌结果；在 `document_evidence` 中记录材料标识、解析任务标识、页数、分块数、第 3 页页码与来源、原件哈希、重复上传与取消/接手结果；页面提示、布局、语言、断线时序与 PDF 浏览器实际落页仍只写入 `docs/acceptance/`。
 - 工作树存在未忽略改动时 `make verify` 默认拒绝执行；仅在本地调试时可用 `ALLOW_DIRTY=1`，此时报告记录 `dirty: true`，**不得**作为干净克隆证据。
 - CI 必须调用与本地相同的 `make verify`，并断言报告 `tested_sha` 等于触发 SHA；不得在 CI 中重复实现验收逻辑。

@@ -436,7 +436,7 @@ EXPECTED_SHA=$(git rev-parse HEAD) make verify CHANGE=2026-11-21-ingest-seed-doc
 
 未注册的 `CHANGE` 会以退出码 2 结束，并在报告里写明原因。
 
-- 机器可读报告字段包括 `result`、`tested_sha`、`dirty`、`started_at`/`finished_at`、逐场景 `scenarios[]`、`acceptance_accounts`、`isolation_project`、`app` 容器身份、`job_evidence` 与材料场景的 `document_evidence`。建图场景另写 `graph_evidence`：`mode`、`calls.real`/`calls.double`、阶段序列、部分与最终快照版本/节点/边计数、来源页码与 UTF-16 偏移、绑定尝试与置位结果、失败原因码、发布/取消竞态、第二次 build 身份、日志/报告脱敏结果与 worker provider 恢复结果；不写材料正文、密钥或完整 provider 响应。
+- 机器可读报告字段包括 `result`、`tested_sha`、`dirty`、`started_at`/`finished_at`、逐场景 `scenarios[]`、`acceptance_accounts`、`isolation_project`、`app` 容器身份、`job_evidence` 与材料场景的 `document_evidence`。建图场景另写 `graph_evidence`：`mode`、`calls.real`/`calls.double`（从 provider 边界逐 build 持久化并汇总，不由计划数或快照大小推算）、`callScope`（覆盖的 buildId 与逐 build 实测值）、阶段序列、部分与最终快照版本/节点/边计数、来源页码与 UTF-16 偏移、绑定尝试与置位结果、失败原因码、发布/取消竞态、第二次 build 身份、日志/报告脱敏结果与 worker provider 恢复结果；不写材料正文、密钥或完整 provider 响应。
 - CI 成功与失败运行都会上传 `verify-report-<sha>`；报告缺失会让工作流失败。可用手动触发执行受控失败演练：
 
 ```bash

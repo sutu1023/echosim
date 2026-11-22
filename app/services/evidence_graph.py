@@ -81,6 +81,7 @@ WITH selected AS (
     SELECT b.id, b.project_id, b.run_id, b.question, b.phase,
            b.planned_episodes, b.accepted_episodes, b.confirmed_episodes,
            b.can_continue, b.failure_code, b.failure_message,
+           b.provider_calls_real, b.provider_calls_double,
            b.created_at, b.updated_at, b.finished_at,
            j.id AS job_id, j.status AS job_status
       FROM graph_builds b
@@ -167,6 +168,8 @@ class GraphBuild:
     can_continue: bool
     failure_code: str | None
     failure_message: str | None
+    provider_calls_real: int
+    provider_calls_double: int
     created_at: datetime
     updated_at: datetime
     finished_at: datetime | None
@@ -291,6 +294,8 @@ def _as_build(row: object) -> GraphBuild:
         can_continue=bool(row.can_continue),  # type: ignore[attr-defined]
         failure_code=row.failure_code,  # type: ignore[attr-defined]
         failure_message=row.failure_message,  # type: ignore[attr-defined]
+        provider_calls_real=int(row.provider_calls_real),  # type: ignore[attr-defined]
+        provider_calls_double=int(row.provider_calls_double),  # type: ignore[attr-defined]
         created_at=row.created_at,  # type: ignore[attr-defined]
         updated_at=row.updated_at,  # type: ignore[attr-defined]
         finished_at=row.finished_at,  # type: ignore[attr-defined]
