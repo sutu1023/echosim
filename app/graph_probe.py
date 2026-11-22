@@ -209,25 +209,24 @@ class _SearchClient:
         return StubPager(self.items)
 
 
+class _PageNamespace:
+    def __init__(self, items: list[dict[str, Any]]) -> None:
+        self.items = items
+
+    def list(self, graph_uuid: str, *, page_size: int, filters: object, **kwargs: Any):
+        del graph_uuid, page_size, filters, kwargs
+        return StubPager(self.items)
+
+
 class _ReadbackClient:
     def __init__(self, *, nodes: list[dict[str, Any]], edges: list[dict[str, Any]]):
         self.graph = self
-        self.nodes = nodes
-        self.edges = edges
+        self.node = _PageNamespace(nodes)
+        self.edge = _PageNamespace(edges)
 
     def search_episodes(self, graph_uuid: str, *, query: str, page_size: int = 50):
         del graph_uuid, query, page_size
         return StubPager([])
-
-    def _list(self, graph_uuid: str, *, page_size: int, filters: object):
-        del graph_uuid, page_size, filters
-        return None
-
-    def list_nodes(self, graph_uuid: str, *, page_size: int, filters: object):
-        return StubPager(self.nodes)
-
-    def list_edges(self, graph_uuid: str, *, page_size: int, filters: object):
-        return StubPager(self.edges)
 
 
 def _episode_fixture() -> graph_store.GraphEpisode:
