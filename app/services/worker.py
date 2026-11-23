@@ -10,6 +10,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import re
 import time
 import uuid
 from collections.abc import Callable, Sequence
@@ -65,6 +66,7 @@ from ..engines.business_semantics import (
     infer_relation_label,
     is_generic_relation,
     normalized_name,
+    recommendation_action_label,
     select_mention_quote,
     select_support_quote,
 )
@@ -3075,6 +3077,110 @@ def _evidence_from_refs(
     return result
 
 
+_PLATFORM_TYPES = frozenset(
+    {
+        "媒体",
+        "媒体机构",
+        "媒体/平台",
+        "媒体平台",
+        "平台",
+        "社交媒体",
+        "传播平台",
+    }
+)
+_ACTOR_TYPES = frozenset(
+    {
+        "个人",
+        "人物",
+        "群体",
+        "高校",
+        "机构",
+        "机构组织",
+        "部门",
+        "校内部门",
+        "政府机构",
+        "法院",
+        "医疗机构",
+        "社会组织",
+    }
+)
+_USER_ACTIONS = (
+    "维权",
+    "讨论",
+    "发声",
+    "避坑",
+    "质疑",
+    "投诉",
+    "支持",
+    "反对",
+    "参与",
+    "举报",
+    "曝光",
+    "转发",
+    "评论",
+)
+_UNVERIFIED_CLAIM_MARKERS = (
+    "不实信息",
+    "不实",
+    "谣言",
+    "传闻",
+    "据称",
+    "被指",
+    "涉嫌",
+    "未经证实",
+    "所谓",
+    "报告称",
+    "报告所称",
+)
+_PARTIAL_ACTOR_RE = re.compile(
+    r"(?:部分|个别|一些|少数)[\u4e00-\u9fa5A-Za-z0-9]{0,8}"
+    r"(?:账号|网民|用户|自媒体)"
+)
+
+
+def _node_is_platform(node_type: str) -> bool:
+    return node_type in _PLATFORM_TYPES or "平台" in node_type or "媒体" in node_type
+
+
+def _node_is_actor(node_type: str) -> bool:
+    return node_type in _ACTOR_TYPES
+
+
+def _is_user_action(label: str) -> bool:
+    return any(action in label for action in _USER_ACTIONS)
+
+
+def _is_unverified_claim(
+    quote: str, fact: str, target_label: str, claim_nature: str
+) -> bool:
+    if claim_nature not in {"media_report", "party_claim"}:
+        return False
+    text = normalized_name(quote) + normalized_name(fact)
+    markers = [
+        marker for marker in _UNVERIFIED_CLAIM_MARKERS if marker in text
+    ]
+    if not markers:
+        return False
+    target = "".join(normalized_name(target_label).split())
+    if not target:
+        return False
+    compact = "".join(text.split())
+    for marker in markers:
+        start = compact.find(marker)
+        while start >= 0:
+            window_start = max(0, start - 50)
+            window_end = min(len(compact), start + len(marker) + 50)
+            if target in compact[window_start:window_end]:
+                return True
+            start = compact.find(marker, start + len(marker))
+    return False
+
+
+def _claim_actor_label(quote: str) -> str:
+    match = _PARTIAL_ACTOR_RE.search(quote)
+    return match.group(0) if match else ""
+
+
 def _item_episode_uuids(item: object) -> set[str]:
     if isinstance(item, dict):
         values = item.get("episode_uuids") or []
@@ -3273,12 +3379,74 @@ def _materialize_readback_text(
             quote=source_ref.quote,
             source_label=source_node.label,
         )
+        action_label = display
+        edge_type = display
+
+        # 平台上的用户行动：画成“用户 → 平台”，由界面读成“用户在平台上行动”。
+        if (
+            _node_is_platform(source_node.node_type)
+            and _node_is_actor(target_node.node_type)
+            and _is_user_action(display)
+        ):
+            source_key, target_key = target_key, source_key
+            source_node, target_node = target_node, source_node
+            edge_type = "platform_action"
+
+        # 转述/不实信息：把被传播的说法建成待核实节点，不冒充已发生事件。
+        if _is_unverified_claim(
+            source_ref.quote, fact, target_node.label, claim_nature
+        ):
+            claim_key = f"claim:{target_key}"
+            claim_label = target_node.label
+            if "报告所称" not in claim_label and "未证实" not in claim_label:
+                claim_label = f"{claim_label}（报告所称，未证实）"
+            if claim_key not in node_aggregates:
+                node_aggregates[claim_key] = _NodeAggregate(
+                    key=claim_key,
+                    label=claim_label,
+                    node_type="待核实说法",
+                    episode_uuids=set(current_item_episodes),
+                    readback_uuids=set(),
+                    sources=[],
+                )
+            target_key = claim_key
+            target_node = node_aggregates[claim_key]
+            edge_type = "attributed_claim"
+            if "传播" in display or "传播" in fact:
+                action_label = "传播不实信息"
+            elif "报道" in display or "报道" in fact:
+                action_label = "转述未经证实说法"
+            else:
+                action_label = f"转述{display}"
+            if _node_is_platform(source_node.node_type):
+                actor_label = _claim_actor_label(source_ref.quote)
+                if actor_label:
+                    actor_key = "actor:" + hashlib.sha256(
+                        normalized_name(actor_label).encode("utf-8")
+                    ).hexdigest()[:20]
+                    if actor_key not in node_aggregates:
+                        node_aggregates[actor_key] = _NodeAggregate(
+                            key=actor_key,
+                            label=actor_label,
+                            node_type="群体",
+                            episode_uuids=set(current_item_episodes),
+                            readback_uuids=set(),
+                            sources=[],
+                        )
+                    source_key = actor_key
+                    source_node = node_aggregates[actor_key]
+
+        if claim_nature == "author_recommendation":
+            action_label = recommendation_action_label(action_label, fact)
+            edge_type = "recommendation"
+
         key = "e:" + hashlib.sha256(
             "|".join(
                 (
                     source_key,
                     target_key,
-                    normalized_name(display),
+                    edge_type,
+                    normalized_name(action_label),
                     normalized_name(fact),
                 )
             ).encode("utf-8")
@@ -3287,8 +3455,8 @@ def _materialize_readback_text(
         if aggregate is None:
             edge_aggregates[key] = _EdgeAggregate(
                 key=key,
-                label=display,
-                edge_type=display,
+                label=action_label,
+                edge_type=edge_type,
                 fact=fact,
                 source_key=source_key,
                 target_key=target_key,

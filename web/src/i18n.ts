@@ -430,6 +430,7 @@ const messages: Record<Lang, WorkbenchMessages> = {
       claimNature: {
         media_report: '媒体报道',
         party_claim: '当事方主张',
+        author_recommendation: '报告建议',
         official_decision: '机构正式决定',
         other_material: '其他材料陈述',
       },
@@ -708,6 +709,7 @@ const messages: Record<Lang, WorkbenchMessages> = {
       claimNature: {
         media_report: 'Media report',
         party_claim: 'Party claim',
+        author_recommendation: 'Report recommendation',
         official_decision: 'Official decision',
         other_material: 'Other material statement',
       },

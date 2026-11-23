@@ -91,9 +91,9 @@
 
 ### Requirement: 来源性质区分媒体报道、当事方主张与机构正式决定
 
-每条发布关系 MUST 带 `claimNature`，取值 MUST 为 `media_report`、`party_claim`、`official_decision`、`other_material` 之一。明确转述、媒体来源或“据…报道” MUST 归为 `media_report`；当事方的指控、回应、维权、主张、质疑等 MUST 归为 `party_claim`；正式决定动作且支持句没有被“称”“据…报道”“建议”“呼吁”等转述 MUST 归为 `official_decision`；其余材料陈述为 `other_material`。
+每条发布关系 MUST 带 `claimNature`，取值 MUST 为 `media_report`、`party_claim`、`author_recommendation`、`official_decision`、`other_material` 之一。明确转述、媒体来源或“据…报道” MUST 归为 `media_report`；当事方的指控、回应、维权、主张、质疑等 MUST 归为 `party_claim`；作者或报告提出的应做事项 MUST 归为 `author_recommendation`；只有支持句明确出现决策主体与已作出动作（决定、作出、发布、通报、判决、处分等）且没有被建议/转述限定 MUST 归为 `official_decision`；其余材料陈述为 `other_material`。
 
-来源句表达“建议、呼吁、应、提请、撤销、撤回、纠正”等建议或反转时，MUST NOT 被显示成已经发生的正式决定。若正式决定动作前出现“建议/呼吁/应/提请”且没有“决定/作出/已”等已发生表达，系统 MUST 将其归为建议或 `party_claim`，MUST NOT 标为 `official_decision`。`party_claim` 与 `media_report` MUST 在快照与界面中显示为当事方主张或媒体报道，MUST NOT 显示为已证实事实。
+来源句表达“建议、呼吁、应、提请、引入、建立、撤销、撤回、纠正”等建议或反转时，MUST NOT 被显示成已经发生的正式决定。若正式决定动作前出现“建议/呼吁/应/提请”且没有“决定/作出/已”等已发生表达，系统 MUST 将其归为 `author_recommendation` 或 `party_claim`，MUST NOT 标为 `official_decision`。`party_claim`、`media_report` 与 `author_recommendation` MUST 在快照与界面中分别显示为当事方主张、媒体报道、报告建议，MUST NOT 显示为已证实事实或机构正式决定。
 
 #### Scenario: 建议撤销不被挂到已作出的处分下
 
@@ -120,3 +120,40 @@
 - **THEN** 页面正常显示旧节点、边与来源
 - **AND** `claimNature` 为空，不默认成正式决定
 - **AND** 旧快照未被新 build 改写
+
+### Requirement: 平台行动方向与被转述说法的限定
+
+当关系的起点是媒体/平台类型节点、终点是群体/个人类型节点，且动作是维权、讨论、发声、避坑、质疑、投诉、支持、反对、参与等用户行动时，最终边 MUST 改为“用户 → 平台”的方向，并标记为平台行动；界面 MUST 读成“用户在平台上行动”，MUST NOT 读成“平台向用户行动”。
+
+当支持句包含“不实信息、谣言、传闻、据称、被指、涉嫌、所谓”等限定，且被限定对象出现在限定词附近时，系统 MUST 为被转述的说法建立“待核实说法”节点，边 MUST 标记为转述关系；目标节点标签 MUST 明确“报告所称/未证实”。不得把被转述的说法单独画成已发生事件。
+
+#### Scenario: 女性用户在小红书上维权
+
+- **WHEN** 读回边把平台“小红书”作为起点、把“女性用户”作为终点，动作是“维权”，支持句表达女性用户在小红书上维权
+- **THEN** 最终边方向为“女性用户 → 小红书”，类型为平台行动
+- **AND** 画布读成“女性用户在小红书上维权”
+- **AND** 不读成“小红书向女性用户维权”
+
+#### Scenario: 部分账号传播报告所称不实信息
+
+- **WHEN** 支持句写“部分账号传播‘某事件’等不实信息”
+- **THEN** 起点为“部分账号”，目标为“某事件（报告所称，未证实）”
+- **AND** 边标签说明传播不实信息
+- **AND** 不把该事件作为已发生事件单独绘制
+
+### Requirement: 报告建议与机构决定可区分
+
+系统 MUST 将作者或报告提出的应做事项标为 `author_recommendation`，并在界面显示“报告建议”。只有支持句明确出现决策主体与已作出动作时，才可标为 `official_decision`。建议关系 MUST 保留“建议/引入/建立/参照/推动/完善”等动作含义，MUST NOT 使用“已作出”“正式决定”等确定性标签。
+
+#### Scenario: 匿名评审属于报告建议
+
+- **WHEN** 第 22 页支持句写“引入第三方匿名评审机制，对研究生学位论文进行抽检”，没有决策主体已作出该决定的表述
+- **THEN** 关系的来源性质为“报告建议”
+- **AND** 边标签保留“建议引入”或“建议”语义
+- **AND** 不标为机构正式决定
+
+#### Scenario: 已作出的处分仍是机构决定
+
+- **WHEN** 支持句明确写“武汉大学对肖某某作出记过处分”
+- **THEN** 关系保持 `official_decision`
+- **AND** 不因其它建议语句把该已发生决定降级

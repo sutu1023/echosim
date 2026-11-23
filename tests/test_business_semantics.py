@@ -406,8 +406,6 @@ class ReadbackMappingTests(unittest.TestCase):
         self.assertEqual(mapped["e2"].manifest_key, "edge-b")
 
 
-if __name__ == "__main__":
-    unittest.main()
 
 
 class ReadbackQuoteTests(unittest.TestCase):
@@ -442,7 +440,7 @@ class ReadbackQuoteTests(unittest.TestCase):
         )
 
         quote = "报告建议武汉大学撤销对肖某某的处分。"
-        self.assertIsNone(
+        self.assertIsNotNone(
             select_support_quote(
                 quote,
                 fact="武汉大学撤销对肖某某的处分。",
@@ -451,15 +449,174 @@ class ReadbackQuoteTests(unittest.TestCase):
                 target_label="肖某某",
             )
         )
-        self.assertNotEqual(
+        self.assertEqual(
             classify_claim_nature(
                 action="撤销",
                 fact="武汉大学撤销对肖某某的处分。",
                 quote=quote,
                 source_label="武汉大学",
             ),
+            "author_recommendation",
+        )
+
+
+
+
+class ClaimNatureTests(unittest.TestCase):
+    def test_report_recommendation_is_not_official_decision(self) -> None:
+        from app.engines.business_semantics import classify_claim_nature
+
+        self.assertEqual(
+            classify_claim_nature(
+                action="需要",
+                fact="引入第三方匿名评审机制，对研究生学位论文进行抽检。",
+                quote="引入第三方匿名评审机制，对研究生学位论文进行抽检。",
+                source_label="杨景媛论文事件",
+            ),
+            "author_recommendation",
+        )
+
+    def test_explicit_past_decision_stays_official(self) -> None:
+        from app.engines.business_semantics import classify_claim_nature
+
+        self.assertEqual(
+            classify_claim_nature(
+                action="处分",
+                fact="武汉大学对肖某某作出记过处分。",
+                quote="武汉大学对肖某某作出记过处分。",
+                source_label="武汉大学",
+            ),
             "official_decision",
         )
+
+    def test_recommendation_label_is_not_double_prefixed(self) -> None:
+        from app.engines.business_semantics import recommendation_action_label
+
+        self.assertEqual(
+            recommendation_action_label("建议", "建议在B站进行直播沟通。"),
+            "建议",
+        )
+        self.assertEqual(
+            recommendation_action_label("需要", "引入第三方匿名评审机制。"),
+            "建议引入",
+        )
+
+
+if __name__ == "__main__":
+    unittest.main()
+
+
+class ReadbackEdgeSemanticsTests(unittest.TestCase):
+    def _materialize(self, text: str, nodes, edges):
+        from app.services.worker import _materialize_readback_text
+
+        positions = [[None, index, 1, None, None] for index in range(len(text))]
+        document_id = "00000000-0000-4000-8000-0000000000d0"
+        chunks = {
+            "text-0001": {
+                "key": "text-0001",
+                "documentId": document_id,
+                "text": text,
+                "positions": positions,
+            }
+        }
+        documents = {
+            document_id: {
+                "documentId": document_id,
+                "text": text,
+                "positions": positions,
+            }
+        }
+        episode = SimpleNamespace(
+            episode_uuid="ep", episode_key="text-0001"
+        )
+        return _materialize_readback_text(
+            readback_nodes=nodes,
+            readback_edges=edges,
+            episode_uuids=["ep"],
+            episodes=[episode],
+            chunks_by_key=chunks,
+            documents_by_id=documents,
+            relation_labels={},
+            entity_labels={},
+            max_sources_per_item=5,
+        )
+
+    def test_platform_user_action_direction(self) -> None:
+        text = "小红书成为女性用户“维权”和“避坑”的主要阵地。"
+        nodes = [
+            SimpleNamespace(
+                uuid_="p", name="小红书", labels=["媒体/平台"],
+                episode_uuids=["ep"],
+            ),
+            SimpleNamespace(
+                uuid_="u", name="女性用户", labels=["群体"],
+                episode_uuids=["ep"],
+            ),
+        ]
+        edges = [
+            SimpleNamespace(
+                uuid_="e", source_node_uuid="p", target_node_uuid="u",
+                name="维权", fact=text, episode_uuids=["ep"],
+            )
+        ]
+        result_nodes, result_edges, _, _ = self._materialize(text, nodes, edges)
+        labels = {node.key: node.label for node in result_nodes}
+        edge = result_edges[0]
+        self.assertEqual(labels[edge.source_key], "女性用户")
+        self.assertEqual(labels[edge.target_key], "小红书")
+        self.assertEqual(edge.edge_type, "platform_action")
+        self.assertEqual(edge.label, "维权")
+
+    def test_attributed_claim_keeps_quote_scope(self) -> None:
+        text = "自媒体平台的分化加剧混乱，部分账号传播“某校副校长子女驾车逼停学生”等不实信息。"
+        nodes = [
+            SimpleNamespace(
+                uuid_="p", name="自媒体平台", labels=["媒体/平台"],
+                episode_uuids=["ep"],
+            ),
+            SimpleNamespace(
+                uuid_="t", name="某校副校长子女驾车逼停学生",
+                labels=["事件"], episode_uuids=["ep"],
+            ),
+        ]
+        edges = [
+            SimpleNamespace(
+                uuid_="e", source_node_uuid="p", target_node_uuid="t",
+                name="传播", fact=text, episode_uuids=["ep"],
+            )
+        ]
+        result_nodes, result_edges, _, _ = self._materialize(text, nodes, edges)
+        labels = {node.key: node.label for node in result_nodes}
+        edge = result_edges[0]
+        self.assertEqual(edge.edge_type, "attributed_claim")
+        self.assertEqual(edge.label, "传播不实信息")
+        self.assertEqual(labels[edge.source_key], "部分账号")
+        self.assertIn("报告所称", labels[edge.target_key])
+
+    def test_recommendation_not_decision(self) -> None:
+        text = "论文事件需要整改。引入第三方匿名评审机制，对研究生学位论文进行抽检。"
+        nodes = [
+            SimpleNamespace(
+                uuid_="e1", name="论文事件", labels=["事件"],
+                episode_uuids=["ep"],
+            ),
+            SimpleNamespace(
+                uuid_="d1", name="第三方匿名评审机制",
+                labels=["决定/安排"], episode_uuids=["ep"],
+            ),
+        ]
+        edges = [
+            SimpleNamespace(
+                uuid_="e2", source_node_uuid="e1", target_node_uuid="d1",
+                name="需要", fact=text, episode_uuids=["ep"],
+            )
+        ]
+        _, result_edges, _, _ = self._materialize(text, nodes, edges)
+        edge = result_edges[0]
+        self.assertEqual(edge.claim_nature, "author_recommendation")
+        self.assertEqual(edge.edge_type, "recommendation")
+        self.assertTrue(edge.label.startswith("建议"))
 
 
 if __name__ == "__main__":

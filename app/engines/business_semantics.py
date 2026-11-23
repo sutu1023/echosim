@@ -736,24 +736,109 @@ def _action_terms(action: str, fact: str) -> tuple[str, ...]:
     return tuple(term for term in _ACTION_TERMS if term in combined)
 
 
-def is_suggestion_reversal(quote: str, action: str, fact: str) -> bool:
-    """建议/呼吁撤销不能证明已经撤销；仅在缺少已发生表达时判为建议。"""
+_RECOMMENDATION_MARKERS = (
+    "建议",
+    "呼吁",
+    "应当",
+    "应该",
+    "需要",
+    "需",
+    "引入",
+    "建立",
+    "设立",
+    "参照",
+    "推动",
+    "加强",
+    "完善",
+    "优化",
+    "杜绝",
+    "避免",
+    "要求",
+    "希望",
+    "抽检",
+)
+
+
+_FORMAL_ACTIONS = ("撤销", "撤回", "纠正", "处分", "决定", "判决", "裁定", "处理", "开除", "免职")
+
+
+def _has_recommendation_marker(text: str) -> bool:
+    for marker in _RECOMMENDATION_MARKERS:
+        position = text.find(marker)
+        while position >= 0:
+            after = text[position + len(marker) : position + len(marker) + 1]
+            if after != "了":
+                return True
+            position = text.find(marker, position + len(marker))
+    return False
+
+
+def is_recommendation(quote: str, action: str, fact: str) -> bool:
+    """判断支持句是否在表达作者/当事方的建议，而不是已作出的决定。"""
     text = normalized_name(quote)
     combined = normalized_name(action) + normalized_name(fact)
-    if not any(term in combined for term in ("撤销", "撤回", "纠正", "处分", "决定", "判决", "裁定")):
-        return False
-    marker_positions = [
-        text.find(marker) for marker in _SUGGESTION_MARKERS if text.find(marker) >= 0
-    ]
-    if not marker_positions:
-        return False
-    first_marker = min(marker_positions)
-    decision_positions = [
-        text.find(marker) for marker in _DECISION_MARKERS if text.find(marker) >= 0
-    ]
-    if not decision_positions:
-        return True
-    return min(decision_positions) > first_marker
+    if _has_recommendation_marker(combined):
+        decision_positions = [
+            text.find(marker) for marker in _DECISION_MARKERS if text.find(marker) >= 0
+        ]
+        recommendation_positions = [
+            text.find(marker)
+            for marker in _RECOMMENDATION_MARKERS
+            if text.find(marker) >= 0
+        ]
+        if not decision_positions:
+            return True
+        return min(recommendation_positions or [len(text) + 1]) < min(decision_positions)
+    # “报告建议撤销处分”这类强建议句：动作本身是正式/反转动作，且建议词在其之前。
+    if any(term in normalized_name(action) for term in _FORMAL_ACTIONS):
+        action_position = text.find(normalized_name(action))
+        if action_position >= 0:
+            for marker in ("建议", "呼吁", "应当", "应该"):
+                marker_position = text.find(marker)
+                if 0 <= marker_position < action_position:
+                    return True
+    return False
+
+
+def is_suggestion_reversal(quote: str, action: str, fact: str) -> bool:
+    """兼容旧调用：建议/撤销类表达不再被丢弃，而是归为报告建议。"""
+    return is_recommendation(quote, action, fact)
+
+
+def recommendation_action_label(action: str, fact: str) -> str:
+    """把建议关系的动作标签改成“建议…”而不是已发生动作。"""
+    value = action.strip()
+    if not value:
+        return "建议"
+    if value.startswith("建议"):
+        suffix = value.lstrip("建议").strip()
+        return f"建议{suffix}" if suffix else "建议"
+    if value in {"需要", "需", "应该", "应当", "应", "要求"}:
+        if "建议" in fact:
+            return "建议"
+        for marker in (
+            "引入",
+            "建立",
+            "设立",
+            "参照",
+            "推动",
+            "加强",
+            "完善",
+            "优化",
+            "抽检",
+            "呼吁",
+        ):
+            if marker in fact:
+                return f"建议{marker}"
+        return "建议"
+    if value in fact:
+        return f"建议{value}"
+    for marker in _RECOMMENDATION_MARKERS:
+        if marker in fact:
+            if marker in {"建议", "呼吁"}:
+                return "建议"
+            return f"建议{marker}"
+    return f"建议{value}"
 
 
 def classify_claim_nature(
@@ -796,8 +881,12 @@ def classify_claim_nature(
         token in combined_action
         for token in ("决定", "处分", "判决", "裁定", "批准", "通报", "处理", "开除", "免职", "撤销")
     )
-    if is_suggestion_reversal(quote, action, fact):
-        return "party_claim" if attributed else "other_material"
+    if is_recommendation(quote, action, fact):
+        if attributed and (media_source or report_action):
+            return "media_report"
+        if attributed:
+            return "party_claim"
+        return "author_recommendation"
     if attributed:
         return "media_report" if media_source or report_action else "party_claim"
     if media_source and report_action:
@@ -887,8 +976,8 @@ def select_support_quote(
                 action_ok = _bigram_overlap(fact, quote) >= 0.2
             if not action_ok:
                 continue
-            if is_suggestion_reversal(quote, action, fact):
-                continue
+            # 建议句保留为证据，由 classify_claim_nature 归为报告建议，
+            # 不得因为出现“建议/呼吁”就丢弃整条关系。
             score = _bigram_overlap(fact, quote) * 100
             score += 20 if action_ok else 0
             if len(quote.strip()) <= 180:

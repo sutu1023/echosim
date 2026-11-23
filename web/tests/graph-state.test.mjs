@@ -19,6 +19,7 @@ async function loadTypeScriptModule(name) {
 }
 
 const graph = await loadTypeScriptModule('graph-state.ts')
+const { graphEdgeLabel, graphEdgeSentence } = graph
 
 function build(id, phase = 'drawing', canContinue = false) {
   return {
@@ -162,5 +163,68 @@ test('查询参数保留 layout/lang/document 并替换 build', () => {
       'new',
     ),
     { layout: 'graph', lang: 'en', document: 'doc-1', build: 'new' },
+  )
+})
+
+test('画布关系文字按平台行动、转述与建议语义生成', () => {
+  const labels = {
+    user: '女性用户',
+    platform: '小红书',
+    actor: '部分账号',
+    claim: '武大副校长子女驾车逼停学生（报告所称，未证实）',
+    event: '杨景媛论文事件',
+    decision: '第三方匿名评审机制',
+  }
+  assert.equal(
+    graphEdgeSentence(
+      {
+        key: 'e1',
+        edgeType: 'platform_action',
+        label: '维权',
+        sourceKey: 'user',
+        targetKey: 'platform',
+      },
+      labels,
+    ),
+    '女性用户在小红书上维权',
+  )
+  assert.equal(
+    graphEdgeLabel(
+      {
+        key: 'e1',
+        edgeType: 'platform_action',
+        label: '维权',
+        sourceKey: 'user',
+        targetKey: 'platform',
+      },
+      labels,
+    ),
+    '在小红书上维权',
+  )
+  assert.equal(
+    graphEdgeSentence(
+      {
+        key: 'e2',
+        edgeType: 'attributed_claim',
+        label: '传播不实信息',
+        sourceKey: 'actor',
+        targetKey: 'claim',
+      },
+      labels,
+    ),
+    '部分账号 传播不实信息 武大副校长子女驾车逼停学生（报告所称，未证实）',
+  )
+  assert.equal(
+    graphEdgeSentence(
+      {
+        key: 'e3',
+        edgeType: 'recommendation',
+        label: '建议',
+        sourceKey: 'event',
+        targetKey: 'decision',
+      },
+      labels,
+    ),
+    '杨景媛论文事件 —建议→ 第三方匿名评审机制',
   )
 })

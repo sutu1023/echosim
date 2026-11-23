@@ -19,6 +19,7 @@ ORIGINS = (ORIGIN_MATERIAL, ORIGIN_HYPOTHESIS)
 CLAIM_NATURES = (
     "media_report",
     "party_claim",
+    "author_recommendation",
     "official_decision",
     "other_material",
 )

@@ -19,6 +19,9 @@ import {
   buildQuery,
   canOpenNextStage,
   createGraphState,
+  graphEdgeLabel,
+  graphEdgeSentence,
+  graphNodeLabels,
   graphViewMode,
   isGraphActive,
   type GraphBuildData,
@@ -50,6 +53,7 @@ interface SimLink {
   label: string
   origin: string
   key: string
+  edgeType?: string
   claimNature?: string | null
 }
 
@@ -105,6 +109,24 @@ const selectedClaimNature = computed(() =>
     ? (selection.value.item as GraphEdgeData).claimNature
     : null,
 )
+const nodeLabelByKey = computed(() =>
+  graphNodeLabels(state.value.snapshot?.nodes ?? []),
+)
+
+function edgeCanvasLabel(edge: GraphEdgeData): string {
+  return graphEdgeLabel(edge, nodeLabelByKey.value)
+}
+
+function edgeSentence(edge: GraphEdgeData): string {
+  return graphEdgeSentence(edge, nodeLabelByKey.value)
+}
+
+const selectedEdgeSentence = computed(() =>
+  selection.value?.kind === 'edge'
+    ? edgeSentence(selection.value.item as GraphEdgeData)
+    : '',
+)
+
 const incidentEdges = computed(() => {
   if (!selection.value || selection.value.kind !== 'node' || !state.value.snapshot) {
     return []
@@ -441,9 +463,10 @@ function renderGraph(): void {
   const links: SimLink[] = snapshot.edges.map((edge) => ({
     source: edge.sourceKey,
     target: edge.targetKey,
-    label: edge.label,
+    label: edgeCanvasLabel(edge),
     origin: edge.origin,
     key: edge.key,
+    edgeType: edge.edgeType,
     claimNature: edge.claimNature,
   }))
   for (const link of links) {
@@ -783,7 +806,9 @@ onBeforeUnmount(() => {
       <p v-if="!selection" class="muted">{{ t.noSelection }}</p>
       <template v-else>
         <p class="eyebrow">{{ selection.kind === 'node' ? t.node : t.edge }}</p>
-        <h4>{{ selection.item.label }}</h4>
+        <h4>
+          {{ selection.kind === 'edge' ? selectedEdgeSentence : selection.item.label }}
+        </h4>
         <p class="muted">
           {{ t.origin }}：{{ selection.item.origin === 'material' ? t.material : t.hypothesis }}
         </p>
@@ -802,7 +827,7 @@ onBeforeUnmount(() => {
                 data-action="open-node-relation"
                 @click="selectIncidentEdge(edge)"
               >
-                {{ edge.label }}
+                {{ edgeSentence(edge) }}
               </button>
               <span class="fine-print"> · {{ claimNatureLabel(edge.claimNature) }}</span>
               <p v-if="edge.sources.length > 0" class="fine-print">

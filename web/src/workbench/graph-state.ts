@@ -257,3 +257,40 @@ export function buildQuery(
   }
   return next
 }
+
+/** 节点键到标签的索引，供关系句子使用。 */
+export function graphNodeLabels(nodes: GraphNodeData[]): Record<string, string> {
+  const labels: Record<string, string> = {}
+  for (const node of nodes) {
+    labels[node.key] = node.label
+  }
+  return labels
+}
+
+/** 画布连线标签：平台行动读成“在某平台上行动”。 */
+export function graphEdgeLabel(
+  edge: GraphEdgeData,
+  labels: Record<string, string>,
+): string {
+  if (edge.edgeType === 'platform_action') {
+    const platform = labels[edge.targetKey]
+    return platform ? `在${platform}上${edge.label}` : edge.label
+  }
+  return edge.label
+}
+
+/** 关系详情/节点关系列表的完整句子。 */
+export function graphEdgeSentence(
+  edge: GraphEdgeData,
+  labels: Record<string, string>,
+): string {
+  const source = labels[edge.sourceKey] ?? edge.sourceKey
+  const target = labels[edge.targetKey] ?? edge.targetKey
+  if (edge.edgeType === 'platform_action') {
+    return `${source}在${target}上${edge.label}`
+  }
+  if (edge.edgeType === 'attributed_claim') {
+    return `${source} ${edge.label} ${target}`
+  }
+  return `${source} —${edge.label}→ ${target}`
+}
