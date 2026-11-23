@@ -72,7 +72,7 @@ BUILD_COLUMNS = (
     "b.id, b.project_id, b.run_id, b.question, b.phase, b.planned_episodes, "
     "b.accepted_episodes, b.confirmed_episodes, b.can_continue, b.failure_code, "
     "b.failure_message, b.provider_calls_real, b.provider_calls_double, "
-    "b.created_at, b.updated_at, b.finished_at, "
+    "b.graph_id, b.created_at, b.updated_at, b.finished_at, "
     "j.id AS job_id, j.status AS job_status"
 )
 BUILD_SOURCE = "FROM graph_builds b JOIN jobs j ON j.run_id = b.run_id"
@@ -82,7 +82,7 @@ WITH selected AS (
     SELECT b.id, b.project_id, b.run_id, b.question, b.phase,
            b.planned_episodes, b.accepted_episodes, b.confirmed_episodes,
            b.can_continue, b.failure_code, b.failure_message,
-           b.provider_calls_real, b.provider_calls_double,
+           b.provider_calls_real, b.provider_calls_double, b.graph_id,
            b.created_at, b.updated_at, b.finished_at,
            j.id AS job_id, j.status AS job_status
       FROM graph_builds b
@@ -111,6 +111,7 @@ SELECT selected.*, chosen.*,
        COALESCE((SELECT jsonb_agg(jsonb_build_object(
            'key', e.edge_key, 'edgeType', e.edge_type, 'label', e.label,
            'origin', e.origin, 'summary', e.summary,
+           'claimNature', e.claim_nature,
            'sourceKey', e.source_node_key, 'targetKey', e.target_node_key)
            ORDER BY e.edge_key)
          FROM graph_edges e WHERE e.snapshot_id = chosen.snapshot_id),
@@ -171,6 +172,7 @@ class GraphBuild:
     failure_message: str | None
     provider_calls_real: int
     provider_calls_double: int
+    graph_id: uuid.UUID | None
     created_at: datetime
     updated_at: datetime
     finished_at: datetime | None
@@ -233,6 +235,7 @@ class GraphEdge:
     summary: str | None = None
     source_key: str = ""
     target_key: str = ""
+    claim_nature: str | None = None
 
 
 @dataclass(frozen=True)
@@ -297,6 +300,7 @@ def _as_build(row: object) -> GraphBuild:
         failure_message=row.failure_message,  # type: ignore[attr-defined]
         provider_calls_real=int(row.provider_calls_real),  # type: ignore[attr-defined]
         provider_calls_double=int(row.provider_calls_double),  # type: ignore[attr-defined]
+        graph_id=row.graph_id,  # type: ignore[attr-defined]
         created_at=row.created_at,  # type: ignore[attr-defined]
         updated_at=row.updated_at,  # type: ignore[attr-defined]
         finished_at=row.finished_at,  # type: ignore[attr-defined]
@@ -535,6 +539,7 @@ async def _snapshot_from_build_graph_row(row: object) -> GraphSnapshot | None:
             summary=item.get("summary"),
             source_key=item["sourceKey"],
             target_key=item["targetKey"],
+            claim_nature=item.get("claimNature"),
         )
         for item in json.loads(row.edges_json or "[]")  # type: ignore[attr-defined]
     )
@@ -727,9 +732,10 @@ async def create_snapshot(
             await db.execute(
                 text(
                     "INSERT INTO graph_edges (snapshot_id, edge_key, edge_type, "
-                    "label, origin, summary, source_node_key, target_node_key) "
-                    "VALUES (:snapshot_id, :edge_key, :edge_type, :label, :origin, "
-                    ":summary, :source_node_key, :target_node_key)"
+                    "label, origin, summary, source_node_key, target_node_key, "
+                    "claim_nature) VALUES (:snapshot_id, :edge_key, :edge_type, "
+                    ":label, :origin, :summary, :source_node_key, :target_node_key, "
+                    ":claim_nature)"
                 ),
                 [
                     {
@@ -741,6 +747,7 @@ async def create_snapshot(
                         "summary": edge.summary,
                         "source_node_key": edge.source_key,
                         "target_node_key": edge.target_key,
+                        "claim_nature": edge.claim_nature,
                     }
                     for edge in edges
                 ],
@@ -866,7 +873,7 @@ async def _read_snapshot_details(
             await db.execute(
                 text(
                     "SELECT edge_key, edge_type, label, origin, summary, "
-                    "source_node_key, target_node_key FROM graph_edges "
+                    "source_node_key, target_node_key, claim_nature FROM graph_edges "
                     "WHERE snapshot_id = :snapshot_id ORDER BY edge_key"
                 ),
                 {"snapshot_id": snapshot_id},
@@ -907,6 +914,7 @@ async def _read_snapshot_details(
             summary=item.summary,
             source_key=item.source_node_key,
             target_key=item.target_node_key,
+            claim_nature=item.claim_nature,
         )
         for item in edge_rows
     )
@@ -1449,6 +1457,208 @@ async def save_binding_graph_id(
     except DB_ERRORS as exc:
         await db.rollback()
         logger.warning("图谱绑定保存失败 project=%s: %s", project_id, type(exc).__name__)
+        raise ServiceUnavailable from exc
+
+
+REAL_BINDING_COLUMNS = (
+    "project_id, create_idempotency_key, request_name, request_description, "
+    "request_time_zone, graph_id, state, created_at, updated_at, bound_at"
+)
+
+
+async def get_or_create_real_binding(
+    db: AsyncSession, *, project_id: uuid.UUID
+) -> GraphBinding:
+    """真实 provider 专用绑定；不读取、不覆盖旧 stub 绑定。"""
+    request_name, request_description, request_time_zone = _binding_params(project_id)
+    try:
+        result = await db.execute(
+            text(
+                "INSERT INTO project_graph_real_bindings (project_id, "
+                "create_idempotency_key, request_name, request_description, "
+                "request_time_zone, state) "
+                "VALUES (:project_id, :create_idempotency_key, :request_name, "
+                ":request_description, :request_time_zone, 'pending') "
+                "ON CONFLICT (project_id) DO NOTHING "
+                f"RETURNING {REAL_BINDING_COLUMNS}"
+            ),
+            {
+                "project_id": project_id,
+                "create_idempotency_key": uuid.uuid4(),
+                "request_name": request_name,
+                "request_description": request_description,
+                "request_time_zone": request_time_zone,
+            },
+        )
+        row = result.first()
+        await db.commit()
+    except IntegrityError as exc:
+        await db.rollback()
+        logger.warning(
+            "真实图谱绑定创建失败 project=%s: %s",
+            project_id,
+            type(exc).__name__,
+        )
+        raise ProjectNotFound from exc
+    except DB_ERRORS as exc:
+        await db.rollback()
+        logger.warning(
+            "真实图谱绑定读写失败 project=%s: %s",
+            project_id,
+            type(exc).__name__,
+        )
+        raise ServiceUnavailable from exc
+    if row is not None:
+        return _as_binding(row)
+    return await require_real_binding(db, project_id=project_id)
+
+
+async def require_real_binding(
+    db: AsyncSession, *, project_id: uuid.UUID
+) -> GraphBinding:
+    try:
+        result = await db.execute(
+            text(
+                f"SELECT {REAL_BINDING_COLUMNS} FROM project_graph_real_bindings "
+                "WHERE project_id = :project_id"
+            ),
+            {"project_id": project_id},
+        )
+        row = result.first()
+    except DB_ERRORS as exc:
+        logger.warning(
+            "真实图谱绑定读取失败 project=%s: %s",
+            project_id,
+            type(exc).__name__,
+        )
+        raise ServiceUnavailable from exc
+    if row is None:
+        raise GraphBindingNotFound
+    return _as_binding(row)
+
+
+async def save_real_binding_graph_id(
+    db: AsyncSession,
+    *,
+    project_id: uuid.UUID,
+    graph_id: str | uuid.UUID | None,
+    commit: bool = True,
+) -> GraphBinding:
+    parsed = _coerce_graph_id(graph_id)
+    try:
+        result = await db.execute(
+            text(
+                f"SELECT {REAL_BINDING_COLUMNS} FROM project_graph_real_bindings "
+                "WHERE project_id = :project_id FOR UPDATE"
+            ),
+            {"project_id": project_id},
+        )
+        row = result.first()
+        if row is None:
+            await db.rollback()
+            raise GraphBindingNotFound
+        existing = row.graph_id
+        if existing is not None:
+            if existing == parsed:
+                if commit:
+                    await db.commit()
+                return _as_binding(row)
+            await db.rollback()
+            raise GraphBindingConflict("invalid_graph_scope")
+        updated = await db.execute(
+            text(
+                "UPDATE project_graph_real_bindings SET graph_id = :graph_id, "
+                "state = 'bound', bound_at = now(), updated_at = now() "
+                "WHERE project_id = :project_id AND graph_id IS NULL "
+                f"RETURNING {REAL_BINDING_COLUMNS}"
+            ),
+            {"project_id": project_id, "graph_id": parsed},
+        )
+        saved = updated.first()
+        if saved is None:
+            await db.rollback()
+            raise GraphBindingConflict("invalid_graph_scope")
+        if commit:
+            await db.commit()
+        return _as_binding(saved)
+    except IntegrityError as exc:
+        await db.rollback()
+        logger.warning(
+            "真实图谱绑定 UUID 冲突 project=%s: %s",
+            project_id,
+            type(exc).__name__,
+        )
+        raise GraphBindingConflict("invalid_graph_scope") from exc
+    except (GraphBindingConflict, GraphBindingNotFound):
+        raise
+    except DB_ERRORS as exc:
+        await db.rollback()
+        logger.warning(
+            "真实图谱绑定保存失败 project=%s: %s",
+            project_id,
+            type(exc).__name__,
+        )
+        raise ServiceUnavailable from exc
+
+
+async def save_build_graph_id(
+    db: AsyncSession,
+    *,
+    build_id: uuid.UUID,
+    graph_id: str | uuid.UUID | None,
+    commit: bool = True,
+) -> uuid.UUID:
+    """把默认图谱标识保存到当前 build；已有不同值时拒绝覆盖。"""
+    parsed = _coerce_graph_id(graph_id)
+    try:
+        result = await db.execute(
+            text(
+                "SELECT graph_id FROM graph_builds WHERE id = :build_id "
+                "FOR UPDATE"
+            ),
+            {"build_id": build_id},
+        )
+        row = result.first()
+        if row is None:
+            await db.rollback()
+            raise GraphBuildNotFound
+        existing = row.graph_id
+        if existing is not None:
+            if existing == parsed:
+                if commit:
+                    await db.commit()
+                return existing
+            await db.rollback()
+            raise GraphBindingConflict("invalid_graph_scope")
+        updated = await db.execute(
+            text(
+                "UPDATE graph_builds SET graph_id = :graph_id, "
+                "updated_at = clock_timestamp() WHERE id = :build_id "
+                "RETURNING graph_id"
+            ),
+            {"build_id": build_id, "graph_id": parsed},
+        )
+        saved = updated.scalar_one()
+        if commit:
+            await db.commit()
+        return saved
+    except IntegrityError as exc:
+        await db.rollback()
+        logger.warning(
+            "build 图谱标识保存冲突 build=%s: %s",
+            build_id,
+            type(exc).__name__,
+        )
+        raise GraphBindingConflict("invalid_graph_scope") from exc
+    except (GraphBindingConflict, GraphBuildNotFound):
+        raise
+    except DB_ERRORS as exc:
+        await db.rollback()
+        logger.warning(
+            "build 图谱标识保存失败 build=%s: %s",
+            build_id,
+            type(exc).__name__,
+        )
         raise ServiceUnavailable from exc
 
 

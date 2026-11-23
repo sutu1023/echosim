@@ -16,6 +16,13 @@ from .business_config import (
 ORIGIN_MATERIAL = "material"
 ORIGIN_HYPOTHESIS = "hypothesis"
 ORIGINS = (ORIGIN_MATERIAL, ORIGIN_HYPOTHESIS)
+CLAIM_NATURES = (
+    "media_report",
+    "party_claim",
+    "official_decision",
+    "other_material",
+)
+MAX_ALIASES_PER_SUBJECT = 4
 
 BUILD_PHASES = (
     "preparing",
@@ -68,6 +75,7 @@ class EntityType:
     key: str
     name: str
     description: str = ""
+    display_name: str = ""
 
 
 @dataclass(frozen=True)
@@ -77,6 +85,7 @@ class RelationType:
     source_type: str
     target_type: str
     description: str = ""
+    display_name: str = ""
 
 
 @dataclass(frozen=True)
@@ -107,6 +116,15 @@ class SourceRef:
 
 
 @dataclass(frozen=True)
+class Subject:
+    key: str
+    label: str
+    type_key: str
+    aliases: tuple[str, ...] = ()
+    sources: tuple[SourceRef, ...] = ()
+
+
+@dataclass(frozen=True)
 class GraphNode:
     key: str
     node_type: str
@@ -114,6 +132,10 @@ class GraphNode:
     origin: str
     summary: str = ""
     sources: tuple[SourceRef, ...] = ()
+    type_name: str = ""
+    subject_key: str = ""
+    aliases: tuple[str, ...] = ()
+    batch_keys: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -126,6 +148,9 @@ class GraphEdge:
     target_key: str
     summary: str = ""
     sources: tuple[SourceRef, ...] = ()
+    edge_type_name: str = ""
+    claim_nature: str = ""
+    batch_keys: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -133,6 +158,7 @@ class GraphResult:
     entity_types: tuple[EntityType, ...] = ()
     relation_types: tuple[RelationType, ...] = ()
     batches: tuple[ExtractionBatch, ...] = ()
+    subjects: tuple[Subject, ...] = ()
     nodes: tuple[GraphNode, ...] = ()
     edges: tuple[GraphEdge, ...] = ()
 
@@ -333,3 +359,113 @@ def validate_graph_result(
             raise GraphContractError(
                 "insufficient_graph", "缺少材料节点或材料关系"
             )
+
+
+def _normalized_name(value: str) -> str:
+    return " ".join(value.split()).casefold()
+
+
+def _subject_forms(subject: Subject) -> set[str]:
+    return {
+        _normalized_name(subject.label),
+        *(_normalized_name(alias) for alias in subject.aliases),
+    }
+
+
+def validate_semantic_graph(
+    result: GraphResult,
+    *,
+    max_sources_per_item: int = DEFAULT_EVIDENCE_GRAPH_MAX_SOURCES_PER_ITEM,
+) -> None:
+    """校验语义建图结果：主体注册表、来源性质、主体端点与主体身份来源。"""
+    if not result.subjects:
+        raise GraphContractError(
+            "invalid_model_output", "主体注册表为空"
+        )
+    subject_by_key: dict[str, Subject] = {}
+    for subject in result.subjects:
+        if not _non_empty(subject.key) or not _non_empty(subject.label):
+            raise GraphContractError(
+                "invalid_model_output", "主体缺少 key/label", subject.key
+            )
+        if subject.key in subject_by_key:
+            raise GraphContractError(
+                "invalid_model_output", "主体 key 重复", subject.key
+            )
+        if not _non_empty(subject.type_key):
+            raise GraphContractError(
+                "invalid_model_output", "主体缺少类型", subject.key
+            )
+        if len(subject.aliases) > MAX_ALIASES_PER_SUBJECT:
+            raise GraphContractError(
+                "invalid_model_output", "主体别名超过上限", subject.key
+            )
+        normalized_aliases = [
+            _normalized_name(alias) for alias in subject.aliases
+        ]
+        if any(not alias for alias in normalized_aliases):
+            raise GraphContractError(
+                "invalid_model_output", "主体别名不能为空", subject.key
+            )
+        if len(set(normalized_aliases)) != len(normalized_aliases):
+            raise GraphContractError(
+                "invalid_model_output", "主体别名重复", subject.key
+            )
+        if not subject.sources:
+            raise GraphContractError(
+                "invalid_model_output", "主体缺少材料依据", subject.key
+            )
+        _validate_sources(
+            target=f"subject:{subject.key}",
+            origin=ORIGIN_MATERIAL,
+            sources=subject.sources,
+            max_sources=max_sources_per_item,
+        )
+        subject_by_key[subject.key] = subject
+
+    node_by_key = {node.key: node for node in result.nodes}
+    for node in result.nodes:
+        if node.subject_key:
+            subject = subject_by_key.get(node.subject_key)
+            if subject is None:
+                raise GraphContractError(
+                    "invalid_model_output", "节点引用未知主体", node.key
+                )
+            if _normalized_name(node.label) not in _subject_forms(subject):
+                raise GraphContractError(
+                    "invalid_model_output", "节点名称不在主体别名中", node.key
+                )
+            if node.node_type != subject.type_key:
+                raise GraphContractError(
+                    "invalid_model_output", "节点类型与主体类型不一致", node.key
+                )
+
+    referenced_material_nodes: set[str] = set()
+    for edge in result.edges:
+        source = node_by_key.get(edge.source_key)
+        target = node_by_key.get(edge.target_key)
+        if source is None or target is None:
+            raise GraphContractError(
+                "invalid_graph_response", "边端点不存在", edge.key
+            )
+        if edge.origin == ORIGIN_MATERIAL:
+            if edge.claim_nature not in CLAIM_NATURES:
+                raise GraphContractError(
+                    "invalid_model_output", "材料关系缺少合法来源性质", edge.key
+                )
+            if not source.subject_key and not target.subject_key:
+                raise GraphContractError(
+                    "invalid_model_output", "材料关系没有主体端点", edge.key
+                )
+            referenced_material_nodes.add(source.key)
+            referenced_material_nodes.add(target.key)
+
+    orphan_material = {
+        node.key
+        for node in result.nodes
+        if node.origin == ORIGIN_MATERIAL and node.key not in referenced_material_nodes
+    }
+    if orphan_material:
+        raise GraphContractError(
+            "invalid_model_output", "存在未参与材料关系的材料节点"
+        )

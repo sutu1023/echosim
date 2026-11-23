@@ -83,6 +83,13 @@ class CountingPlanner:
         finally:
             self._count(before)
 
+    def plan_ontology(self, **kwargs: object):
+        before = self.inner.model_requests
+        try:
+            return self.inner.plan_ontology(**kwargs)
+        finally:
+            self._count(before)
+
     def validate_result(self, *args: object, **kwargs: object):
         return self.inner.validate_result(*args, **kwargs)
 
@@ -138,6 +145,12 @@ class _CountingEpisodeNamespace:
         self.metrics.add_graph(self.kind)
         return self.inner.add(*args, **kwargs)
 
+    def list(self, *args: object, **kwargs: object):
+        self.metrics.add_graph(self.kind)
+        return _CountingPager(
+            self.inner.list(*args, **kwargs), self.metrics, self.kind
+        )
+
 
 class _CountingGraphNamespace:
     def __init__(self, inner: object, metrics: ProviderCallMetrics, kind: str) -> None:
@@ -151,6 +164,14 @@ class _CountingGraphNamespace:
     def create(self, *args: object, **kwargs: object):
         self.metrics.add_graph(self.kind)
         return self.inner.create(*args, **kwargs)
+
+    def get(self, *args: object, **kwargs: object):
+        self.metrics.add_graph(self.kind)
+        return self.inner.get(*args, **kwargs)
+
+    def set_ontology(self, *args: object, **kwargs: object):
+        self.metrics.add_graph(self.kind)
+        return self.inner.set_ontology(*args, **kwargs)
 
     def search_episodes(self, *args: object, **kwargs: object):
         self.metrics.add_graph(self.kind)

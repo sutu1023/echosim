@@ -143,6 +143,7 @@ def _snapshot_body(
                 "label": edge.label,
                 "origin": edge.origin,
                 "summary": edge.summary,
+                "claimNature": edge.claim_nature,
                 "sourceKey": edge.source_key,
                 "targetKey": edge.target_key,
                 "sources": grouped.get(("edge", edge.key), []),

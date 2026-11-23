@@ -24,27 +24,49 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..engines.business_config import BusinessGraphConfig, BusinessGraphConfigError
-from ..engines.business_contracts import GraphResult, SourceRef
+from ..engines.business_contracts import (
+    EntityType,
+    GraphContractError,
+    GraphResult,
+    RelationType,
+    SourceRef,
+)
 from ..engines.business_runtime import ProviderCallMetrics
 from ..engines.business_graph import (
     BusinessGraphError,
     _classify_exception,
+    _edge_label,
+    _edge_source,
+    _edge_target,
     _graph_uuid,
     _is_auth_error,
     _node_name,
     _node_uuid,
     assert_business_graph_scope,
     readback_graph,
+    readback_raw_graph,
     search_episode_once,
+    set_graph_ontology,
     write_episode,
 )
 from ..engines.business_model import (
+    BusinessModelError,
     BusinessModelPlanner,
     ChunkInput,
     ExtractedBatch,
     extraction_to_payload,
     extractions_to_payload,
+    manifest_to_payload,
     plan_to_payload,
+)
+from ..engines.business_semantics import (
+    classify_claim_nature,
+    consolidate,
+    infer_relation_label,
+    is_generic_relation,
+    normalized_name,
+    select_mention_quote,
+    select_support_quote,
 )
 from ..errors import GraphBindingConflict, GraphLimitExceeded, LeaseLost
 from . import document_extract
@@ -1078,12 +1100,46 @@ def _chunk_inputs(chunks: list[graph_store.BuildChunk]) -> list[ChunkInput]:
 def _graph_episode_content(
     build_id: uuid.UUID, batch_key: str, batch_payload: dict[str, object]
 ) -> str:
+    # 只把图服务抽取需要的键、名称、端点与性质写入 episode；来源由清单保存。
+    raw_nodes = batch_payload.get("nodes")
+    raw_edges = batch_payload.get("edges")
+    nodes = [
+        {
+            "key": item.get("key"),
+            "nodeType": item.get("nodeType"),
+            "label": item.get("label"),
+            "origin": item.get("origin"),
+        }
+        for item in (raw_nodes if isinstance(raw_nodes, list) else [])
+        if isinstance(item, dict)
+    ]
+    edges = [
+        {
+            "key": item.get("key"),
+            "edgeType": item.get("edgeType"),
+            "label": item.get("label"),
+            "origin": item.get("origin"),
+            "claimNature": item.get("claimNature"),
+            "sourceKey": item.get("sourceKey"),
+            "targetKey": item.get("targetKey"),
+        }
+        for item in (raw_edges if isinstance(raw_edges, list) else [])
+        if isinstance(item, dict)
+    ]
+    search_text = " ".join(
+        [
+            *(str(item.get("label") or "") for item in nodes),
+            *(str(item.get("label") or "") for item in edges),
+            *(str(item.get("claimNature") or "") for item in edges),
+        ]
+    ).strip()
     return json.dumps(
         {
+            "searchText": search_text[:500],
             "buildId": str(build_id),
             "batchKey": batch_key,
-            "nodes": batch_payload.get("nodes") or [],
-            "edges": batch_payload.get("edges") or [],
+            "nodes": nodes,
+            "edges": edges,
         },
         ensure_ascii=False,
         sort_keys=True,
@@ -1308,12 +1364,9 @@ async def execute_graph_bind(
     )
     if state != "ready":
         return state
-    async with session_factory() as db:
-        binding = await graph_store.get_or_create_binding(
-            db, project_id=build.project_id
-        )
-    if binding.graph_id is not None:
-        assert_business_graph_scope(str(binding.graph_id), config=config)
+    real_graph = config.resolve_providers().real_graph
+    if build.graph_id is not None:
+        assert_business_graph_scope(str(build.graph_id), config=config)
         async with session_factory() as db:
             return await _commit_graph_step(
                 db,
@@ -1336,7 +1389,65 @@ async def execute_graph_bind(
                 build_phase="preparing",
             )
 
+    async with session_factory() as db:
+        binding = (
+            await graph_store.get_or_create_real_binding(
+                db, project_id=build.project_id
+            )
+            if real_graph
+            else await graph_store.get_or_create_binding(
+                db, project_id=build.project_id
+            )
+        )
+    if binding.graph_id is not None and not real_graph:
+        assert_business_graph_scope(str(binding.graph_id), config=config)
+        async with session_factory() as db:
+            async def save_build_graph(session: AsyncSession) -> None:
+                await graph_store.save_build_graph_id(
+                    session,
+                    build_id=build.id,
+                    graph_id=binding.graph_id,
+                    commit=False,
+                )
+
+            return await _commit_graph_step(
+                db,
+                claim,
+                step=1,
+                step_key=GRAPH_STEP_KEYS[0],
+                payload={
+                    "graphBound": True,
+                    "reused": True,
+                    "createAttempts": 0,
+                },
+                lease_seconds=lease_seconds,
+                build_id=build.id,
+                before_commit=save_build_graph,
+                event_extra={
+                    "phase": "preparing",
+                    "plannedEpisodes": 0,
+                    "acceptedEpisodes": 0,
+                    "confirmedEpisodes": 0,
+                },
+                build_phase="preparing",
+            )
+
     client = graph_client_factory()
+    create_idempotency_key = (
+        str(
+            uuid.UUID(
+                str(uuid.uuid5(binding.create_idempotency_key, str(build.id))),
+                version=4,
+            )
+        )
+        if real_graph
+        else str(binding.create_idempotency_key)
+    )
+    create_name = (
+        f"{binding.request_name}-{str(build.id)[:8]}"
+        if real_graph
+        else binding.request_name
+    )
     last_error: Exception | None = None
     for attempt in range(1, 3):
         state = await _graph_step_ready(
@@ -1351,10 +1462,10 @@ async def execute_graph_bind(
                 lease_seconds=lease_seconds,
                 heartbeat_seconds=heartbeat_seconds,
                 func=client.graph.create,
-                name=binding.request_name,
+                name=create_name,
                 description=binding.request_description,
                 time_zone=binding.request_time_zone,
-                idempotency_key=str(binding.create_idempotency_key),
+                idempotency_key=create_idempotency_key,
             )
         except Exception as exc:  # noqa: BLE001
             last_error = exc
@@ -1373,9 +1484,16 @@ async def execute_graph_bind(
         assert_business_graph_scope(graph_id, config=config)
         async with session_factory() as db:
             async def save_binding(session: AsyncSession) -> None:
-                await graph_store.save_binding_graph_id(
+                if not real_graph:
+                    await graph_store.save_binding_graph_id(
+                        session,
+                        project_id=build.project_id,
+                        graph_id=graph_id,
+                        commit=False,
+                    )
+                await graph_store.save_build_graph_id(
                     session,
-                    project_id=build.project_id,
+                    build_id=build.id,
                     graph_id=graph_id,
                     commit=False,
                 )
@@ -1470,6 +1588,301 @@ async def execute_graph_plan(
         )
 
 
+async def execute_graph_plan_ontology(
+    claim: Claim,
+    *,
+    session_factory: SessionFactory,
+    stop_event: asyncio.Event | None,
+    lease_seconds: float,
+    heartbeat_seconds: float,
+    config: BusinessGraphConfig,
+    planner: BusinessModelPlanner,
+) -> str:
+    """plan：基于整份报告与问题规划实体/关系类型，不登记主体白名单。"""
+    state = await _graph_step_ready(
+        claim, session_factory=session_factory, expected_step=2
+    )
+    if state != "ready":
+        return state
+    async with session_factory() as db:
+        build = await graph_store.get_build_for_run(db, run_id=claim.run_id)
+        chunks = await graph_store.list_build_chunks(
+            db, build_id=build.id, project_id=build.project_id
+        )
+        await db.commit()
+    if not chunks:
+        raise GraphWorkError("invalid_graph_scope", "建图材料没有可用分块")
+    if stop_event is not None and stop_event.is_set():
+        return "stopped"
+    state = await _graph_step_ready(
+        claim, session_factory=session_factory, expected_step=2
+    )
+    if state != "ready":
+        return state
+    inputs = _chunk_inputs(chunks)
+    stage = await _run_with_heartbeat(
+        claim,
+        session_factory=session_factory,
+        lease_seconds=lease_seconds,
+        heartbeat_seconds=heartbeat_seconds,
+        func=planner.plan_ontology,
+        question=build.question,
+        chunks=inputs,
+        config=config,
+    )
+    if stop_event is not None and stop_event.is_set():
+        return "stopped"
+    raw_plan = plan_to_payload(stage)
+    payload = {
+        "mode": "ontology",
+        "entityTypes": [
+            {**item, "displayName": stage.entity_types[index].display_name}
+            for index, item in enumerate(raw_plan["entityTypes"])
+        ],
+        "relationTypes": [
+            {**item, "displayName": stage.relation_types[index].display_name}
+            for index, item in enumerate(raw_plan["relationTypes"])
+        ],
+    }
+    async with session_factory() as db:
+        return await _commit_graph_step(
+            db,
+            claim,
+            step=2,
+            step_key=GRAPH_STEP_KEYS[1],
+            payload=payload,
+            lease_seconds=lease_seconds,
+            build_id=build.id,
+            planned_episodes=0,
+            event_extra={
+                "phase": "preparing",
+                "plannedEpisodes": 0,
+                "acceptedEpisodes": 0,
+                "confirmedEpisodes": 0,
+            },
+            build_phase="preparing",
+        )
+
+
+def _plan_types_from_payload(
+    payload: dict[str, object],
+) -> tuple[tuple[EntityType, ...], tuple[RelationType, ...]]:
+    raw_entities = payload.get("entityTypes")
+    raw_relations = payload.get("relationTypes")
+    if not isinstance(raw_entities, list) or not isinstance(raw_relations, list):
+        raise GraphWorkError("graph_incomplete", "规划缺少实体或关系类型")
+    entities = tuple(
+        EntityType(
+            key=str(item.get("key") or ""),
+            name=str(item.get("name") or ""),
+            description=str(item.get("description") or ""),
+            display_name=str(item.get("displayName") or item.get("name") or ""),
+        )
+        for item in raw_entities
+        if isinstance(item, dict) and item.get("key") and item.get("name")
+    )
+    relations = tuple(
+        RelationType(
+            key=str(item.get("key") or ""),
+            name=str(item.get("name") or ""),
+            source_type=str(item.get("sourceType") or ""),
+            target_type=str(item.get("targetType") or ""),
+            description=str(item.get("description") or ""),
+            display_name=str(item.get("displayName") or item.get("name") or ""),
+        )
+        for item in raw_relations
+        if isinstance(item, dict) and item.get("key") and item.get("name")
+    )
+    if not entities or not relations:
+        raise GraphWorkError("graph_incomplete", "规划类型为空")
+    return entities, relations
+
+
+def _build_graph_chunk_payloads(
+    chunks: list[graph_store.BuildChunk],
+) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+    by_document: dict[uuid.UUID, list[graph_store.BuildChunk]] = {}
+    order: list[uuid.UUID] = []
+    for chunk in chunks:
+        if chunk.document_id not in by_document:
+            by_document[chunk.document_id] = []
+            order.append(chunk.document_id)
+        by_document[chunk.document_id].append(chunk)
+    payloads: list[dict[str, object]] = []
+    documents: list[dict[str, object]] = []
+    for document_id in order:
+        items = sorted(
+            by_document[document_id], key=lambda item: item.chunk_index
+        )
+        text, positions = document_extract.reconstruct_graph_text(items)
+        documents.append(
+            {
+                "documentId": str(document_id),
+                "documentName": items[0].document_name,
+                "text": text,
+                "positions": [
+                    None
+                    if item is None
+                    else [
+                        item.page_no,
+                        item.source_offset,
+                        item.document_chunk_index,
+                        item.paragraph_start,
+                        item.paragraph_end,
+                    ]
+                    for item in positions
+                ],
+            }
+        )
+        for graph_chunk in document_extract.chunk_graph_text(
+            text, positions, target=500, overlap=50
+        ):
+            payloads.append(
+                {
+                    "key": f"text-{len(payloads) + 1:04d}",
+                    "ordinal": len(payloads) + 1,
+                    "documentId": str(document_id),
+                    "documentName": items[0].document_name,
+                    "text": graph_chunk.text,
+                    "positions": [
+                        None
+                        if item is None
+                        else [
+                            item.page_no,
+                            item.source_offset,
+                            item.document_chunk_index,
+                            item.paragraph_start,
+                            item.paragraph_end,
+                        ]
+                        for item in graph_chunk.positions
+                    ],
+                    "segments": [
+                        {
+                            "pageNo": segment.page_no,
+                            "documentChunkIndex": segment.document_chunk_index,
+                            "paragraphStart": segment.paragraph_start,
+                            "paragraphEnd": segment.paragraph_end,
+                            "sourceStart": segment.source_start,
+                            "sourceEnd": segment.source_end,
+                            "textStart": segment.text_start,
+                            "textEnd": segment.text_end,
+                        }
+                        for segment in graph_chunk.segments
+                    ],
+                }
+            )
+    return payloads, documents
+
+
+async def execute_graph_prepare_text(
+    claim: Claim,
+    *,
+    session_factory: SessionFactory,
+    stop_event: asyncio.Event | None,
+    lease_seconds: float,
+    heartbeat_seconds: float,
+    config: BusinessGraphConfig,
+    graph_client_factory: Callable[[], Any],
+) -> str:
+    """extract：重建建图全文、按 500/50 切分并设置本次本体。"""
+    state = await _graph_step_ready(
+        claim, session_factory=session_factory, expected_step=3
+    )
+    if state != "ready":
+        return state
+    async with session_factory() as db:
+        build = await graph_store.get_build_for_run(db, run_id=claim.run_id)
+        chunks = await graph_store.list_build_chunks(
+            db, build_id=build.id, project_id=build.project_id
+        )
+        plan_payload = await _load_graph_step_payload(
+            db, run_id=claim.run_id, step=2
+        )
+        await db.commit()
+    if plan_payload is None:
+        raise GraphWorkError("graph_incomplete", "缺少已提交的规划")
+    if not chunks:
+        raise GraphWorkError("invalid_graph_scope", "建图材料没有可用分块")
+    if stop_event is not None and stop_event.is_set():
+        return "stopped"
+    entity_types, relation_types = _plan_types_from_payload(plan_payload)
+    graph_id = str(build.graph_id) if build.graph_id is not None else ""
+    if not graph_id:
+        async with session_factory() as db:
+            binding = await graph_store.require_binding(
+                db, project_id=build.project_id
+            )
+        if binding.graph_id is None:
+            raise GraphWorkError("graph_incomplete", "项目图谱绑定尚未完成")
+        graph_id = str(binding.graph_id)
+    assert_business_graph_scope(graph_id, config=config)
+    chunk_payloads, document_payloads = _build_graph_chunk_payloads(chunks)
+    if not chunk_payloads:
+        raise GraphWorkError("invalid_graph_scope", "建图全文为空")
+    if len(chunk_payloads) > config.max_nodes:
+        raise GraphWorkError("graph_too_large", "建图分块数量超过上限")
+    client = graph_client_factory()
+    try:
+        await _run_with_heartbeat(
+            claim,
+            session_factory=session_factory,
+            lease_seconds=lease_seconds,
+            heartbeat_seconds=heartbeat_seconds,
+            func=set_graph_ontology,
+            client=client,
+            graph_id=graph_id,
+            entity_types=entity_types,
+            relation_types=relation_types,
+            idempotency_key=str(
+                uuid.UUID(
+                    str(
+                        uuid.uuid5(
+                            uuid.NAMESPACE_URL, f"ontology:{build.id}"
+                        )
+                    ),
+                    version=4,
+                )
+            ),
+        )
+    except BusinessGraphError as exc:
+        raise GraphWorkError(exc.code, exc.message) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise GraphWorkError("graph_unavailable", "图谱本体设置失败") from exc
+    if stop_event is not None and stop_event.is_set():
+        return "stopped"
+    page_numbers = [
+        int(segment["pageNo"])
+        for item in chunk_payloads
+        for segment in item["segments"]  # type: ignore[union-attr]
+        if isinstance(segment, dict) and segment.get("pageNo") is not None
+    ]
+    async with session_factory() as db:
+        return await _commit_graph_step(
+            db,
+            claim,
+            step=3,
+            step_key=GRAPH_STEP_KEYS[2],
+            payload={
+                "mode": "text",
+                "chunks": chunk_payloads,
+                "documents": document_payloads,
+                "pageCount": max(page_numbers) if page_numbers else 0,
+                "chunkCount": len(chunk_payloads),
+            },
+            lease_seconds=lease_seconds,
+            build_id=build.id,
+            planned_episodes=len(chunk_payloads),
+            event_extra={
+                "phase": "preparing",
+                "plannedEpisodes": len(chunk_payloads),
+                "acceptedEpisodes": 0,
+                "confirmedEpisodes": 0,
+                "pageCount": max(page_numbers) if page_numbers else 0,
+            },
+            build_phase="preparing",
+        )
+
+
 async def execute_graph_extract(
     claim: Claim,
     *,
@@ -1519,34 +1932,55 @@ async def execute_graph_extract(
             question=build.question,
             entity_types=stage.entity_types,
             relation_types=stage.relation_types,
+            subjects=stage.subjects,
             batch=batch,
             chunks=inputs,
             config=config,
         )
         extracted_batches.append(extracted)
-    nodes = tuple(
-        node for extracted in extracted_batches for node in extracted.nodes
-    )
-    edges = tuple(
-        edge for extracted in extracted_batches for edge in extracted.edges
-    )
+    if stage.subjects:
+        try:
+            consolidated = consolidate(
+                subjects=stage.subjects,
+                entity_types=stage.entity_types,
+                extracted_batches=extracted_batches,
+                max_sources_per_item=config.max_sources_per_item,
+            )
+        except GraphContractError as exc:
+            raise GraphWorkError(exc.code, exc.message) from exc
+        nodes = consolidated.nodes
+        edges = consolidated.edges
+    else:
+        nodes = tuple(
+            node for extracted in extracted_batches for node in extracted.nodes
+        )
+        edges = tuple(
+            edge for extracted in extracted_batches for edge in extracted.edges
+        )
     graph = GraphResult(
         entity_types=stage.entity_types,
         relation_types=stage.relation_types,
         batches=stage.batches,
+        subjects=stage.subjects,
         nodes=nodes,
         edges=edges,
     )
     planner.validate_result(graph, config)
     if stop_event is not None and stop_event.is_set():
         return "stopped"
+    extraction_payload = extractions_to_payload(extracted_batches)
+    payload: dict[str, object] = {
+        "batches": extraction_payload["batches"],
+    }
+    if stage.subjects:
+        payload["manifest"] = manifest_to_payload(nodes, edges)
     async with session_factory() as db:
         return await _commit_graph_step(
             db,
             claim,
             step=3,
             step_key=GRAPH_STEP_KEYS[2],
-            payload=extractions_to_payload(extracted_batches),
+            payload=payload,
             lease_seconds=lease_seconds,
             build_id=build.id,
             event_extra={
@@ -1594,6 +2028,58 @@ async def _prepare_graph_episodes(
                 if key in existing_by_key:
                     continue
                 content = _graph_episode_content(build_id, key, batch_payload)
+                await graph_store.record_episode(
+                    db,
+                    build_id=build_id,
+                    episode_key=key,
+                    content=content,
+                    content_sha256=hashlib.sha256(
+                        content.encode("utf-8")
+                    ).hexdigest(),
+                    state="planned",
+                )
+            await db.commit()
+            episodes = await graph_store.list_episodes(db, build_id=build_id)
+            await db.commit()
+        return "progress", episodes
+    except DB_ERRORS:
+        raise
+
+
+async def _prepare_graph_text_episodes(
+    claim: Claim,
+    *,
+    session_factory: SessionFactory,
+    build_id: uuid.UUID,
+    chunk_texts: list[tuple[str, str]],
+    lease_seconds: float,
+) -> tuple[str, list[graph_store.GraphEpisode]]:
+    """先锁 job 校验租约与 next_step=3，再把原文分块写成计划 episode。"""
+    try:
+        async with session_factory() as db:
+            row = await _locked_job(db, claim)
+            if row is None:
+                await db.rollback()
+                return "lost", []
+            if row.status in TERMINAL_STATUSES:  # type: ignore[attr-defined]
+                await db.rollback()
+                return str(row.status), []  # type: ignore[attr-defined]
+            db_now = await _db_now(db)
+            if not _lease_valid(row, claim, db_now):
+                await db.rollback()
+                return "lost", []
+            next_step = int(row.next_step)  # type: ignore[attr-defined]
+            if next_step > 3:
+                await db.rollback()
+                return "duplicate", []
+            if next_step != 3:
+                await db.rollback()
+                return "lost", []
+            existing = await graph_store.list_episodes(db, build_id=build_id)
+            existing_by_key = {item.episode_key: item for item in existing}
+            for key, content in chunk_texts:
+                if key in existing_by_key:
+                    continue
                 await graph_store.record_episode(
                     db,
                     build_id=build_id,
@@ -1703,147 +2189,108 @@ async def execute_graph_write(
         extraction_payload = await _load_graph_step_payload(
             db, run_id=claim.run_id, step=3
         )
-        binding = await graph_store.require_binding(
-            db, project_id=build.project_id
-        )
         await db.commit()
     if extraction_payload is None:
         raise GraphWorkError("graph_incomplete", "缺少已提交的抽取清单")
-    if binding.graph_id is None:
-        raise GraphWorkError("graph_incomplete", "项目图谱绑定尚未完成")
-    graph_id = str(binding.graph_id)
+    if build.graph_id is not None:
+        graph_id = str(build.graph_id)
+    else:
+        async with session_factory() as db:
+            binding = await graph_store.require_binding(
+                db, project_id=build.project_id
+            )
+        if binding.graph_id is None:
+            raise GraphWorkError("graph_incomplete", "项目图谱绑定尚未完成")
+        graph_id = str(binding.graph_id)
     assert_business_graph_scope(graph_id, config=config)
-    raw_batches = extraction_payload.get("batches")
-    if not isinstance(raw_batches, list):
-        raise GraphWorkError("graph_incomplete", "抽取清单缺少批次")
+    raw_chunks = extraction_payload.get("chunks")
+    text_mode = extraction_payload.get("mode") == "text" or isinstance(
+        raw_chunks, list
+    )
     batch_payloads: list[tuple[str, dict[str, object]]] = []
-    for raw in raw_batches:
-        if not isinstance(raw, dict):
-            raise GraphWorkError("graph_incomplete", "抽取批次不是对象")
-        key = str(raw.get("batchKey") or "")
-        if not key:
-            raise GraphWorkError("graph_incomplete", "抽取批次缺少 batchKey")
-        batch_payloads.append((key, raw))
-    if not batch_payloads:
-        raise GraphWorkError("graph_incomplete", "抽取清单为空")
+    chunk_texts: list[tuple[str, str]] = []
+    if text_mode:
+        if not isinstance(raw_chunks, list) or not raw_chunks:
+            raise GraphWorkError("graph_incomplete", "建图全文缺少分块")
+        for raw in raw_chunks:
+            if not isinstance(raw, dict):
+                raise GraphWorkError("graph_incomplete", "建图分块不是对象")
+            key = str(raw.get("key") or "")
+            chunk_text = str(raw.get("text") or "")
+            if not key or not chunk_text:
+                raise GraphWorkError("graph_incomplete", "建图分块缺少键或正文")
+            chunk_texts.append((key, chunk_text))
+        episode_keys = [key for key, _ in chunk_texts]
+    else:
+        raw_batches = extraction_payload.get("batches")
+        if not isinstance(raw_batches, list):
+            raise GraphWorkError("graph_incomplete", "抽取清单缺少批次")
+        for raw in raw_batches:
+            if not isinstance(raw, dict):
+                raise GraphWorkError("graph_incomplete", "抽取批次不是对象")
+            key = str(raw.get("batchKey") or "")
+            if not key:
+                raise GraphWorkError("graph_incomplete", "抽取批次缺少 batchKey")
+            batch_payloads.append((key, raw))
+        if not batch_payloads:
+            raise GraphWorkError("graph_incomplete", "抽取清单为空")
+        episode_keys = [key for key, _ in batch_payloads]
     if before_prepare is not None:
         await before_prepare()
-    status, episodes = await _prepare_graph_episodes(
-        claim,
-        session_factory=session_factory,
-        build_id=build.id,
-        batch_payloads=batch_payloads,
-        lease_seconds=lease_seconds,
-    )
+    if text_mode:
+        status, episodes = await _prepare_graph_text_episodes(
+            claim,
+            session_factory=session_factory,
+            build_id=build.id,
+            chunk_texts=chunk_texts,
+            lease_seconds=lease_seconds,
+        )
+    else:
+        status, episodes = await _prepare_graph_episodes(
+            claim,
+            session_factory=session_factory,
+            build_id=build.id,
+            batch_payloads=batch_payloads,
+            lease_seconds=lease_seconds,
+        )
     if status != "progress":
         return status
     if stop_event is not None and stop_event.is_set():
         return "stopped"
     episode_by_key = {item.episode_key: item for item in episodes}
-    missing = [key for key, _ in batch_payloads if key not in episode_by_key]
+    missing = [key for key in episode_keys if key not in episode_by_key]
     if missing:
         raise GraphWorkError("graph_incomplete", "episode 持久化不完整")
 
     client = graph_client_factory()
     accepted: dict[str, str] = {}
-    for key, _ in batch_payloads:
-        if stop_event is not None and stop_event.is_set():
-            return "stopped"
-        episode = episode_by_key[key]
-        if (
-            episode.write_outcome == "accepted"
-            or (
-                episode.state in ("written", "matched", "processed")
-                and episode.episode_uuid is not None
-            )
-        ):
-            if episode.episode_uuid is not None:
-                accepted[key] = str(episode.episode_uuid)
-            continue
-        state = await _graph_step_ready(
-            claim, session_factory=session_factory, expected_step=4
-        )
-        if state != "ready":
-            return state
-
-        if episode.write_outcome == "in_flight":
-            try:
-                async with _heartbeat_scope(
-                    claim,
-                    session_factory=session_factory,
-                    lease_seconds=lease_seconds,
-                    heartbeat_seconds=heartbeat_seconds,
-                ):
-                    outcome, confirmed = await _confirm_write_episode_by_search(
-                        claim,
-                        session_factory=session_factory,
-                        stop_event=stop_event,
-                        client=client,
-                        graph_id=graph_id,
-                        episode=episode,
-                        build_id=build.id,
-                        index_timeout_seconds=config.index_timeout_seconds,
-                    )
-            except BusinessGraphError as exc:
-                raise GraphWorkError(exc.code, exc.message) from exc
-            if outcome != "progress" or confirmed is None:
-                return outcome
-            accepted[key] = confirmed
-            continue
-
-        if episode.write_outcome == "rejected_retryable":
-            if episode.attempts >= GRAPH_WRITE_MAX_ATTEMPTS:
-                raise GraphWorkError("graph_unavailable", "episode 重试次数已耗尽")
-            attempts_left = GRAPH_WRITE_MAX_ATTEMPTS - episode.attempts
-        else:
-            attempts_left = GRAPH_WRITE_MAX_ATTEMPTS
-
-        for _ in range(max(1, attempts_left)):
+    async with _heartbeat_scope(
+        claim,
+        session_factory=session_factory,
+        lease_seconds=lease_seconds,
+        heartbeat_seconds=heartbeat_seconds,
+    ):
+        for key in episode_keys:
             if stop_event is not None and stop_event.is_set():
                 return "stopped"
+            episode = episode_by_key[key]
+            if (
+                episode.write_outcome == "accepted"
+                or (
+                    episode.state in ("written", "matched", "processed")
+                    and episode.episode_uuid is not None
+                )
+            ):
+                if episode.episode_uuid is not None:
+                    accepted[key] = str(episode.episode_uuid)
+                continue
             state = await _graph_step_ready(
                 claim, session_factory=session_factory, expected_step=4
             )
             if state != "ready":
                 return state
-            async with session_factory() as db:
-                outcome = await _mark_episode_attempt(
-                    db, claim, episode=episode, build_id=build.id
-                )
-            if outcome != "progress":
-                return outcome
-            try:
-                written = await _run_with_heartbeat(
-                    claim,
-                    session_factory=session_factory,
-                    lease_seconds=lease_seconds,
-                    heartbeat_seconds=heartbeat_seconds,
-                    func=write_episode,
-                    client=client,
-                    graph_id=graph_id,
-                    episode=episode,
-                    config=config,
-                    max_attempts=1,
-                    sleep=time.sleep,
-                )
-            except BusinessGraphError as exc:
-                raise GraphWorkError(exc.code, exc.message) from exc
-            if written.episode_uuid:
-                async with session_factory() as db:
-                    persisted = await _persist_episode_state(
-                        db,
-                        claim,
-                        episode=episode,
-                        build_id=build.id,
-                        state="written",
-                        episode_uuid=written.episode_uuid,
-                        expected_next_step=3,
-                    )
-                if persisted != "progress":
-                    return persisted
-                accepted[key] = written.episode_uuid
-                break
-            if written.response_lost:
+
+            if episode.write_outcome == "in_flight":
                 try:
                     async with _heartbeat_scope(
                         claim,
@@ -1866,18 +2313,95 @@ async def execute_graph_write(
                 if outcome != "progress" or confirmed is None:
                     return outcome
                 accepted[key] = confirmed
-                break
-            # provider 明确拒绝且可重试：先落库该状态，再在剩余次数内重发。
-            async with session_factory() as db:
-                rejected = await _mark_episode_rejected(
-                    db, claim, episode=episode, build_id=build.id
+                continue
+
+            if episode.write_outcome == "rejected_retryable":
+                if episode.attempts >= GRAPH_WRITE_MAX_ATTEMPTS:
+                    raise GraphWorkError("graph_unavailable", "episode 重试次数已耗尽")
+                attempts_left = GRAPH_WRITE_MAX_ATTEMPTS - episode.attempts
+            else:
+                attempts_left = GRAPH_WRITE_MAX_ATTEMPTS
+
+            for _ in range(max(1, attempts_left)):
+                if stop_event is not None and stop_event.is_set():
+                    return "stopped"
+                state = await _graph_step_ready(
+                    claim, session_factory=session_factory, expected_step=4
                 )
-            if rejected != "progress":
-                return rejected
-            if _ == max(1, attempts_left) - 1:
+                if state != "ready":
+                    return state
+                async with session_factory() as db:
+                    outcome = await _mark_episode_attempt(
+                        db, claim, episode=episode, build_id=build.id
+                    )
+                if outcome != "progress":
+                    return outcome
+                try:
+                    written = await _run_with_heartbeat(
+                        claim,
+                        session_factory=session_factory,
+                        lease_seconds=lease_seconds,
+                        heartbeat_seconds=heartbeat_seconds,
+                        func=write_episode,
+                        client=client,
+                        graph_id=graph_id,
+                        episode=episode,
+                        config=config,
+                        max_attempts=1,
+                        sleep=time.sleep,
+                    )
+                except BusinessGraphError as exc:
+                    raise GraphWorkError(exc.code, exc.message) from exc
+                if written.episode_uuid:
+                    async with session_factory() as db:
+                        persisted = await _persist_episode_state(
+                            db,
+                            claim,
+                            episode=episode,
+                            build_id=build.id,
+                            state="written",
+                            episode_uuid=written.episode_uuid,
+                            expected_next_step=3,
+                        )
+                    if persisted != "progress":
+                        return persisted
+                    accepted[key] = written.episode_uuid
+                    break
+                if written.response_lost:
+                    try:
+                        async with _heartbeat_scope(
+                            claim,
+                            session_factory=session_factory,
+                            lease_seconds=lease_seconds,
+                            heartbeat_seconds=heartbeat_seconds,
+                        ):
+                            outcome, confirmed = await _confirm_write_episode_by_search(
+                                claim,
+                                session_factory=session_factory,
+                                stop_event=stop_event,
+                                client=client,
+                                graph_id=graph_id,
+                                episode=episode,
+                                build_id=build.id,
+                                index_timeout_seconds=config.index_timeout_seconds,
+                            )
+                    except BusinessGraphError as exc:
+                        raise GraphWorkError(exc.code, exc.message) from exc
+                    if outcome != "progress" or confirmed is None:
+                        return outcome
+                    accepted[key] = confirmed
+                    break
+                # provider 明确拒绝且可重试：先落库该状态，再在剩余次数内重发。
+                async with session_factory() as db:
+                    rejected = await _mark_episode_rejected(
+                        db, claim, episode=episode, build_id=build.id
+                    )
+                if rejected != "progress":
+                    return rejected
+                if _ == max(1, attempts_left) - 1:
+                    raise GraphWorkError("graph_unavailable", "episode 未受理")
+            else:
                 raise GraphWorkError("graph_unavailable", "episode 未受理")
-        else:
-            raise GraphWorkError("graph_unavailable", "episode 未受理")
 
     async with session_factory() as db:
         final_episodes = await graph_store.list_episodes(db, build_id=build.id)
@@ -1963,16 +2487,33 @@ async def _confirm_one_episode(
             raise GraphWorkError(
                 "processing_timeout", "episode 处理预算耗尽"
             )
-        outcome, evidence = await _search_episode_guarded(
-            claim,
-            session_factory=session_factory,
-            expected_step=5,
-            stop_event=stop_event,
-            client=client,
-            graph_id=graph_id,
-            episode=episode,
-            expected_uuid=expected_uuid,
-        )
+        try:
+            outcome, evidence = await _search_episode_guarded(
+                claim,
+                session_factory=session_factory,
+                expected_step=5,
+                stop_event=stop_event,
+                client=client,
+                graph_id=graph_id,
+                episode=episode,
+                expected_uuid=expected_uuid,
+            )
+        except BusinessGraphError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - 图谱检索异常按可重试分类
+            error = _classify_exception(exc)
+            if not error.retryable:
+                raise GraphWorkError(
+                    "graph_unavailable", "episode 检索失败"
+                ) from exc
+            now = clock()
+            remaining = processing_deadline - now
+            if remaining <= 0:
+                raise GraphWorkError(
+                    "processing_timeout", "episode 处理预算耗尽"
+                ) from exc
+            sleep(min(2.0, remaining))
+            continue
         if outcome != "progress":
             raise GraphConfirmationAborted(outcome)
         if evidence is None:
@@ -2064,11 +2605,15 @@ async def execute_graph_confirm_episodes(
         )
         episodes = await graph_store.list_episodes(db, build_id=build.id)
         await db.commit()
-    if binding.graph_id is None:
+    graph_id = (
+        str(build.graph_id)
+        if build.graph_id is not None
+        else (str(binding.graph_id) if binding.graph_id is not None else "")
+    )
+    if not graph_id:
         raise GraphWorkError("graph_incomplete", "项目图谱绑定尚未完成")
     if write_payload is None:
         raise GraphWorkError("graph_incomplete", "缺少已提交的写入结果")
-    graph_id = str(binding.graph_id)
     assert_business_graph_scope(graph_id, config=config)
     now = clock()
     index_deadline = float(
@@ -2128,8 +2673,13 @@ async def execute_graph_confirm_episodes(
 class ManifestNode:
     key: str
     label: str
+    node_type: str
+    type_key: str
     origin: str
     summary: str
+    subject_key: str
+    aliases: tuple[str, ...]
+    batch_keys: tuple[str, ...]
     sources: tuple[SourceRef, ...]
 
 
@@ -2137,10 +2687,14 @@ class ManifestNode:
 class ManifestEdge:
     key: str
     label: str
+    edge_type: str
+    type_key: str
     origin: str
     summary: str
+    claim_nature: str
     source_key: str
     target_key: str
+    batch_keys: tuple[str, ...]
     sources: tuple[SourceRef, ...]
 
 
@@ -2172,9 +2726,70 @@ def _source_ref(raw: object) -> SourceRef:
         raise GraphWorkError("graph_incomplete", "来源字段不可读取") from None
 
 
+def _source_tuple(raw: object) -> tuple[SourceRef, ...]:
+    return tuple(
+        _source_ref(source)
+        for source in (raw if isinstance(raw, list) else [])
+    )
+
+
+def _string_tuple(raw: object) -> tuple[str, ...]:
+    return tuple(
+        str(item)
+        for item in (raw if isinstance(raw, list) else [])
+        if str(item).strip()
+    )
+
+
 def _manifest_from_payload(
     payload: dict[str, object],
 ) -> tuple[list[ManifestNode], list[ManifestEdge]]:
+    raw_manifest = payload.get("manifest")
+    if isinstance(raw_manifest, dict):
+        raw_nodes = raw_manifest.get("nodes")
+        raw_edges = raw_manifest.get("edges")
+        if not isinstance(raw_nodes, list) or not isinstance(raw_edges, list):
+            raise GraphWorkError("graph_incomplete", "清单缺少节点或关系")
+        nodes = [
+            ManifestNode(
+                key=str(item.get("key") or ""),
+                label=str(item.get("label") or ""),
+                node_type=str(item.get("nodeType") or ""),
+                type_key=str(item.get("typeKey") or item.get("nodeType") or ""),
+                origin=str(item.get("origin") or ""),
+                summary=str(item.get("summary") or ""),
+                subject_key=str(item.get("subjectKey") or ""),
+                aliases=_string_tuple(item.get("aliases")),
+                batch_keys=_string_tuple(item.get("batchKeys")),
+                sources=_source_tuple(item.get("sources")),
+            )
+            for item in raw_nodes
+            if isinstance(item, dict)
+        ]
+        edges = [
+            ManifestEdge(
+                key=str(item.get("key") or ""),
+                label=str(item.get("label") or ""),
+                edge_type=str(item.get("edgeType") or ""),
+                type_key=str(item.get("typeKey") or item.get("edgeType") or ""),
+                origin=str(item.get("origin") or ""),
+                summary=str(item.get("summary") or ""),
+                claim_nature=str(item.get("claimNature") or ""),
+                source_key=str(item.get("sourceKey") or ""),
+                target_key=str(item.get("targetKey") or ""),
+                batch_keys=_string_tuple(item.get("batchKeys")),
+                sources=_source_tuple(item.get("sources")),
+            )
+            for item in raw_edges
+            if isinstance(item, dict)
+        ]
+        if any(not node.key or not node.label for node in nodes):
+            raise GraphWorkError("graph_incomplete", "清单节点缺少键或名称")
+        if any(not edge.key or not edge.label for edge in edges):
+            raise GraphWorkError("graph_incomplete", "清单关系缺少键或名称")
+        return nodes, edges
+
+    # 升级前已提交的旧清单：保持旧扁平读取，供旧 build 接手。
     raw_batches = payload.get("batches")
     if not isinstance(raw_batches, list):
         raise GraphWorkError("graph_incomplete", "抽取清单缺少批次")
@@ -2196,17 +2811,18 @@ def _manifest_from_payload(
             if not key or key in seen_nodes:
                 raise GraphWorkError("graph_incomplete", "节点键重复或为空")
             seen_nodes.add(key)
-            sources = item.get("sources")
             nodes.append(
                 ManifestNode(
                     key=key,
                     label=str(item.get("label") or ""),
+                    node_type="entity",
+                    type_key="entity",
                     origin=str(item.get("origin") or ""),
                     summary=str(item.get("summary") or ""),
-                    sources=tuple(
-                        _source_ref(source)
-                        for source in (sources if isinstance(sources, list) else [])
-                    ),
+                    subject_key="",
+                    aliases=(),
+                    batch_keys=(),
+                    sources=_source_tuple(item.get("sources")),
                 )
             )
         for item in raw_edges:
@@ -2216,19 +2832,19 @@ def _manifest_from_payload(
             if not key or key in seen_edges:
                 raise GraphWorkError("graph_incomplete", "关系键重复或为空")
             seen_edges.add(key)
-            sources = item.get("sources")
             edges.append(
                 ManifestEdge(
                     key=key,
                     label=str(item.get("label") or ""),
+                    edge_type="relation",
+                    type_key="relation",
                     origin=str(item.get("origin") or ""),
                     summary=str(item.get("summary") or ""),
+                    claim_nature="",
                     source_key=str(item.get("sourceKey") or ""),
                     target_key=str(item.get("targetKey") or ""),
-                    sources=tuple(
-                        _source_ref(source)
-                        for source in (sources if isinstance(sources, list) else [])
-                    ),
+                    batch_keys=(),
+                    sources=_source_tuple(item.get("sources")),
                 )
             )
     return nodes, edges
@@ -2274,6 +2890,578 @@ def _evidence_for(
     return evidence
 
 
+def _chunk_payloads_by_key(
+    extraction_payload: dict[str, object],
+) -> dict[str, dict[str, object]]:
+    raw_chunks = extraction_payload.get("chunks")
+    if not isinstance(raw_chunks, list):
+        return {}
+    result: dict[str, dict[str, object]] = {}
+    for raw in raw_chunks:
+        if isinstance(raw, dict):
+            key = str(raw.get("key") or "")
+            if key:
+                result[key] = raw
+    return result
+
+
+def _documents_by_id(
+    extraction_payload: dict[str, object],
+) -> dict[str, dict[str, object]]:
+    raw_documents = extraction_payload.get("documents")
+    if not isinstance(raw_documents, list):
+        return {}
+    result: dict[str, dict[str, object]] = {}
+    for raw in raw_documents:
+        if isinstance(raw, dict):
+            document_id = str(raw.get("documentId") or "")
+            if document_id:
+                result[document_id] = raw
+    return result
+
+
+def _relation_label_map(
+    plan_payload: dict[str, object] | None,
+) -> dict[str, str]:
+    mapping: dict[str, str] = {}
+    if not plan_payload:
+        return mapping
+    raw_relations = plan_payload.get("relationTypes")
+    if not isinstance(raw_relations, list):
+        return mapping
+    for raw in raw_relations:
+        if not isinstance(raw, dict):
+            continue
+        key = str(raw.get("key") or "")
+        name = str(raw.get("name") or "")
+        display = str(raw.get("displayName") or name or key)
+        if key:
+            mapping[normalized_name(key)] = display
+        if name:
+            mapping[normalized_name(name)] = display
+        if display:
+            mapping[normalized_name(display)] = display
+    return mapping
+
+
+def _entity_label_map(plan_payload: dict[str, object] | None) -> dict[str, str]:
+    mapping: dict[str, str] = {}
+    if not plan_payload:
+        return mapping
+    raw_entities = plan_payload.get("entityTypes")
+    if not isinstance(raw_entities, list):
+        return mapping
+    for raw in raw_entities:
+        if not isinstance(raw, dict):
+            continue
+        key = str(raw.get("key") or "")
+        name = str(raw.get("name") or "")
+        display = str(raw.get("displayName") or name or key)
+        if key:
+            mapping[normalized_name(key)] = display
+        if name:
+            mapping[normalized_name(name)] = display
+    return mapping
+
+
+def _relation_label(raw: str, mapping: dict[str, str]) -> str:
+    value = raw.strip()
+    if not value:
+        return "关联"
+    normalized = normalized_name(value)
+    exact = mapping.get(normalized)
+    if exact:
+        return exact
+    for key, label in mapping.items():
+        if len(key) < 4 or len(normalized) < 4:
+            continue
+        if key in normalized or normalized in key:
+            return label
+    if all(ord(char) < 128 for char in value):
+        return infer_relation_label(value)
+    return value
+
+
+def _source_from_positions(
+    *,
+    document_id: str,
+    text: str,
+    positions: object,
+    start: int,
+    end: int,
+) -> SourceRef | None:
+    if not isinstance(positions, list) or len(positions) != len(text):
+        return None
+    if start < 0 or end > len(text) or end <= start:
+        return None
+    raw = text[start:end]
+    left = len(raw) - len(raw.lstrip())
+    right = len(raw) - len(raw.rstrip())
+    start += left
+    end -= right
+    if end <= start:
+        return None
+    quote = text[start:end]
+    indexes = [
+        index
+        for index in range(start, end)
+        if isinstance(positions[index], list)
+    ]
+    if not indexes:
+        return None
+    first = positions[indexes[0]]
+    last = positions[indexes[-1]]
+    if not isinstance(first, list) or not isinstance(last, list):
+        return None
+    if (first[0], first[2]) != (last[0], last[2]):
+        # 跨页/跨入库分块的句子不发布，避免来源坐标错位。
+        return None
+    try:
+        source_start = int(first[1])
+        source_end = int(last[1]) + (
+            2 if ord(text[indexes[-1]]) > 0xFFFF else 1
+        )
+        return SourceRef(
+            document_id=document_id,
+            chunk_index=int(first[2]),
+            quote=quote,
+            source_start=source_start,
+            source_end=source_end,
+            page_no=None if first[0] is None else int(first[0]),
+            paragraph_start=None if first[3] is None else int(first[3]),
+            paragraph_end=None if last[4] is None else int(last[4]),
+        )
+    except (TypeError, ValueError):
+        return None
+
+
+def _source_from_chunk_selection(
+    chunk: dict[str, object],
+    *,
+    start: int,
+    end: int,
+) -> SourceRef | None:
+    return _source_from_positions(
+        document_id=str(chunk.get("documentId") or ""),
+        text=str(chunk.get("text") or ""),
+        positions=chunk.get("positions"),
+        start=start,
+        end=end,
+    )
+
+
+def _evidence_from_refs(
+    target_kind: str,
+    target_key: str,
+    sources: Sequence[SourceRef],
+) -> list[graph_store.GraphEvidence]:
+    result: list[graph_store.GraphEvidence] = []
+    for index, source in enumerate(sources, start=1):
+        result.append(
+            graph_store.GraphEvidence(
+                target_kind=target_kind,
+                target_key=target_key,
+                evidence_index=index,
+                document_id=uuid.UUID(str(source.document_id)),
+                chunk_index=int(source.chunk_index),
+                page_no=source.page_no,
+                paragraph_start=source.paragraph_start,
+                paragraph_end=source.paragraph_end,
+                source_start=int(source.source_start),
+                source_end=int(source.source_end),
+                quote=source.quote,
+            )
+        )
+    return result
+
+
+def _item_episode_uuids(item: object) -> set[str]:
+    if isinstance(item, dict):
+        values = item.get("episode_uuids") or []
+    else:
+        values = getattr(item, "episode_uuids", None) or []
+    return {str(value) for value in values if value}
+
+
+def _item_labels(item: object) -> list[str]:
+    if isinstance(item, dict):
+        values = item.get("labels") or []
+    else:
+        values = getattr(item, "labels", None) or []
+    return [str(value) for value in values]
+
+
+def _item_name(item: object) -> str:
+    if isinstance(item, dict):
+        return str(item.get("name") or "")
+    return str(getattr(item, "name", "") or "")
+
+
+def _materialize_readback_text(
+    *,
+    readback_nodes: Sequence[object],
+    readback_edges: Sequence[object],
+    episode_uuids: Sequence[str],
+    episodes: Sequence[graph_store.GraphEpisode],
+    chunks_by_key: dict[str, dict[str, object]],
+    documents_by_id: dict[str, dict[str, object]],
+    relation_labels: dict[str, str],
+    entity_labels: dict[str, str],
+    max_sources_per_item: int,
+) -> tuple[
+    tuple[graph_store.GraphNode, ...],
+    tuple[graph_store.GraphEdge, ...],
+    tuple[graph_store.GraphEvidence, ...],
+    dict[str, int],
+]:
+    """把读回节点/边归并成快照，并把关系定位到本次 build 的支持原句。"""
+    current_episodes = {str(item) for item in episode_uuids}
+    chunk_key_by_episode = {
+        str(item.episode_uuid): item.episode_key
+        for item in episodes
+        if item.episode_uuid is not None
+    }
+
+    @dataclass
+    class _NodeAggregate:
+        key: str
+        label: str
+        node_type: str
+        episode_uuids: set[str]
+        readback_uuids: set[str]
+        sources: list[SourceRef]
+
+    @dataclass
+    class _EdgeAggregate:
+        key: str
+        label: str
+        edge_type: str
+        fact: str
+        source_key: str
+        target_key: str
+        claim_nature: str
+        episode_uuids: set[str]
+        sources: list[SourceRef]
+
+    node_by_uuid: dict[str, str] = {}
+    node_aggregates: dict[str, _NodeAggregate] = {}
+    for item in readback_nodes:
+        item_uuid = _node_uuid(item)
+        if not item_uuid:
+            continue
+        item_episodes = _item_episode_uuids(item)
+        if not item_episodes.intersection(current_episodes):
+            continue
+        label = _node_name(item).strip()
+        if not label or len(label) < 2:
+            continue
+        raw_labels = _item_labels(item)
+        raw_type = next(
+            (
+                str(value)
+                for value in raw_labels
+                if str(value) not in {"Entity", "Node", "entity", "node"}
+            ),
+            "entity",
+        )
+        node_type = entity_labels.get(normalized_name(raw_type), raw_type)
+        if node_type in {"entity", "Entity", "Node"}:
+            node_type = "其他主体"
+        key = "n:" + hashlib.sha256(
+            normalized_name(label).encode("utf-8")
+        ).hexdigest()[:20]
+        node_by_uuid[item_uuid] = key
+        aggregate = node_aggregates.get(key)
+        if aggregate is None:
+            node_aggregates[key] = _NodeAggregate(
+                key=key,
+                label=label,
+                node_type=node_type,
+                episode_uuids=set(item_episodes & current_episodes),
+                readback_uuids={item_uuid},
+                sources=[],
+            )
+        else:
+            aggregate.episode_uuids.update(item_episodes & current_episodes)
+            aggregate.readback_uuids.add(item_uuid)
+            if len(label) > len(aggregate.label):
+                aggregate.label = label
+
+    edge_aggregates: dict[str, _EdgeAggregate] = {}
+    dropped_edges = 0
+    for item in readback_edges:
+        item_uuid = _node_uuid(item)
+        if not item_uuid:
+            continue
+        item_episodes = _item_episode_uuids(item)
+        current_item_episodes = item_episodes & current_episodes
+        if not current_item_episodes:
+            continue
+        source_key = node_by_uuid.get(_edge_source(item))
+        target_key = node_by_uuid.get(_edge_target(item))
+        if not source_key or not target_key or source_key == target_key:
+            dropped_edges += 1
+            continue
+        source_node = node_aggregates[source_key]
+        target_node = node_aggregates[target_key]
+        raw_name = _item_name(item)
+        display = _relation_label(raw_name, relation_labels)
+        fact = _edge_label(item).strip() or display
+        if display == raw_name and raw_name and all(
+            ord(char) < 128 for char in raw_name
+        ):
+            display = infer_relation_label(raw_name, fact)
+        if is_generic_relation(display) or is_generic_relation(raw_name):
+            dropped_edges += 1
+            continue
+        source_ref: SourceRef | None = None
+        candidate_documents: set[str] = set()
+        candidate_chunks: list[dict[str, object]] = []
+        for episode_uuid in sorted(current_item_episodes):
+            chunk = chunks_by_key.get(chunk_key_by_episode.get(episode_uuid, ""))
+            if not chunk:
+                continue
+            candidate_chunks.append(chunk)
+            document_id = str(chunk.get("documentId") or "")
+            if document_id:
+                candidate_documents.add(document_id)
+        # 先在整份建图全文里找句子，覆盖被 500 字分块切断的跨句关系。
+        for document_id in sorted(candidate_documents):
+            document = documents_by_id.get(document_id)
+            if not document:
+                continue
+            selected = select_support_quote(
+                str(document.get("text") or ""),
+                fact=fact,
+                action=display,
+                source_label=source_node.label,
+                target_label=target_node.label,
+            )
+            if selected is None:
+                continue
+            source_ref = _source_from_positions(
+                document_id=document_id,
+                text=str(document.get("text") or ""),
+                positions=document.get("positions"),
+                start=selected[0],
+                end=selected[1],
+            )
+            if source_ref is not None:
+                break
+        if source_ref is None:
+            for chunk in candidate_chunks:
+                selected = select_support_quote(
+                    str(chunk.get("text") or ""),
+                    fact=fact,
+                    action=display,
+                    source_label=source_node.label,
+                    target_label=target_node.label,
+                )
+                if selected is None:
+                    continue
+                source_ref = _source_from_chunk_selection(
+                    chunk, start=selected[0], end=selected[1]
+                )
+                if source_ref is not None:
+                    break
+        if source_ref is None:
+            dropped_edges += 1
+            continue
+        claim_nature = classify_claim_nature(
+            action=display,
+            fact=fact,
+            quote=source_ref.quote,
+            source_label=source_node.label,
+        )
+        key = "e:" + hashlib.sha256(
+            "|".join(
+                (
+                    source_key,
+                    target_key,
+                    normalized_name(display),
+                    normalized_name(fact),
+                )
+            ).encode("utf-8")
+        ).hexdigest()[:20]
+        aggregate = edge_aggregates.get(key)
+        if aggregate is None:
+            edge_aggregates[key] = _EdgeAggregate(
+                key=key,
+                label=display,
+                edge_type=display,
+                fact=fact,
+                source_key=source_key,
+                target_key=target_key,
+                claim_nature=claim_nature,
+                episode_uuids=set(current_item_episodes),
+                sources=[source_ref],
+            )
+        else:
+            aggregate.episode_uuids.update(current_item_episodes)
+            if (
+                source_ref.source_start,
+                source_ref.source_end,
+                source_ref.document_id,
+            ) not in {
+                (
+                    existing.source_start,
+                    existing.source_end,
+                    existing.document_id,
+                )
+                for existing in aggregate.sources
+            }:
+                aggregate.sources.append(source_ref)
+            if aggregate.claim_nature != "official_decision":
+                aggregate.claim_nature = classify_claim_nature(
+                    action=aggregate.label,
+                    fact=aggregate.fact,
+                    quote=aggregate.sources[0].quote,
+                    source_label=node_aggregates[aggregate.source_key].label,
+                )
+
+    incident: dict[str, list[SourceRef]] = {}
+    for edge in edge_aggregates.values():
+        incident.setdefault(edge.source_key, []).extend(edge.sources)
+        incident.setdefault(edge.target_key, []).extend(edge.sources)
+
+    included_node_keys: set[str] = set()
+    nodes: list[graph_store.GraphNode] = []
+    node_evidence: list[graph_store.GraphEvidence] = []
+    for aggregate in node_aggregates.values():
+        sources: list[SourceRef] = []
+        candidate_documents: set[str] = set()
+        candidate_chunks: list[dict[str, object]] = []
+        for episode_uuid in sorted(aggregate.episode_uuids):
+            chunk = chunks_by_key.get(chunk_key_by_episode.get(episode_uuid, ""))
+            if not chunk:
+                continue
+            candidate_chunks.append(chunk)
+            document_id = str(chunk.get("documentId") or "")
+            if document_id:
+                candidate_documents.add(document_id)
+        for document_id in sorted(candidate_documents):
+            document = documents_by_id.get(document_id)
+            if not document:
+                continue
+            selected = select_mention_quote(
+                str(document.get("text") or ""), label=aggregate.label
+            )
+            if selected is None:
+                continue
+            source = _source_from_positions(
+                document_id=document_id,
+                text=str(document.get("text") or ""),
+                positions=document.get("positions"),
+                start=selected[0],
+                end=selected[1],
+            )
+            if source is not None:
+                sources.append(source)
+            if len(sources) >= max_sources_per_item:
+                break
+        if not sources:
+            for chunk in candidate_chunks:
+                selected = select_mention_quote(
+                    str(chunk.get("text") or ""), label=aggregate.label
+                )
+                if selected is None:
+                    continue
+                source = _source_from_chunk_selection(
+                    chunk, start=selected[0], end=selected[1]
+                )
+                if source is not None:
+                    sources.append(source)
+                if len(sources) >= max_sources_per_item:
+                    break
+        if not sources:
+            sources = list(incident.get(aggregate.key, []))
+        if not sources:
+            continue
+        # 去重并限制条数。
+        unique: list[SourceRef] = []
+        seen: set[tuple[str, int, int, int]] = set()
+        for source in sources:
+            marker = (
+                source.document_id,
+                source.chunk_index,
+                source.source_start,
+                source.source_end,
+            )
+            if marker in seen:
+                continue
+            seen.add(marker)
+            unique.append(source)
+            if len(unique) >= max_sources_per_item:
+                break
+        included_node_keys.add(aggregate.key)
+        nodes.append(
+            graph_store.GraphNode(
+                key=aggregate.key,
+                node_type=aggregate.node_type,
+                label=aggregate.label,
+                origin="material",
+                summary=None,
+            )
+        )
+        node_evidence.extend(_evidence_from_refs("node", aggregate.key, unique))
+
+    edges: list[graph_store.GraphEdge] = []
+    edge_evidence: list[graph_store.GraphEvidence] = []
+    for aggregate in edge_aggregates.values():
+        if (
+            aggregate.source_key not in included_node_keys
+            or aggregate.target_key not in included_node_keys
+        ):
+            continue
+        unique_sources: list[SourceRef] = []
+        seen_sources: set[tuple[str, int, int, int]] = set()
+        for source in aggregate.sources:
+            marker = (
+                source.document_id,
+                source.chunk_index,
+                source.source_start,
+                source.source_end,
+            )
+            if marker in seen_sources:
+                continue
+            seen_sources.add(marker)
+            unique_sources.append(source)
+            if len(unique_sources) >= max_sources_per_item:
+                break
+        if not unique_sources:
+            continue
+        edges.append(
+            graph_store.GraphEdge(
+                key=aggregate.key,
+                edge_type=aggregate.edge_type,
+                label=aggregate.label,
+                origin="material",
+                summary=aggregate.fact,
+                source_key=aggregate.source_key,
+                target_key=aggregate.target_key,
+                claim_nature=aggregate.claim_nature,
+            )
+        )
+        edge_evidence.extend(
+            _evidence_from_refs("edge", aggregate.key, unique_sources)
+        )
+    stats = {
+        "readbackNodeCount": len(readback_nodes),
+        "readbackEdgeCount": len(readback_edges),
+        "mergedNodeCount": len(node_aggregates),
+        "mergedEdgeCount": len(edge_aggregates),
+        "publishedNodeCount": len(nodes),
+        "publishedEdgeCount": len(edges),
+        "droppedEdgeCount": dropped_edges + (len(edge_aggregates) - len(edges)),
+    }
+    return (
+        tuple(nodes),
+        tuple(edges),
+        tuple(node_evidence + edge_evidence),
+        stats,
+    )
+
+
 async def _materialize_snapshot(
     db: AsyncSession,
     *,
@@ -2290,20 +3478,22 @@ async def _materialize_snapshot(
     tuple[graph_store.GraphEdge, ...],
     tuple[graph_store.GraphEvidence, ...],
 ]:
-    readback_names = {_node_name(item) for item in readback_nodes if _node_uuid(item)}
+    readback_names = {
+        _node_name(item) for item in readback_nodes if _node_uuid(item)
+    }
     relation_keys = {
         str(getattr(item, "manifest_key", "")) for item in relations.values()
     }
     edge_keys = {key for key in relation_keys if key}
     nodes_by_key = {node.key: node for node in manifest_nodes}
     included_keys: set[str] = set()
-    for node in manifest_nodes:
-        if node.label and node.label in readback_names:
-            included_keys.add(node.key)
     for edge in manifest_edges:
         if edge.key in edge_keys:
             included_keys.add(edge.source_key)
             included_keys.add(edge.target_key)
+    for node in manifest_nodes:
+        if node.origin == "hypothesis" and node.label in readback_names:
+            included_keys.add(node.key)
     included_nodes = [
         node for node in manifest_nodes if node.key in included_keys
     ]
@@ -2329,7 +3519,7 @@ async def _materialize_snapshot(
     nodes = tuple(
         graph_store.GraphNode(
             key=node.key,
-            node_type="entity",
+            node_type=node.node_type,
             label=node.label,
             origin=node.origin,
             summary=node.summary or None,
@@ -2339,12 +3529,13 @@ async def _materialize_snapshot(
     edges = tuple(
         graph_store.GraphEdge(
             key=edge.key,
-            edge_type="relation",
+            edge_type=edge.edge_type,
             label=edge.label,
             origin=edge.origin,
             summary=edge.summary or None,
             source_key=edge.source_key,
             target_key=edge.target_key,
+            claim_nature=edge.claim_nature or None,
         )
         for edge in included_edges
     )
@@ -2358,6 +3549,72 @@ async def _materialize_snapshot(
             _evidence_for("edge", edge.key, edge.sources, resolved)
         )
     return nodes, edges, tuple(evidence)
+
+
+async def _resolve_evidence_coordinates(
+    db: AsyncSession,
+    *,
+    build: graph_store.GraphBuild,
+    chunks: list[graph_store.BuildChunk],
+    evidence: Sequence[graph_store.GraphEvidence],
+    storage_root: object,
+    raw_cache: dict[uuid.UUID, object] | None = None,
+) -> tuple[graph_store.GraphEvidence, ...]:
+    """用入库分块与原件重新定位引文，修正建图全文映射的坐标误差。"""
+    if not evidence:
+        return ()
+    sources = [
+        SourceRef(
+            document_id=str(item.document_id),
+            chunk_index=item.chunk_index,
+            quote=item.quote,
+            source_start=item.source_start,
+            source_end=item.source_end,
+            page_no=item.page_no,
+            paragraph_start=item.paragraph_start,
+            paragraph_end=item.paragraph_end,
+        )
+        for item in evidence
+    ]
+    try:
+        resolved = await graph_source.resolve_sources(
+            db,
+            build_id=build.id,
+            project_id=build.project_id,
+            chunks=chunks,
+            sources=sources,
+            storage_root=storage_root,
+            raw_cache=raw_cache,
+        )
+    except graph_source.SourceMappingError as exc:
+        raise GraphWorkError(exc.code, exc.message) from exc
+    result: list[graph_store.GraphEvidence] = []
+    for item in evidence:
+        key = (
+            item.document_id,
+            item.chunk_index,
+            item.source_start,
+            item.source_end,
+        )
+        source = resolved.get(key)
+        if source is None:
+            raise GraphWorkError("source_mismatch", "来源未通过校验")
+        result.append(
+            graph_store.GraphEvidence(
+                target_kind=item.target_kind,
+                target_key=item.target_key,
+                evidence_index=item.evidence_index,
+                document_id=source.document_id,
+                chunk_index=source.chunk_index,
+                page_no=source.page_no,
+                paragraph_start=source.paragraph_start,
+                paragraph_end=source.paragraph_end,
+                source_start=source.source_start,
+                source_end=source.source_end,
+                quote=source.quote,
+            )
+        )
+    return tuple(result)
 
 
 async def _next_snapshot_revision(
@@ -2433,9 +3690,6 @@ async def execute_graph_readback(
         return state
     async with session_factory() as db:
         build = await graph_store.get_build_for_run(db, run_id=claim.run_id)
-        binding = await graph_store.require_binding(
-            db, project_id=build.project_id
-        )
         extraction_payload = await _load_graph_step_payload(
             db, run_id=claim.run_id, step=3
         )
@@ -2449,11 +3703,47 @@ async def execute_graph_readback(
         await db.commit()
     if extraction_payload is None or write_payload is None:
         raise GraphWorkError("graph_incomplete", "缺少已提交的抽取或写入结果")
-    if binding.graph_id is None:
-        raise GraphWorkError("graph_incomplete", "项目图谱绑定尚未完成")
+    if build.graph_id is not None:
+        graph_id = str(build.graph_id)
+    else:
+        async with session_factory() as db:
+            binding = await graph_store.require_binding(
+                db, project_id=build.project_id
+            )
+        if binding.graph_id is None:
+            raise GraphWorkError("graph_incomplete", "项目图谱绑定尚未完成")
+        graph_id = str(binding.graph_id)
     if any(item.episode_uuid is None for item in episodes):
         raise GraphWorkError("graph_incomplete", "episode 缺少 UUID")
-    manifest_nodes, manifest_edges = _manifest_from_payload(extraction_payload)
+    episode_batch_keys = {
+        str(item.episode_uuid): item.episode_key
+        for item in episodes
+        if item.episode_uuid is not None
+    }
+    text_mode = extraction_payload.get("mode") == "text" or isinstance(
+        extraction_payload.get("chunks"), list
+    )
+    plan_payload: dict[str, object] | None = None
+    chunks_by_key: dict[str, dict[str, object]] = {}
+    relation_labels: dict[str, str] = {}
+    entity_labels: dict[str, str] = {}
+    documents_by_id: dict[str, dict[str, object]] = {}
+    manifest_nodes: list[ManifestNode] = []
+    manifest_edges: list[ManifestEdge] = []
+    if text_mode:
+        async with session_factory() as db:
+            plan_payload = await _load_graph_step_payload(
+                db, run_id=claim.run_id, step=2
+            )
+            await db.commit()
+        chunks_by_key = _chunk_payloads_by_key(extraction_payload)
+        relation_labels = _relation_label_map(plan_payload)
+        entity_labels = _entity_label_map(plan_payload)
+        documents_by_id = _documents_by_id(extraction_payload)
+        if not chunks_by_key:
+            raise GraphWorkError("graph_incomplete", "建图全文分块缺失")
+    else:
+        manifest_nodes, manifest_edges = _manifest_from_payload(extraction_payload)
     deadline = float(
         write_payload.get("processingDeadlineEpoch")
         or (time.time() + config.processing_timeout_seconds)
@@ -2462,7 +3752,6 @@ async def execute_graph_readback(
         raise GraphWorkError("processing_timeout", "处理预算耗尽")
     if stop_event is not None and stop_event.is_set():
         return "stopped"
-    graph_id = str(binding.graph_id)
     assert_business_graph_scope(graph_id, config=config)
     client = graph_client_factory()
 
@@ -2471,6 +3760,7 @@ async def execute_graph_readback(
     last_signature: tuple[object, ...] | None = None
     last_attempted: frozenset[str] = frozenset()
     last_attempt_at = 0.0
+    last_stats: dict[str, int] = {}
 
     async def read_episodes() -> list[graph_store.GraphEpisode]:
         async with session_factory() as session:
@@ -2485,7 +3775,7 @@ async def execute_graph_readback(
         *,
         final: bool,
     ) -> int | None:
-        nonlocal last_revision, last_signature
+        nonlocal last_revision, last_signature, last_stats
         if not processed_uuids:
             return last_revision
         remaining = deadline - time.time()
@@ -2495,32 +3785,80 @@ async def execute_graph_readback(
             remaining, max(1.0, min(8.0, remaining))
         )
         try:
-            readback = await asyncio.to_thread(
-                readback_graph,
-                client,
-                graph_id=graph_id,
-                episode_uuids=list(processed_uuids),
-                processing_timeout_seconds=budget,
-                manifest_nodes=manifest_nodes,
-                manifest_edges=manifest_edges,
-                page_size=100,
-            )
+            if text_mode:
+                readback = await asyncio.to_thread(
+                    readback_raw_graph,
+                    client,
+                    graph_id=graph_id,
+                    episode_uuids=list(processed_uuids),
+                    processing_timeout_seconds=budget,
+                    page_size=100,
+                )
+            else:
+                readback = await asyncio.to_thread(
+                    readback_graph,
+                    client,
+                    graph_id=graph_id,
+                    episode_uuids=list(processed_uuids),
+                    processing_timeout_seconds=budget,
+                    manifest_nodes=manifest_nodes,
+                    manifest_edges=manifest_edges,
+                    episode_batch_keys=episode_batch_keys,
+                    page_size=100,
+                )
         except BusinessGraphError as exc:
             if final:
                 raise GraphWorkError(exc.code, exc.message) from exc
             return last_revision
-        async with session_factory() as session:
-            nodes, edges, evidence = await _materialize_snapshot(
-                session,
-                build=build,
-                chunks=chunks,
-                manifest_nodes=manifest_nodes,
-                manifest_edges=manifest_edges,
+        if text_mode:
+            nodes, edges, evidence, stats = _materialize_readback_text(
                 readback_nodes=readback.nodes,
-                relations=readback.relations,
-                storage_root=storage_root,
-                source_cache=source_cache,
+                readback_edges=readback.edges,
+                episode_uuids=list(processed_uuids),
+                episodes=episodes,
+                chunks_by_key=chunks_by_key,
+                documents_by_id=documents_by_id,
+                relation_labels=relation_labels,
+                entity_labels=entity_labels,
+                max_sources_per_item=config.max_sources_per_item,
             )
+            async with session_factory() as session:
+                evidence = await _resolve_evidence_coordinates(
+                    session,
+                    build=build,
+                    chunks=chunks,
+                    evidence=evidence,
+                    storage_root=storage_root,
+                    raw_cache=source_cache,
+                )
+                await session.commit()
+        else:
+            async with session_factory() as session:
+                nodes, edges, evidence = await _materialize_snapshot(
+                    session,
+                    build=build,
+                    chunks=chunks,
+                    manifest_nodes=manifest_nodes,
+                    manifest_edges=manifest_edges,
+                    readback_nodes=readback.nodes,
+                    relations=readback.relations,
+                    storage_root=storage_root,
+                    source_cache=source_cache,
+                )
+            stats = {}
+        last_stats = stats
+        logger.info(
+            "建图读回统计 build=%s raw_nodes=%s raw_edges=%s merged_nodes=%s "
+            "merged_edges=%s published_nodes=%s published_edges=%s dropped_edges=%s",
+            build.id,
+            stats.get("readbackNodeCount", len(readback.nodes)),
+            stats.get("readbackEdgeCount", len(readback.edges)),
+            stats.get("mergedNodeCount", len(nodes)),
+            stats.get("mergedEdgeCount", len(edges)),
+            stats.get("publishedNodeCount", len(nodes)),
+            stats.get("publishedEdgeCount", len(edges)),
+            stats.get("droppedEdgeCount", 0),
+        )
         if not nodes or not edges:
             if final:
                 raise GraphWorkError(
@@ -2596,6 +3934,7 @@ async def execute_graph_readback(
                     "snapshotRevision": revision,
                     "nodeCount": len(nodes),
                     "edgeCount": len(edges),
+                    **stats,
                 },
             )
             await session.commit()
@@ -2620,9 +3959,11 @@ async def execute_graph_readback(
             last_attempt_at = time.time()
 
         pending = [item for item in episodes if item.state != "processed"]
-        tasks: dict[asyncio.Task, graph_store.GraphEpisode] = {
-            asyncio.create_task(
-                _confirm_one_episode(
+        confirm_semaphore = asyncio.Semaphore(5)
+
+        async def confirm_one(item: graph_store.GraphEpisode):
+            async with confirm_semaphore:
+                return await _confirm_one_episode(
                     claim,
                     session_factory=session_factory,
                     stop_event=stop_event,
@@ -2635,12 +3976,13 @@ async def execute_graph_readback(
                         or (time.time() + config.index_timeout_seconds)
                     ),
                     processing_deadline=deadline,
-                    poll_interval_seconds=0.05,
+                    poll_interval_seconds=4.0,
                     clock=time.time,
                     sleep=time.sleep,
                 )
-            ): item
-            for item in pending
+
+        tasks: dict[asyncio.Task, graph_store.GraphEpisode] = {
+            asyncio.create_task(confirm_one(item)): item for item in pending
         }
         try:
             while tasks:
@@ -2701,6 +4043,7 @@ async def execute_graph_readback(
                 "nodeCount": latest.node_count,
                 "edgeCount": latest.edge_count,
                 "episodeCount": len(final_episodes),
+                **last_stats,
             },
             lease_seconds=lease_seconds,
             build_id=build.id,
@@ -2717,6 +4060,7 @@ async def execute_graph_readback(
                 "snapshotRevision": latest.revision,
                 "nodeCount": latest.node_count,
                 "edgeCount": latest.edge_count,
+                **last_stats,
             },
             build_phase="drawing",
             event_seq_from_max=True,
@@ -2953,7 +4297,7 @@ async def execute_graph_build(
                     config=config,
                     graph_client_factory=graph_client_factory,
                 )
-            elif step in (2, 3):
+            elif step == 2:
                 if planner is None:
                     async with session_factory() as db:
                         build = await graph_store.get_build_for_run(
@@ -2966,10 +4310,7 @@ async def execute_graph_build(
                     planner = planner_factory(
                         build.question, _chunk_inputs(chunks)
                     )
-                function = (
-                    execute_graph_plan if step == 2 else execute_graph_extract
-                )
-                outcome = await function(
+                outcome = await execute_graph_plan_ontology(
                     claim,
                     session_factory=session_factory,
                     stop_event=stop_event,
@@ -2977,6 +4318,16 @@ async def execute_graph_build(
                     heartbeat_seconds=heartbeat_seconds,
                     config=config,
                     planner=planner,
+                )
+            elif step == 3:
+                outcome = await execute_graph_prepare_text(
+                    claim,
+                    session_factory=session_factory,
+                    stop_event=stop_event,
+                    lease_seconds=lease_seconds,
+                    heartbeat_seconds=heartbeat_seconds,
+                    config=config,
+                    graph_client_factory=graph_client_factory,
                 )
             elif step == 4:
                 outcome = await execute_graph_write(
@@ -3022,6 +4373,18 @@ async def execute_graph_build(
         logger.warning(
             "建图失败 job_id=%s code=%s", claim.job_id, exc.code
         )
+        try:
+            await flush_provider_calls()
+        except Exception:  # noqa: BLE001 - 计数失败不掩盖原始失败
+            logger.warning("provider 调用计数写入失败 job_id=%s", claim.job_id)
+        return await _fail_graph_build(
+            claim,
+            session_factory=session_factory,
+            code=exc.code,
+            message=exc.message,
+        )
+    except BusinessModelError as exc:
+        logger.warning("建图模型失败 job_id=%s code=%s", claim.job_id, exc.code)
         try:
             await flush_provider_calls()
         except Exception:  # noqa: BLE001 - 计数失败不掩盖原始失败
@@ -3081,7 +4444,7 @@ async def execute_graph_build(
             message="构建结果超过规模上限，未发布截断结果",
         )
     except Exception as exc:  # noqa: BLE001 - 单任务失败写稳定终态
-        logger.warning(
+        logger.exception(
             "建图异常 job_id=%s: %s", claim.job_id, type(exc).__name__
         )
         try:

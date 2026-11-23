@@ -180,6 +180,11 @@ export interface WorkbenchMessages {
     node: string
     edge: string
     origin: string
+    claimNatureLabel: string
+    claimNature: Record<string, string>
+    claimNatureUnknown: string
+    nodeRelations: string
+    noNodeRelations: string
     summary: string
     sources: string
     noSources: string
@@ -421,6 +426,16 @@ const messages: Record<Lang, WorkbenchMessages> = {
       node: '节点',
       edge: '关系',
       origin: '来源类型',
+      claimNatureLabel: '材料性质',
+      claimNature: {
+        media_report: '媒体报道',
+        party_claim: '当事方主张',
+        official_decision: '机构正式决定',
+        other_material: '其他材料陈述',
+      },
+      claimNatureUnknown: '未标注',
+      nodeRelations: '该主体参与的关系',
+      noNodeRelations: '这个节点还没有可见的材料关系。',
       summary: '摘要',
       sources: '原文来源',
       noSources: '该假设没有原文来源。',
@@ -689,6 +704,16 @@ const messages: Record<Lang, WorkbenchMessages> = {
       node: 'Node',
       edge: 'Relation',
       origin: 'Origin',
+      claimNatureLabel: 'Material nature',
+      claimNature: {
+        media_report: 'Media report',
+        party_claim: 'Party claim',
+        official_decision: 'Official decision',
+        other_material: 'Other material statement',
+      },
+      claimNatureUnknown: 'Not marked',
+      nodeRelations: 'Relations for this subject',
+      noNodeRelations: 'No visible material relation for this node yet.',
       summary: 'Summary',
       sources: 'Original sources',
       noSources: 'This hypothesis has no original source.',

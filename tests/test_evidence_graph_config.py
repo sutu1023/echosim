@@ -172,8 +172,14 @@ class ProviderResolutionTests(unittest.TestCase):
             evidence_graph_processing_timeout_seconds=float("nan"),
         )
 
-        self.assertEqual(settings.evidence_graph_max_nodes, 200)
-        self.assertEqual(settings.evidence_graph_max_edges, 400)
+        self.assertEqual(
+            settings.evidence_graph_max_nodes,
+            DEFAULT_EVIDENCE_GRAPH_MAX_NODES,
+        )
+        self.assertEqual(
+            settings.evidence_graph_max_edges,
+            DEFAULT_EVIDENCE_GRAPH_MAX_EDGES,
+        )
         self.assertEqual(settings.evidence_graph_max_documents, 5)
         self.assertEqual(settings.evidence_graph_max_sources_per_item, 5)
         self.assertEqual(

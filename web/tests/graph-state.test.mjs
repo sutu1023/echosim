@@ -64,6 +64,26 @@ test('同 build 快照与计数同源更新', () => {
   assert.equal(state.edgeCount, 1)
 })
 
+test('快照保留关系的来源性质', () => {
+  const value = graph.applyGraphSnapshot(graph.createGraphState(), {
+    ...snapshot('a', 1),
+    edges: [
+      {
+        key: 'e1',
+        edgeType: 'official_decision',
+        label: '处分',
+        origin: 'material',
+        summary: null,
+        sourceKey: 'n1',
+        targetKey: 'n2',
+        claimNature: 'official_decision',
+        sources: [],
+      },
+    ],
+  })
+  assert.equal(value.snapshot.edges[0].claimNature, 'official_decision')
+})
+
 test('旧 build 响应不覆盖当前 build', () => {
   let state = graph.applyGraphPayload(graph.createGraphState(), {
     build: build('b'),

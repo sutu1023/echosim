@@ -50,6 +50,7 @@ interface SimLink {
   label: string
   origin: string
   key: string
+  claimNature?: string | null
 }
 
 const state = ref(createGraphState())
@@ -99,6 +100,27 @@ const selectedCountHint = computed(() =>
     .replace('{count}', String(selectedIds.value.length))
     .replace('{max}', '5'),
 )
+const selectedClaimNature = computed(() =>
+  selection.value?.kind === 'edge'
+    ? (selection.value.item as GraphEdgeData).claimNature
+    : null,
+)
+const incidentEdges = computed(() => {
+  if (!selection.value || selection.value.kind !== 'node' || !state.value.snapshot) {
+    return []
+  }
+  const key = selection.value.item.key
+  return state.value.snapshot.edges.filter(
+    (edge) => edge.sourceKey === key || edge.targetKey === key,
+  )
+})
+
+function claimNatureLabel(value?: string | null): string {
+  if (!value) {
+    return t.value.claimNatureUnknown
+  }
+  return t.value.claimNature[value] ?? t.value.claimNatureUnknown
+}
 
 function graphPath(buildId?: string | null): string {
   const base = `/api/projects/${encodeURIComponent(props.projectId)}/evidence-graph`
@@ -390,6 +412,10 @@ function selectEdge(edge: GraphEdgeData): void {
   selection.value = { kind: 'edge', item: edge }
 }
 
+function selectIncidentEdge(edge: GraphEdgeData): void {
+  selection.value = { kind: 'edge', item: edge }
+}
+
 function clearSelection(): void {
   selection.value = null
 }
@@ -418,11 +444,25 @@ function renderGraph(): void {
     label: edge.label,
     origin: edge.origin,
     key: edge.key,
+    claimNature: edge.claimNature,
   }))
   for (const link of links) {
     link.source = nodes.find((node) => node.key === link.source) ?? link.source
     link.target = nodes.find((node) => node.key === link.target) ?? link.target
   }
+  const defs = svg.append('defs')
+  defs
+    .append('marker')
+    .attr('id', 'graph-arrow')
+    .attr('viewBox', '0 -5 10 10')
+    .attr('refX', 22)
+    .attr('refY', 0)
+    .attr('markerWidth', 7)
+    .attr('markerHeight', 7)
+    .attr('orient', 'auto')
+    .append('path')
+    .attr('d', 'M0,-5L10,0L0,5')
+    .attr('class', 'graph-arrow-head')
   const linkSelection = root
     .append('g')
     .attr('class', 'graph-links')
@@ -430,6 +470,7 @@ function renderGraph(): void {
     .data(links)
     .join('line')
     .attr('class', (link) => `graph-link graph-link--${link.origin}`)
+    .attr('marker-end', 'url(#graph-arrow)')
     .style('cursor', 'pointer')
     .on('click', (_, link) => {
       const edge = snapshot.edges.find((item) => item.key === link.key)
@@ -467,7 +508,7 @@ function renderGraph(): void {
     .attr('class', 'graph-node-label')
     .attr('text-anchor', 'middle')
     .attr('dy', '0.35em')
-    .text((node) => node.label.slice(0, 10))
+    .text((node) => node.label)
   nodeSelection.append('title').text((node) => node.label)
 
   const drag = d3
@@ -746,7 +787,32 @@ onBeforeUnmount(() => {
         <p class="muted">
           {{ t.origin }}：{{ selection.item.origin === 'material' ? t.material : t.hypothesis }}
         </p>
+        <p v-if="selection.kind === 'edge'" class="muted">
+          {{ t.claimNatureLabel }}：{{ claimNatureLabel(selectedClaimNature) }}
+        </p>
         <p v-if="selection.item.summary">{{ t.summary }}：{{ selection.item.summary }}</p>
+        <template v-if="selection.kind === 'node'">
+          <h5>{{ t.nodeRelations }}</h5>
+          <p v-if="incidentEdges.length === 0" class="muted">{{ t.noNodeRelations }}</p>
+          <ul class="graph-source-list">
+            <li v-for="edge in incidentEdges" :key="edge.key">
+              <button
+                type="button"
+                class="quiet-link"
+                data-action="open-node-relation"
+                @click="selectIncidentEdge(edge)"
+              >
+                {{ edge.label }}
+              </button>
+              <span class="fine-print"> · {{ claimNatureLabel(edge.claimNature) }}</span>
+              <p v-if="edge.sources.length > 0" class="fine-print">
+                {{ edge.sources[0].documentName }}
+                <template v-if="edge.sources[0].pageNo !== null"> · p.{{ edge.sources[0].pageNo }}</template>
+                <template v-else-if="edge.sources[0].paragraphStart !== null"> · P.{{ edge.sources[0].paragraphStart }}</template>
+              </p>
+            </li>
+          </ul>
+        </template>
         <h5>{{ t.sources }}</h5>
         <p v-if="selection.item.sources.length === 0" class="muted">{{ t.noSources }}</p>
         <ul class="graph-source-list">

@@ -4,6 +4,10 @@ from __future__ import annotations
 
 import unittest
 
+from app.engines.business_config import (
+    DEFAULT_EVIDENCE_GRAPH_MAX_EDGES,
+    DEFAULT_EVIDENCE_GRAPH_MAX_NODES,
+)
 from app.engines.business_contracts import (
     EntityType,
     ExtractionBatch,
@@ -221,9 +225,10 @@ class GraphContractTests(unittest.TestCase):
     def test_node_limit_boundary(self) -> None:
         nodes = [material_node()]
         nodes.extend(
-            hypothesis_node(f"node-{index}") for index in range(2, 201)
+            hypothesis_node(f"node-{index}")
+            for index in range(2, DEFAULT_EVIDENCE_GRAPH_MAX_NODES + 1)
         )
-        self.assertEqual(len(nodes), 200)
+        self.assertEqual(len(nodes), DEFAULT_EVIDENCE_GRAPH_MAX_NODES)
         result = GraphResult(
             nodes=tuple(nodes),
             edges=(material_edge(target_key="node-2"),),
@@ -231,7 +236,14 @@ class GraphContractTests(unittest.TestCase):
         validate_graph_result(result)
 
         over = GraphResult(
-            nodes=tuple(nodes + [hypothesis_node("node-201")]),
+            nodes=tuple(
+                nodes
+                + [
+                    hypothesis_node(
+                        f"node-{DEFAULT_EVIDENCE_GRAPH_MAX_NODES + 1}"
+                    )
+                ]
+            ),
             edges=(material_edge(target_key="node-2"),),
         )
         with self.assertRaises(GraphContractError) as caught:
@@ -249,12 +261,12 @@ class GraphContractTests(unittest.TestCase):
                 source_key="node-1",
                 target_key="node-2",
             )
-            for index in range(2, 400)
+            for index in range(2, DEFAULT_EVIDENCE_GRAPH_MAX_EDGES)
         )
-        self.assertEqual(len(edges), 399)
+        self.assertEqual(len(edges), DEFAULT_EVIDENCE_GRAPH_MAX_EDGES - 1)
         edges.append(
             GraphEdge(
-                key="edge-400",
+                key=f"edge-{DEFAULT_EVIDENCE_GRAPH_MAX_EDGES}",
                 edge_type="relation",
                 label="用户假设关系",
                 origin=ORIGIN_HYPOTHESIS,
@@ -274,7 +286,7 @@ class GraphContractTests(unittest.TestCase):
                 edges
                 + [
                     GraphEdge(
-                        key="edge-401",
+                        key=f"edge-{DEFAULT_EVIDENCE_GRAPH_MAX_EDGES + 1}",
                         edge_type="relation",
                         label="用户假设关系",
                         origin=ORIGIN_HYPOTHESIS,

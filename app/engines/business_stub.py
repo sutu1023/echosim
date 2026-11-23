@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from typing import Any, Sequence
 
 from .business_model import ChunkInput
+from .business_semantics import split_sentences
 from .model import HttpResponse
 
 
@@ -43,6 +44,8 @@ class StubModelTransport:
             content = str(payload["messages"][0]["content"])
         except (KeyError, IndexError, TypeError):
             content = ""
+        if "本体规划器" in content:
+            return HttpResponse(200, json.dumps({"choices": [{"message": {"content": json.dumps(self._ontology_plan(), ensure_ascii=False)}}]}, ensure_ascii=False))
         if "类型规划器" in content and not self._plan_emitted:
             self._plan_emitted = True
             return HttpResponse(200, json.dumps({"choices": [{"message": {"content": json.dumps(self._plan(), ensure_ascii=False)}}]}, ensure_ascii=False))
@@ -56,20 +59,75 @@ class StubModelTransport:
             batches.append((f"batch-{index}", [chunk]))
         return batches
 
-    def _plan(self) -> dict[str, Any]:
+    def _ontology_plan(self) -> dict[str, Any]:
         return {
             "entityTypes": [
-                {"key": "entity", "name": "实体"},
-                {"key": "detail", "name": "细节"},
+                {"key": "university", "name": "高校", "description": "高校主体"},
+                {"key": "organization", "name": "组织机构", "description": "机构或部门"},
+                {"key": "person", "name": "人物", "description": "个人当事方"},
+                {"key": "group", "name": "群体", "description": "学生、家长、校友等群体"},
+                {"key": "event", "name": "事件", "description": "报告中的事件"},
+                {"key": "media", "name": "媒体平台", "description": "媒体或传播平台"},
+                {"key": "decision", "name": "决定安排", "description": "决定、处分、判决或安排"},
+            ],
+            "relationTypes": [
+                {"key": "responds_to", "name": "回应", "sourceType": "organization", "targetType": "event"},
+                {"key": "reports_on", "name": "报道", "sourceType": "media", "targetType": "event"},
+                {"key": "participates_in", "name": "参与", "sourceType": "person", "targetType": "event"},
+                {"key": "involves", "name": "涉及", "sourceType": "event", "targetType": "university"},
+                {"key": "decides", "name": "决定", "sourceType": "university", "targetType": "decision"},
+                {"key": "supports", "name": "支持", "sourceType": "group", "targetType": "event"},
+                {"key": "opposes", "name": "反对", "sourceType": "group", "targetType": "event"},
+                {"key": "adjusts", "name": "调整", "sourceType": "organization", "targetType": "decision"},
+            ],
+        }
+
+    def _plan(self) -> dict[str, Any]:
+        subjects: list[dict[str, Any]] = []
+        for chunk in self.chunks:
+            token = uuid.uuid5(
+                uuid.NAMESPACE_URL,
+                f"{chunk.document_id}:{chunk.chunk_index}",
+            ).hex[:8]
+            source_text = _short(chunk.text, 12)
+            source_start = chunk.source_start
+            source_end = min(
+                chunk.source_end, source_start + max(1, len(source_text))
+            )
+            subjects.append(
+                {
+                    "key": f"subject-{token}",
+                    "label": source_text,
+                    "typeKey": "entity",
+                    "aliases": [],
+                    "evidence": [
+                        {
+                            "documentId": chunk.document_id,
+                            "chunkIndex": chunk.chunk_index,
+                            "quote": source_text,
+                            "sourceStart": source_start,
+                            "sourceEnd": source_end,
+                            "pageNo": chunk.page_no,
+                            "paragraphStart": chunk.paragraph_start,
+                            "paragraphEnd": chunk.paragraph_end,
+                        }
+                    ],
+                }
+            )
+        return {
+            "entityTypes": [
+                {"key": "entity", "name": "材料事项"},
+                {"key": "detail", "name": "材料摘录"},
             ],
             "relationTypes": [
                 {
                     "key": "relation",
-                    "name": "关系",
+                    "name": "摘录提及",
                     "sourceType": "entity",
                     "targetType": "detail",
                 }
             ],
+            "subjects": subjects,
             "batches": [
                 {
                     "key": key,
@@ -117,6 +175,7 @@ class StubModelTransport:
                 {
                     "key": primary,
                     "nodeType": "entity",
+                    "subjectKey": f"subject-{token}",
                     "label": source_text,
                     "origin": "material",
                     "summary": f"原创材料主题：{source_text}",
@@ -137,7 +196,8 @@ class StubModelTransport:
                 {
                     "key": f"edge-{token}",
                     "edgeType": "relation",
-                    "label": f"关联：{source_text}",
+                    "claimNature": "other_material",
+                    "label": _short(chunk.text, 8),
                     "origin": "material",
                     "sourceKey": primary,
                     "targetKey": detail,
@@ -187,6 +247,7 @@ class StubGraphClient:
         self.search_calls = 0
         self.last_create_kwargs: dict[str, Any] | None = None
         self.last_episode_kwargs: dict[str, Any] | None = None
+        self.ontology: dict[str, Any] | None = None
         self.last_node_filters: object | None = None
         self.last_edge_filters: object | None = None
         self.graph = _StubGraphNamespace(self)
@@ -212,6 +273,12 @@ class StubGraphClient:
             self.lose_create_response = False
             raise TimeoutError("模拟图谱创建响应丢失")
         return {"uuid": graph_id, "name": kwargs.get("name")}
+
+    def set_ontology(self, graph_uuid: str, **kwargs: Any) -> dict[str, Any]:
+        self._count()
+        self.events.append(("set_ontology", graph_uuid))
+        self.ontology = {"graph_uuid": graph_uuid, **kwargs}
+        return {"graph_uuid": graph_uuid}
 
     def add(
         self,
@@ -261,12 +328,15 @@ class StubGraphClient:
         try:
             parsed = json.loads(data)
         except (TypeError, json.JSONDecodeError):
+            self._ingest_text(graph_uuid, episode_uuid, data)
             return
         if not isinstance(parsed, dict):
+            self._ingest_text(graph_uuid, episode_uuid, data)
             return
         raw_nodes = parsed.get("nodes")
         raw_edges = parsed.get("edges")
         if not isinstance(raw_nodes, list) or not isinstance(raw_edges, list):
+            # 显式 JSON 但没有节点/边：保持旧行为，不从 JSON 文本猜测。
             return
         node_uuid_by_key: dict[str, str] = {}
         for raw in raw_nodes:
@@ -321,6 +391,102 @@ class StubGraphClient:
                     "episode_uuids": [episode_uuid],
                 }
             )
+
+    _STUB_ACTIONS = (
+        "调整", "恢复", "延长", "发布", "决定", "处分", "判决", "回应", "报道",
+        "检测", "传播", "执行", "通报", "处理", "指控", "维权", "质疑", "支持",
+        "反对", "参与", "涉及", "影响", "开放", "增加", "减少",
+    )
+
+    def _node_uuid(self, graph_uuid: str, name: str) -> str:
+        return str(
+            uuid.uuid5(uuid.NAMESPACE_URL, f"{graph_uuid}:node:{name}")
+        )
+
+    def _add_node(self, graph_uuid: str, episode_uuid: str, name: str) -> str:
+        node_uuid = self._node_uuid(graph_uuid, name)
+        existing = next(
+            (item for item in self.nodes if item["uuid"] == node_uuid), None
+        )
+        if existing is None:
+            self.nodes.append(
+                {
+                    "uuid": node_uuid,
+                    "graph_uuid": graph_uuid,
+                    "name": name,
+                    "episode_uuids": [episode_uuid],
+                }
+            )
+        elif episode_uuid not in existing["episode_uuids"]:
+            existing["episode_uuids"].append(episode_uuid)
+        return node_uuid
+
+    def _ingest_text(self, graph_uuid: str, episode_uuid: str, data: str) -> None:
+        """替身从纯文本产生最小可回归事实；绝不用于真实建图。"""
+        text = " ".join(data.split())
+        if not text:
+            return
+        created = False
+        for _, _, sentence in split_sentences(data):
+            value = sentence.strip(" \n\t，,。；;：:")
+            if len(value) < 4:
+                continue
+            action = next((term for term in self._STUB_ACTIONS if term in value), "")
+            source_text = ""
+            target_text = ""
+            if action:
+                position = value.find(action)
+                prefix = value[:position].strip(" ，,。；;：:")
+                suffix = value[position + len(action) :].strip(" ，,。；;：:")
+                if "把" in prefix:
+                    source_text, target_text = prefix.split("把", 1)
+                elif "对" in prefix:
+                    source_text = prefix.split("对", 1)[0]
+                    target_text = prefix.split("对", 1)[1]
+                elif "在" in prefix:
+                    source_text = prefix.split("在", 1)[0]
+                    target_text = suffix
+                else:
+                    source_text, target_text = prefix, suffix
+            if not source_text or not target_text:
+                midpoint = max(2, len(value) // 2)
+                source_text = value[:midpoint]
+                target_text = value[midpoint:]
+                action = action or "涉及"
+            source_text = source_text.strip(" ，,。；;：:")[:24]
+            target_text = target_text.strip(" ，,。；;：:")[:24]
+            if not source_text or not target_text or source_text == target_text:
+                continue
+            source_uuid = self._add_node(graph_uuid, episode_uuid, source_text)
+            target_uuid = self._add_node(graph_uuid, episode_uuid, target_text)
+            fact = value
+            edge_uuid = str(
+                uuid.uuid5(
+                    uuid.NAMESPACE_URL,
+                    f"{graph_uuid}:edge:{source_text}:{target_text}:{action}:{fact}",
+                )
+            )
+            existing = next(
+                (item for item in self.edges if item["uuid"] == edge_uuid), None
+            )
+            if existing is None:
+                self.edges.append(
+                    {
+                        "uuid": edge_uuid,
+                        "graph_uuid": graph_uuid,
+                        "source_node_uuid": source_uuid,
+                        "target_node_uuid": target_uuid,
+                        "name": action,
+                        "fact": fact,
+                        "episode_uuids": [episode_uuid],
+                    }
+                )
+            elif episode_uuid not in existing["episode_uuids"]:
+                existing["episode_uuids"].append(episode_uuid)
+            created = True
+        if not created:
+            name = text[:16]
+            self._add_node(graph_uuid, episode_uuid, name)
 
     def search_episodes(
         self, graph_uuid: str, *, query: str, page_size: int = 50
@@ -390,6 +556,22 @@ class _StubEpisodeNamespace:
     def add(self, *args: Any, **kwargs: Any):
         return self._client.add(*args, **kwargs)
 
+    def list(self, graph_uuid: str, *, page_size: int = 100, **kwargs: Any):
+        del page_size, kwargs
+        self._client._count()
+        return StubPager(
+            [
+                {
+                    "uuid": item["uuid"],
+                    "content": item["content"],
+                    "metadata": item["metadata"],
+                    "processed": item["processed"],
+                }
+                for item in self._client.episodes
+                if item.get("graph_uuid") == graph_uuid
+            ]
+        )
+
 
 class _StubNodeNamespace:
     def __init__(self, client: StubGraphClient) -> None:
@@ -422,6 +604,9 @@ class _StubGraphNamespace:
 
     def create(self, **kwargs: Any):
         return self._client.create(**kwargs)
+
+    def set_ontology(self, *args: Any, **kwargs: Any):
+        return self._client.set_ontology(*args, **kwargs)
 
     def search_episodes(self, *args: Any, **kwargs: Any):
         return self._client.search_episodes(*args, **kwargs)

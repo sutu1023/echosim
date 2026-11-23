@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import time
 import uuid
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass
-from typing import Any, Awaitable, Callable, Iterable, Sequence
+from typing import Any, Awaitable, Callable, Iterable, Mapping, Sequence
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -118,6 +119,81 @@ def assert_business_graph_scope(
         )
 
 
+def set_graph_ontology(
+    client: object,
+    *,
+    graph_id: str,
+    entity_types: Sequence[object],
+    relation_types: Sequence[object],
+    idempotency_key: str | None = None,
+) -> None:
+    """按 zep-cloud 4.1.0 的 set_ontology 接口安装本次规划的本体。"""
+    try:
+        from zep_cloud.types.edge_source_target import EdgeSourceTarget
+        from zep_cloud.types.edge_type import EdgeType as ZepEdgeType
+        from zep_cloud.types.entity_type import EntityType as ZepEntityType
+    except ImportError:  # 离线替身环境不安装 zep-cloud
+        EdgeSourceTarget = None  # type: ignore[assignment]
+        ZepEdgeType = None  # type: ignore[assignment]
+        ZepEntityType = None  # type: ignore[assignment]
+
+    type_name_by_key = {
+        str(getattr(item, "key")): str(getattr(item, "name"))
+        for item in entity_types
+    }
+    entities = (
+        [
+            ZepEntityType(
+                name=str(getattr(item, "name")),
+                description=str(getattr(item, "description") or ""),
+            )
+            for item in entity_types
+        ]
+        if ZepEntityType is not None
+        else [
+            {
+                "name": str(getattr(item, "name")),
+                "description": str(getattr(item, "description") or ""),
+            }
+            for item in entity_types
+        ]
+    )
+    edges = []
+    for item in relation_types:
+        source_type = type_name_by_key.get(
+            str(getattr(item, "source_type")), ""
+        )
+        target_type = type_name_by_key.get(
+            str(getattr(item, "target_type")), ""
+        )
+        source_targets = []
+        if source_type and target_type:
+            source_targets.append(
+                EdgeSourceTarget(source=source_type, target=target_type)
+                if EdgeSourceTarget is not None
+                else {"source": source_type, "target": target_type}
+            )
+        edges.append(
+            ZepEdgeType(
+                name=str(getattr(item, "name")),
+                description=str(getattr(item, "description") or ""),
+                source_targets=source_targets,
+            )
+            if ZepEdgeType is not None
+            else {
+                "name": str(getattr(item, "name")),
+                "description": str(getattr(item, "description") or ""),
+                "source_targets": source_targets,
+            }
+        )
+    client.graph.set_ontology(  # type: ignore[attr-defined]
+        graph_id,
+        entity_types=entities,
+        edge_types=edges,
+        idempotency_key=idempotency_key,
+    )
+
+
 def _graph_uuid(graph: object) -> str | None:
     if isinstance(graph, dict):
         value = graph.get("uuid") or graph.get("uuid_")
@@ -165,6 +241,20 @@ def _edge_label(item: object) -> str:
 
 def _normalized_label(value: str) -> str:
     return " ".join(value.split()).casefold()
+
+
+def _episode_query(content: str) -> str:
+    try:
+        parsed = json.loads(content)
+    except (TypeError, json.JSONDecodeError):
+        return content[:120]
+    if isinstance(parsed, dict) and not content.lstrip().startswith(
+        '{"searchText"'
+    ):
+        text = parsed.get("searchText")
+        if isinstance(text, str) and text.strip():
+            return text.strip()[:120]
+    return content[:120]
 
 
 def _episode_uuids(item: object) -> set[str]:
@@ -376,7 +466,13 @@ def write_episode(
 def _search_episodes(
     client: object, graph_id: str, query: str, page_size: int = 50
 ) -> list[object]:
-    pager = client.graph.search_episodes(
+    """优先列本次图谱 episode，避免语义搜索漏掉刚写入的记录。"""
+    episode_namespace = getattr(getattr(client, "graph", None), "episode", None)
+    lister = getattr(episode_namespace, "list", None)
+    if callable(lister):
+        pager = lister(graph_id, page_size=max(page_size, 100))
+        return list(_iter_pager_items(pager))
+    pager = client.graph.search_episodes(  # type: ignore[attr-defined]
         graph_id, query=query, page_size=page_size
     )
     return list(_iter_pager_items(pager))
@@ -425,7 +521,7 @@ def search_episode_once(
     expected_uuid: str | None,
 ) -> EpisodeSearch:
     """扫描一次全部候选页，返回精确匹配 UUID 与是否出现错误 UUID。"""
-    items = _search_episodes(client, graph_id, episode.content[:120])
+    items = _search_episodes(client, graph_id, _episode_query(episode.content))
     matches: dict[str, bool] = {}
     wrong_uuid_seen = False
     for item in items:
@@ -475,7 +571,7 @@ def confirm_episode(
     search_attempts = 0
     seen_matches: dict[str, bool] = {}
     wrong_uuid_seen = False
-    query = episode.content[:120]
+    query = _episode_query(episode.content)
     while True:
         search_attempts += 1
         items = _search_episodes(client, graph_id, query)
@@ -563,6 +659,7 @@ def confirm_and_readback(
     episode_uuids: Sequence[str],
     manifest_nodes: Sequence[object] = (),
     manifest_edges: Sequence[ContractEdge] = (),
+    episode_batch_keys: Mapping[str, str] | None = None,
     poll_interval_seconds: float = 0.1,
     page_size: int = 100,
     clock: Callable[[], float] = time.monotonic,
@@ -654,15 +751,20 @@ def map_material_relations(
     edges: Sequence[object],
     *,
     episode_uuids: Sequence[str] = (),
+    episode_batch_keys: Mapping[str, str] | None = None,
 ) -> dict[str, MatchedRelation]:
-    """把读回边唯一映射到本次抽取清单关系；方向、含义、episode 与来源缺一不可。"""
+    """把读回边唯一映射到本次清单关系；按 episode + 规范名/别名，不做模糊匹配。"""
     current_episodes = set(episode_uuids)
-    label_to_keys: dict[str, list[str]] = {}
-    for node in manifest_nodes:
-        label = getattr(node, "label", "")
-        key = getattr(node, "key", "")
-        if label and key:
-            label_to_keys.setdefault(label, []).append(key)
+    batch_keys_by_episode = dict(episode_batch_keys or {})
+    has_manifest_batches = any(
+        getattr(node, "batch_keys", ()) for node in manifest_nodes
+    )
+
+    def normalized_forms(node: object) -> set[str]:
+        forms = {getattr(node, "label", "")}
+        forms.update(getattr(node, "aliases", ()) or ())
+        return {_normalized_label(form) for form in forms if form}
+
     node_name_by_uuid: dict[str, str] = {}
     for item in nodes:
         node_uuid = _node_uuid(item)
@@ -672,6 +774,46 @@ def map_material_relations(
         if current_episodes and episodes and not episodes.intersection(current_episodes):
             continue
         node_name_by_uuid[node_uuid] = _node_name(item)
+    readback_node_to_manifest: dict[str, str] = {}
+    if has_manifest_batches:
+        for item in nodes:
+            node_uuid = _node_uuid(item)
+            if not node_uuid:
+                continue
+            readback_batches = {
+                batch_keys_by_episode[episode]
+                for episode in _episode_uuids(item)
+                if episode in batch_keys_by_episode
+            }
+            name = _normalized_label(_node_name(item))
+            candidates = [
+                node
+                for node in manifest_nodes
+                if (
+                    not readback_batches
+                    or readback_batches.intersection(
+                        getattr(node, "batch_keys", ()) or ()
+                    )
+                )
+                and name in normalized_forms(node)
+            ]
+            if len(candidates) == 1:
+                readback_node_to_manifest[node_uuid] = str(
+                    getattr(candidates[0], "key", "")
+                )
+    else:
+        # 旧清单兼容：沿用全局精确标签映射。
+        label_to_keys: dict[str, list[str]] = {}
+        for node in manifest_nodes:
+            label = getattr(node, "label", "")
+            key = getattr(node, "key", "")
+            if label and key:
+                label_to_keys.setdefault(label, []).append(key)
+        for node_uuid, name in node_name_by_uuid.items():
+            keys = label_to_keys.get(name, [])
+            if len(keys) == 1:
+                readback_node_to_manifest[node_uuid] = keys[0]
+
     matched: dict[str, MatchedRelation] = {}
     for edge in edges:
         edge_uuid = _node_uuid(edge)
@@ -680,33 +822,153 @@ def map_material_relations(
             continue
         if current_episodes and not episodes.intersection(current_episodes):
             continue
-        source_name = node_name_by_uuid.get(_edge_source(edge), "")
-        target_name = node_name_by_uuid.get(_edge_target(edge), "")
-        source_keys = label_to_keys.get(source_name, [])
-        target_keys = label_to_keys.get(target_name, [])
-        if len(source_keys) != 1 or len(target_keys) != 1:
+        source_key = readback_node_to_manifest.get(_edge_source(edge))
+        target_key = readback_node_to_manifest.get(_edge_target(edge))
+        if not source_key or not target_key:
             continue
+        edge_text = _normalized_label(_edge_label(edge))
         candidates = [
             item
             for item in manifest_edges
-            if item.source_key == source_keys[0]
-            and item.target_key == target_keys[0]
+            if item.source_key == source_key
+            and item.target_key == target_key
             and item.sources
         ]
-        edge_label = _edge_label(edge)
-        candidates = [
-            item
-            for item in candidates
-            if _normalized_label(item.label) == _normalized_label(edge_label)
-        ]
-        if len(candidates) == 1:
-            candidate = candidates[0]
+        if has_manifest_batches:
+            claim_nature = str(getattr(edge, "claim_nature", "") or "")
+            if claim_nature:
+                candidates = [
+                    item
+                    for item in candidates
+                    if getattr(item, "claim_nature", "") == claim_nature
+                ]
+        if has_manifest_batches:
+            def label_matches_text(item: object) -> bool:
+                label = _normalized_label(getattr(item, "label", ""))
+                if not label:
+                    return False
+                if label in edge_text:
+                    return True
+                # 服务端常把动作改写成完整句子；动作前缀仍可唯一消歧。
+                return len(label) >= 2 and label[:2] in edge_text
+
+            label_matches = [
+                item for item in candidates if label_matches_text(item)
+            ]
+        else:
+            label_matches = [
+                item
+                for item in candidates
+                if _normalized_label(item.label) == edge_text
+            ]
+        chosen = label_matches[0] if len(label_matches) == 1 else None
+        if chosen is None and has_manifest_batches and len(candidates) == 1:
+            # 服务端可能把动作改写成完整句子；端点间只有一条清单关系时仍可唯一映射。
+            chosen = candidates[0]
+        if chosen is not None:
             matched[edge_uuid] = MatchedRelation(
                 edge_uuid=edge_uuid,
-                manifest_key=candidate.key,
-                sources=tuple(candidate.sources),
+                manifest_key=chosen.key,
+                sources=tuple(chosen.sources),
             )
     return matched
+
+
+@dataclass(frozen=True)
+class RawReadbackResult:
+    nodes: tuple[object, ...]
+    edges: tuple[object, ...]
+    node_count: int
+    edge_count: int
+    stable_reads: int
+
+
+def readback_raw_graph(
+    client: object,
+    *,
+    graph_id: str,
+    episode_uuids: Sequence[str],
+    processing_timeout_seconds: float,
+    poll_interval_seconds: float = 0.1,
+    page_size: int = 100,
+    clock: Callable[[], float] = time.monotonic,
+    sleep: Callable[[float], None] = time.sleep,
+) -> RawReadbackResult:
+    """按本次 build 的 episode UUID 分页读回全部节点与边，不要求命中清单。"""
+    if not episode_uuids:
+        raise BusinessGraphError("graph_incomplete", "没有可读回的 episode")
+    deadline = clock() + max(0.001, processing_timeout_seconds)
+    previous: tuple[object, ...] | None = None
+    stable_reads = 0
+    backoff = 1.0
+    while True:
+        try:
+            nodes = _list_all(
+                client,
+                graph_id=graph_id,
+                kind="node",
+                episode_uuids=episode_uuids,
+                page_size=page_size,
+            )
+            edges = _list_all(
+                client,
+                graph_id=graph_id,
+                kind="edge",
+                episode_uuids=episode_uuids,
+                page_size=page_size,
+            )
+        except BusinessGraphError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - provider 异常按稳定分类处理
+            error = _classify_exception(exc)
+            remaining = deadline - clock()
+            # 图谱仍在写入时分页游标会被服务端判为过期（409）；从头重读。
+            if (error.retryable or error.status_code == 409) and remaining > 0:
+                sleep(min(backoff, remaining))
+                backoff = min(backoff * 2, 8.0)
+                previous = None
+                stable_reads = 0
+                continue
+            if remaining <= 0:
+                raise BusinessGraphError(
+                    "processing_timeout", "分页读回越过处理截止时间"
+                ) from exc
+            raise BusinessGraphError(
+                "graph_unavailable", "节点或边读回失败"
+            ) from exc
+        signature = _signature(nodes, edges)
+        now = clock()
+        if previous == signature:
+            stable_reads += 1
+            if stable_reads >= 1 and nodes:
+                if now > deadline:
+                    raise BusinessGraphError(
+                        "processing_timeout", "分页读回越过处理截止时间"
+                    )
+                return RawReadbackResult(
+                    nodes=tuple(nodes),
+                    edges=tuple(edges),
+                    node_count=len(nodes),
+                    edge_count=len(edges),
+                    stable_reads=stable_reads,
+                )
+        else:
+            stable_reads = 0
+            previous = signature
+        remaining = deadline - clock()
+        if remaining <= 0:
+            if not nodes:
+                raise BusinessGraphError(
+                    "processing_timeout", "读回预算耗尽且没有可用节点"
+                )
+            return RawReadbackResult(
+                nodes=tuple(nodes),
+                edges=tuple(edges),
+                node_count=len(nodes),
+                edge_count=len(edges),
+                stable_reads=stable_reads,
+            )
+        sleep(min(max(0.0, poll_interval_seconds), remaining))
 
 
 def readback_graph(
@@ -717,6 +979,7 @@ def readback_graph(
     processing_timeout_seconds: float,
     manifest_nodes: Sequence[object] = (),
     manifest_edges: Sequence[ContractEdge] = (),
+    episode_batch_keys: Mapping[str, str] | None = None,
     poll_interval_seconds: float = 0.1,
     page_size: int = 100,
     clock: Callable[[], float] = time.monotonic,
@@ -728,21 +991,41 @@ def readback_graph(
     deadline = clock() + max(0.001, processing_timeout_seconds)
     previous: tuple[object, ...] | None = None
     stable_reads = 0
+    backoff = 1.0
     while True:
-        nodes = _list_all(
-            client,
-            graph_id=graph_id,
-            kind="node",
-            episode_uuids=episode_uuids,
-            page_size=page_size,
-        )
-        edges = _list_all(
-            client,
-            graph_id=graph_id,
-            kind="edge",
-            episode_uuids=episode_uuids,
-            page_size=page_size,
-        )
+        try:
+            nodes = _list_all(
+                client,
+                graph_id=graph_id,
+                kind="node",
+                episode_uuids=episode_uuids,
+                page_size=page_size,
+            )
+            edges = _list_all(
+                client,
+                graph_id=graph_id,
+                kind="edge",
+                episode_uuids=episode_uuids,
+                page_size=page_size,
+            )
+        except BusinessGraphError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - provider 异常按稳定分类处理
+            error = _classify_exception(exc)
+            remaining = deadline - clock()
+            if (error.retryable or error.status_code == 409) and remaining > 0:
+                sleep(min(backoff, remaining))
+                backoff = min(backoff * 2, 8.0)
+                previous = None
+                stable_reads = 0
+                continue
+            if remaining <= 0:
+                raise BusinessGraphError(
+                    "processing_timeout", "分页读回越过处理截止时间"
+                ) from exc
+            raise BusinessGraphError(
+                "graph_unavailable", "节点或边读回失败"
+            ) from exc
         signature = _signature(nodes, edges)
         now = clock()
         if previous == signature:
@@ -758,6 +1041,7 @@ def readback_graph(
                     nodes,
                     edges,
                     episode_uuids=episode_uuids,
+                    episode_batch_keys=episode_batch_keys,
                 )
                 if manifest_edges and not relations:
                     raise BusinessGraphError(

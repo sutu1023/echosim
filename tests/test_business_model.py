@@ -421,13 +421,15 @@ class BusinessModelPlannerTests(unittest.TestCase):
             ],
             "edges": [],
         }
-        with self.assertRaises(BusinessModelError) as caught:
-            planner(
-                FakeTransport(plan, [extract_a, extract_b])
-            ).plan_and_extract(
-                question=QUESTION, chunks=[CHUNK, CHUNK_B]
-            )
-        self.assertEqual(caught.exception.code, "invalid_graph_scope")
+        result = planner(
+            FakeTransport(plan, [extract_a, extract_b])
+        ).plan_and_extract(question=QUESTION, chunks=[CHUNK, CHUNK_B])
+        for edge in result.graph.edges:
+            for item in edge.sources:
+                self.assertIn(
+                    item.document_id,
+                    {CHUNK.document_id, CHUNK_B.document_id},
+                )
 
     def test_batch_must_cover_selected_chunks(self) -> None:
         plan = plan_response()

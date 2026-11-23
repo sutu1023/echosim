@@ -154,8 +154,8 @@ echosim_session=<随机令牌>; HttpOnly; Path=/; SameSite=lax
 | `EVIDENCE_GRAPH_GRAPH_PROVIDER` | `auto` | 业务建图图谱 provider：`auto`、`unconfigured`、`zep`、`stub` |
 | `EVIDENCE_GRAPH_ALLOW_STUB` | `false` | 是否允许显式启用测试替身；默认拒绝 stub |
 | `EVIDENCE_GRAPH_MAX_DOCUMENTS` | `5` | 单次业务建图材料上限 |
-| `EVIDENCE_GRAPH_MAX_NODES` | `200` | 单次业务建图节点上限 |
-| `EVIDENCE_GRAPH_MAX_EDGES` | `400` | 单次业务建图边上限 |
+| `EVIDENCE_GRAPH_MAX_NODES` | `500` | 单次业务建图节点上限 |
+| `EVIDENCE_GRAPH_MAX_EDGES` | `800` | 单次业务建图边上限 |
 | `EVIDENCE_GRAPH_MAX_SOURCES_PER_ITEM` | `5` | 单个节点或边来源上限 |
 | `EVIDENCE_GRAPH_QUESTION_MAX_CHARS` | `500` | 情景问题去除首尾空白后的最大字符数 |
 | `EVIDENCE_GRAPH_BATCH_SIZE` | `4` | 模型抽取批次大小 |
@@ -285,16 +285,18 @@ docker compose start worker          # 租约到期后自动接手未完成任�
 
 ## 证据图谱构建
 
-证据图谱由独立 `worker` 执行，`app` 只在请求内创建任务并读取已发布快照，不持有模型或 Zep 凭据。默认启动、默认 `make verify` 与 CI 不发起真实模型或图谱调用；只有显式配置并执行 `make smoke-live` 才使用真实 provider。
+证据图谱由独立 `worker` 执行，`app` 只在请求内创建任务并读取已发布快照，不持有模型或 Zep 凭据。默认启动、默认 `make verify` 与 CI 不发起真实模型或图谱调用；只有显式配置并在工作台显式开始建图或执行 `make smoke-live` 才使用真实 provider。
+
+建图采用与参考项目一致的主链路：模型根据整份报告与问题规划本体，worker 从已入库分块重建 500 字/50 字重叠的建图全文并把**原文分块**作为 episode 写入本次 build 的独立图谱，等待索引后按本次 episode UUID 分页读回全部节点、边与事实，再把关系关联到 episode 与支持原句。模型不再预抽取 JSON 清单，也不登记“首轮最多 24 个主体”的白名单。
 
 ### 使用流程
 
 1. 在项目第一阶段上传并等待至少一份材料变为 `ready`。
 2. 在证据图谱面板选择材料（单次最多 5 份），输入 1–500 字符情景问题，点击“开始建图”。
-3. 请求立即返回 `buildId`、`jobId`、`runId`；worker 按 `bind → plan → extract → write → readback → publish` 六步执行。
+3. 请求立即返回 `buildId`、`jobId`、`runId`；worker 按 `bind → plan → extract → write → readback → publish` 六步执行：`plan` 输出实体/关系类型，`extract` 重建建图全文并设置本体，`write` 写入原文 episode，`readback` 分页读回节点/边/事实并定位支持原句。
 4. 页面在 `waiting_index` 显示已受理/已确认数量；第 5 步按已处理 episode 批次读回，某一批稳定且来源可核对后立即发布 `complete=false` 部分快照并进入 `drawing`，其余批次继续处理，后续版本继续更新画面；第 6 步全部完成后在同一事务发布最终快照、`phase=ready`、`canContinue=true`、完成事件与任务成功。
-5. 点击节点或关系查看全部来源。PDF 来源打开 `/file#page=<物理页>`；文本来源打开 `/source` 并按 UTF-16 偏移高亮未清洗原文。
-6. 完成后“进入角色与环境”使用服务端 `canContinue`；未完成、失败或来源不完整时禁用。
+5. 点击节点查看该主体参与的全部材料关系；跨页/跨 episode 的同一规范化名称合并为一个节点，节点身份依据只保留代表性来源。点击关系查看“起点—动作—终点”、来源性质与支持该说法的原句；只有媒体/机构名单、没有动作的引文不会作为关系来源，建议或撤销表述不会挂到已发生的正式决定下。PDF 来源打开 `/file#page=<物理页>`；文本来源打开 `/source` 并按 UTF-16 偏移高亮未清洗原文。
+6. 关系来源性质分为媒体报道、当事方主张、机构正式决定与其他材料陈述；“某方称”不会显示为已证实事实。完成后“进入角色与环境”使用服务端 `canContinue`；未完成、失败或来源不完整时禁用。
 
 默认读取项目当前活动 build；没有活动 build 时读取最近 build。带 `?build=<buildId>` 可打开旧 build，`layout`、`lang` 与 `document` 保留。第二次建图仍在等待时，页面不会显示第一次完成图；`buildId` 不匹配的迟到响应会被丢弃。
 
@@ -312,9 +314,9 @@ docker compose start worker          # 租约到期后自动接手未完成任�
 
 - `phase` 固定为 `preparing`、`waiting_index`、`drawing`、`ready`、`failed`、`canceled`；任务状态仍只有 `queued`、`running`、`succeeded`、`failed`、`canceled`。
 - 写入受理、episode 匹配、`processed` 与节点/边读回分开记录；可搜索不等于处理完成，读回不稳定或没有可用边时继续等待并按预算失败，不假完成。
-- 规模上限：单次 5 份材料、200 个节点、400 条边、每项 5 条来源。超限在发布前以 `graph_too_large` 或 `too_many_sources` 失败，不发布截断结果。
+- 规模上限：单次 5 份材料、500 个节点、800 条边、每项 5 条来源。超限在发布前以 `graph_too_large` 或 `too_many_sources` 失败，不发布截断结果。
 - 常见失败码：`missing_config`、`document_not_ready`、`invalid_graph_scope`、`invalid_model_output`、`source_mismatch`、`ambiguous_source`、`source_unavailable`、`index_timeout`、`processing_timeout`、`graph_incomplete`、`insufficient_graph`、`write_unconfirmed`。失败只保留通用中文说明与原因码，不返回材料正文、密钥或完整外部响应。
-- 同一项目同一操作最多一个活动任务；`graph.create` 绑定使用持久化幂等键与稳定参数，响应丢失或 worker 接手都只保存一个 `graph_id`。
+- 同一项目同一操作最多一个活动任务；`graph.create` 绑定使用持久化幂等键与稳定参数，响应丢失或 worker 接手都只保存一个 `graph_id`。真实 provider 使用独立的真实图谱绑定；旧 stub 绑定与旧快照不被覆盖，真实 build 不会复用 stub 图谱。
 - 同一引文在材料中出现多次且模型偏移不能唯一消歧时返回 `ambiguous_source`，绝不取第一次匹配；既有入库材料无需重新上传即可定位。
 
 ### 离线走查
@@ -551,4 +553,4 @@ docker compose logs db
 
 ## 非目标
 
-本阶段不实现自助注册、找回密码、邮箱验证、多因素认证、登录限流与账户锁定；也不实现角色与环境配置、双平台正式推演编排、报告生成、深度互动、生产部署、nginx 反向代理或多环境编排。证据图谱当前为项目级单图谱复用，不提供图算法、实体消歧、图谱编辑、跨项目共享或配额计费。引擎联通验收只证明一次真实调用与证据可核对，不构成产品推演能力。
+本阶段不实现自助注册、找回密码、邮箱验证、多因素认证、登录限流与账户锁定；也不实现角色与环境配置、双平台正式推演编排、报告生成、深度互动、生产部署、nginx 反向代理或多环境编排。证据图谱的新 build 使用独立图谱以隔离旧 build 数据；不提供图算法、额外模型实体消歧、图谱编辑、跨项目共享或配额计费。引擎联通验收只证明一次真实调用与证据可核对，不构成产品推演能力。

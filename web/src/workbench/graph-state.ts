@@ -47,6 +47,7 @@ export interface GraphEdgeData {
   summary: string | null
   sourceKey: string
   targetKey: string
+  claimNature?: string | null
   sources: GraphSource[]
 }
 
