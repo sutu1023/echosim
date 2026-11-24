@@ -80,11 +80,18 @@ export async function createRouter(initialPath) {
   const router = createRouter({
     history: createMemoryHistory(),
     routes: [
+      { path: '/', name: 'console', component: { template: '<div />' } },
+      {
+        path: '/projects/:id',
+        name: 'project-detail',
+        component: { template: '<div />' },
+      },
       {
         path: '/projects/:id/workbench/:stage',
         name: 'workbench-stage',
         component: { template: '<div />' },
       },
+      { path: '/history', name: 'history', component: { template: '<div />' } },
       { path: '/login', name: 'login', component: { template: '<div />' } },
     ],
   })

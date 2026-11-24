@@ -298,6 +298,7 @@ async def _newer_build_id(
     result = await db.execute(
         text(
             "SELECT id FROM graph_builds WHERE project_id = :project_id "
+            "AND can_continue = true "
             "AND (created_at, id) > (SELECT created_at, id FROM graph_builds "
             "WHERE id = :build_id) ORDER BY created_at DESC, id DESC LIMIT 1"
         ),

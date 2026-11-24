@@ -20,6 +20,7 @@ from app.errors import (
     EnvironmentPreparationNotFound,
 )
 from app.services import environment as store
+from app.services import evidence_graph as graph_store
 from app.services import jobs as job_service
 from app.services import worker as worker_service
 from tests.db_support import (
@@ -121,6 +122,44 @@ class EnvironmentServiceTests(unittest.IsolatedAsyncioTestCase):
                 await store.read_context(
                     db, project_id=self.seed.project_id, build_id=uuid.uuid4()
                 )
+
+    async def test_newer_build_hint_only_after_new_graph_is_ready(self) -> None:
+        async with self.session_factory() as db:
+            newer = await graph_store.create_build(
+                db,
+                project_id=self.seed.project_id,
+                actor_id=self.seed.user_id,
+                question="更新的原创问题",
+                document_ids=[self.seed.document_id],
+            )
+            await db.execute(
+                text(
+                    "UPDATE graph_builds SET created_at = (SELECT created_at + "
+                    "interval '1 minute' FROM graph_builds WHERE id = :old) "
+                    "WHERE id = :new"
+                ),
+                {"old": self.seed.build_id, "new": newer.id},
+            )
+            await db.commit()
+        async with self.session_factory() as db:
+            context = await store.read_context(
+                db, project_id=self.seed.project_id, build_id=self.seed.build_id
+            )
+        self.assertIsNone(context.newer_build_id)
+        async with self.session_factory() as db:
+            await db.execute(
+                text(
+                    "UPDATE graph_builds SET can_continue = true, phase = 'ready' "
+                    "WHERE id = :new"
+                ),
+                {"new": newer.id},
+            )
+            await db.commit()
+        async with self.session_factory() as db:
+            context = await store.read_context(
+                db, project_id=self.seed.project_id, build_id=self.seed.build_id
+            )
+        self.assertEqual(context.newer_build_id, newer.id)
 
     async def test_start_reuses_active_and_requires_explicit_retry(self) -> None:
         first, created = await self._start()

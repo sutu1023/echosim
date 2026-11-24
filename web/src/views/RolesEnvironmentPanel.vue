@@ -5,6 +5,7 @@ import { api, ApiError } from '../api'
 import { messagesFor } from '../i18n'
 import { markLoggedOut } from '../session'
 import type { Lang } from '../workbench/stage-links'
+import { roleTypeLabel } from '../environment/format'
 import { openJobStream, type JobStreamHandle } from '../workbench/job-stream'
 import type { JobEvent } from '../workbench/job-log'
 import {
@@ -59,7 +60,10 @@ let loadToken = 0
 let preparationToken = 0
 let stream: JobStreamHandle | null = null
 let refreshTimer: number | undefined
+let newerGraphTimer: number | undefined
+let newerGraphInFlight = false
 let pendingRefresh = false
+const NEWER_GRAPH_POLL_MS = 2000
 
 const buildParam = computed(() =>
   typeof route.query.build === 'string' ? route.query.build : null,
@@ -218,6 +222,35 @@ function scheduleRefresh(): void {
       void loadPreparation(id)
     }
   }, 120)
+}
+
+async function pollNewerGraph(): Promise<void> {
+  const buildId = state.value.buildId
+  if (
+    newerGraphInFlight ||
+    !buildId ||
+    !state.value.preparationId ||
+    state.value.phase !== 'preparing'
+  ) {
+    return
+  }
+  newerGraphInFlight = true
+  try {
+    const context = await api.get<EnvironmentContextPayload>(
+      `${apiBase()}?build=${encodeURIComponent(buildId)}`,
+    )
+    if (state.value.buildId !== buildId) {
+      return
+    }
+    const next = applyContext(state.value, context)
+    if (!next.stale) {
+      state.value = next
+    }
+  } catch {
+    // 轮询失败不改变当前准备；下一次定时器继续尝试。
+  } finally {
+    newerGraphInFlight = false
+  }
 }
 
 function subscribe(): void {
@@ -601,10 +634,17 @@ watch(
 
 onMounted(() => {
   // 首次加载由上面的 immediate watcher 触发。
+  newerGraphTimer = window.setInterval(() => {
+    void pollNewerGraph()
+  }, NEWER_GRAPH_POLL_MS)
 })
 
 onBeforeUnmount(() => {
   stopStream()
+  if (newerGraphTimer !== undefined) {
+    window.clearInterval(newerGraphTimer)
+    newerGraphTimer = undefined
+  }
   loadToken += 1
   preparationToken += 1
 })
@@ -750,14 +790,14 @@ onBeforeUnmount(() => {
                 @click="selectRole(role)"
               >
                 <strong>{{ role.displayName }}</strong>
-                <span class="badge">{{ role.roleType }}</span>
+                <span class="badge">{{ roleTypeLabel(role.roleType, lang) }}</span>
               </button>
             </li>
           </ul>
 
           <article v-if="selectedRole" class="role-detail" data-role-detail>
             <h4>{{ t.roleDetail }}：{{ selectedRole.displayName }}</h4>
-            <p class="muted">{{ selectedRole.roleType }}</p>
+            <p class="muted">{{ roleTypeLabel(selectedRole.roleType, lang) }}</p>
 
             <section>
               <h5>{{ t.mention }}</h5>
@@ -765,7 +805,9 @@ onBeforeUnmount(() => {
               <ul class="source-list">
                 <li v-for="(source, index) in selectedRole.mention.sources" :key="index">
                   <span class="muted">{{ source.documentName }}</span>
-                  <span v-if="source.pageNo">· 第 {{ source.pageNo }} 页</span>
+                  <span v-if="source.pageNo">
+                    · {{ t.pageNumber.replace('{page}', String(source.pageNo)) }}
+                  </span>
                   <a :href="directSource(source)" target="_blank" rel="noopener">
                     {{ source.locator.kind === 'pdf' ? t.openPdf : t.openSource }}
                   </a>

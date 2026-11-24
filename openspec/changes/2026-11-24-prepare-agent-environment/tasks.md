@@ -78,7 +78,7 @@
 - [x] 8.1 运行后端单元测试 `.venv/bin/python -m unittest discover -s tests`，确认迁移、选择器、worker、API、轮数与冻结测试全部通过
 - [x] 8.2 运行前端 `cd web && npm ci && npm test && npm run typecheck && npm run build`，确认状态守卫、角色/轮数组件与阶段链接回归通过
 - [x] 8.3 在已有 Change 01–08 数据卷上执行 `make migrate` 并启动 `make up`，确认旧项目、材料、建图、测试任务与第二阶段深链接仍可用
-- [ ] 8.4 在干净候选 SHA 上运行默认 `make verify` 与 `make verify CHANGE=2026-11-24-prepare-agent-environment` 各两次，确认同一 SHA、连续两次通过、默认零外呼、专属报告 `calls.real=0`（本轮仅在 dirty 开发工作树验证，待干净 SHA 执行）
+- [x] 8.4 在干净候选 SHA 上运行默认 `make verify` 与 `make verify CHANGE=2026-11-24-prepare-agent-environment` 各两次，确认同一 SHA、连续两次通过、默认零外呼、专属报告 `calls.real=0`。已在干净候选 `edfe58ea6d871cf78093b5e08ef93f6dc3acf30d` 验证，默认两次、专属两次全部通过
 - [ ] 8.5 由作者在私有项目中使用私有材料人工走查：中文快照角色详情、材料提及/关联/表达/材料未说明/模拟设定、第一批预览、失败/取消重试、两页并发确认、72→40 刷新读回、确认冻结、准备期间新图提示、三种布局与中英文；确认私有 PDF、含正文截图、真实画像与模型原始输出未进入仓库、日志或报告
 - [ ] 8.6 人工走查完成后只在 `docs/acceptance/` 准备脱敏结论、SHA、任务标识与必要证据链接，不写入正文、截图、真实画像或模型原始输出；不提前归档、不合并；自动化检查不得创建、修改或删除该目录内容
 
@@ -93,6 +93,13 @@
 - [x] 10.6 provider 与话题交接：provider 每次实际尝试在边界计数并在失败/超时/失去租约前持久化，成功批次不重复计数；批次 `initialTopics` 中只出现在初始话题的合法项进入最终配置与冻结选择并保留来源性质；验证方式是假 transport、零真实外呼和画像话题断言
 - [x] 10.7 运行后端测试、前端页面/状态测试、typecheck、build 与 OpenSpec 严格校验，并在隔离环境运行默认与 Change 08 开发验证
 - [ ] 10.8 在干净候选 SHA 上重复默认与 Change 08 验收、远端 CI 与作者浏览器签收（本轮保留待办）
+
+
+## 11. 浏览器验收复核修复
+
+- [x] 11.1 `layout=graph` 来源深链接自动展开材料上下文抽屉，保留图谱布局并显示 UTF-16 选区；验证方式是页面级 WorkbenchView 回归与 Chromium 无头观察
+- [x] 11.2 `lang=en` 翻译角色类型与 PDF 页码标签，角色名/项目名/材料名保持原值；验证方式是英文页面级回归与 Chromium 无头观察
+- [x] 11.3 旧准备期间轮询同一 build 上下文，新图完成后无需刷新显示提示，旧 build/snapshot/准备身份不变；验证方式是页面级轮询回归与 Chromium 无头观察
 
 ## 9. 能力与场景对应
 

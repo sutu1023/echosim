@@ -213,6 +213,28 @@ watch(layout, (value) => {
   }
 })
 
+// layout=graph 时材料面板位于上下文抽屉；从角色来源深链接进入时自动展开，
+// 否则地址中的 document/source 参数虽然正确，用户看不到原文与高亮。
+watch(
+  [
+    layout,
+    () => currentStage.value?.id,
+    () => route.query.document,
+    () => route.query.source,
+  ],
+  () => {
+    if (
+      layout.value === 'graph' &&
+      currentStage.value?.id === 1 &&
+      (typeof route.query.document === 'string' ||
+        typeof route.query.source === 'string')
+    ) {
+      contextOpen.value = true
+    }
+  },
+  { immediate: true },
+)
+
 onMounted(() => {
   void checkHealth()
 })

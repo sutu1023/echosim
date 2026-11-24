@@ -245,15 +245,15 @@ function context(prep) {
   }
 }
 
-function routePath(stage = 'roles-environment') {
-  return `/projects/${PROJECT}/workbench/${stage}?layout=split&lang=zh&build=${BUILD}`
+function routePath(stage = 'roles-environment', lang = 'zh') {
+  return `/projects/${PROJECT}/workbench/${stage}?layout=split&lang=${lang}&build=${BUILD}`
 }
 
-async function mountPanel(handler) {
+async function mountPanel(handler, lang = 'zh') {
   const calls = installFetch(handler)
-  const router = await createRouter(routePath())
+  const router = await createRouter(routePath('roles-environment', lang))
   const wrapper = await mountComponent(components.RolesEnvironmentPanel, {
-    props: { projectId: PROJECT, lang: 'zh' },
+    props: { projectId: PROJECT, lang },
     global: { plugins: [router] },
   })
   await flush(8)
@@ -487,6 +487,86 @@ test('角色详情逐个渲染 PDF 物理页与文本 UTF-16 来源，并显示�
   assert.ok(textLinks.length >= 2, '文本提及/表达来源缺少原文深链接')
   assert.match(textLinks[0].attributes('href'), /sourceStart=\d+&sourceEnd=\d+/)
   assert.match(wrapper.text(), /模拟关注点：模拟关注点 A/)
+  wrapper.unmount()
+})
+
+test('英文界面翻译角色类型与 PDF 页码，保留角色显示名', async () => {
+  const detail = readyDetail({
+    roles: [
+      role('a', {
+        displayName: '张同学',
+        roleType: '个人',
+        published: true,
+        mention: { text: '材料提及', sources: [source('pdf')] },
+      }),
+    ],
+  })
+  const { wrapper } = await mountPanel((url, call) => {
+    if (url.endsWith(`/environment?build=${BUILD}`)) {
+      return jsonResponse(context(detail))
+    }
+    if (url.endsWith(`/preparations/${PREP}`)) {
+      return jsonResponse({ preparation: detail })
+    }
+    throw new Error(`unexpected fetch ${call.method} ${url}`)
+  }, 'en')
+  await wrapper.findAll('button.role-chip')[0].trigger('click')
+  await flush(2)
+  assert.match(wrapper.text(), /Person/)
+  assert.match(wrapper.text(), /Page 3/)
+  assert.doesNotMatch(wrapper.text(), /第 3 页/)
+  assert.match(wrapper.text(), /张同学/)
+  assert.doesNotMatch(wrapper.text(), /个人/)
+  wrapper.unmount()
+})
+
+test('准备期间轮询发现新图后无需刷新即显示提示，旧 build 与准备身份保持', async () => {
+  let contextCalls = 0
+  const oldContext = context(
+    preparation({
+      phase: 'preparing',
+      jobStatus: 'queued',
+      failure: null,
+      previewRoles: [role('preview')],
+      counts: {
+        previewRoleCount: 1,
+        profileBatchCount: 1,
+        providerCalls: { real: 0, double: 1 },
+      },
+    }),
+  )
+  const detail = preparation({
+    phase: 'preparing',
+    jobStatus: 'queued',
+    failure: null,
+    previewRoles: [role('preview')],
+    counts: {
+      previewRoleCount: 1,
+      profileBatchCount: 1,
+      providerCalls: { real: 0, double: 1 },
+    },
+  })
+  const { wrapper } = await mountPanel((url, call) => {
+    if (url.endsWith(`/environment?build=${BUILD}`)) {
+      contextCalls += 1
+      return jsonResponse(
+        contextCalls === 1
+          ? oldContext
+          : { ...oldContext, newerBuildId: 'build-new-9999' },
+      )
+    }
+    if (url.endsWith(`/preparations/${PREP}`)) {
+      return jsonResponse({ preparation: detail })
+    }
+    throw new Error(`unexpected fetch ${call.method} ${url}`)
+  })
+  assert.doesNotMatch(wrapper.text(), /已有更新的图谱/)
+  await new Promise((resolve) => setTimeout(resolve, 2200))
+  await flush(4)
+  assert.match(wrapper.text(), /已有更新的图谱/)
+  assert.match(wrapper.text(), /build build-1/)
+  assert.doesNotMatch(wrapper.text(), /build-ne/)
+  assert.match(wrapper.text(), /原创问题：是否调整安排？/)
   wrapper.unmount()
 })
 

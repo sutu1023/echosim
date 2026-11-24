@@ -118,6 +118,7 @@ export interface WorkbenchMessages {
     roleCount: string
     selectRole: string
     roleDetail: string
+    pageNumber: string
     mention: string
     background: string
     backgroundMissing: string
@@ -450,6 +451,7 @@ const messages: Record<Lang, WorkbenchMessages> = {
       roleCount: '{count} 个角色',
       selectRole: '查看角色详情',
       roleDetail: '角色详情',
+      pageNumber: '第 {page} 页',
       mention: '材料提及',
       background: '背景',
       backgroundMissing: '材料未说明',
@@ -838,6 +840,7 @@ const messages: Record<Lang, WorkbenchMessages> = {
       roleCount: '{count} roles',
       selectRole: 'Open role detail',
       roleDetail: 'Role detail',
+      pageNumber: 'Page {page}',
       mention: 'Mentioned in material',
       background: 'Background',
       backgroundMissing: 'Not stated in material',
