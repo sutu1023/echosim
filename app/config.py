@@ -2,10 +2,25 @@
 
 from __future__ import annotations
 
+import math
 from pathlib import Path
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from .engines.business_config import (
+    DEFAULT_EVIDENCE_GRAPH_ALLOW_STUB,
+    DEFAULT_EVIDENCE_GRAPH_BATCH_SIZE,
+    DEFAULT_EVIDENCE_GRAPH_GRAPH_PROVIDER,
+    DEFAULT_EVIDENCE_GRAPH_INDEX_TIMEOUT_SECONDS,
+    DEFAULT_EVIDENCE_GRAPH_MAX_DOCUMENTS,
+    DEFAULT_EVIDENCE_GRAPH_MAX_EDGES,
+    DEFAULT_EVIDENCE_GRAPH_MAX_NODES,
+    DEFAULT_EVIDENCE_GRAPH_MAX_SOURCES_PER_ITEM,
+    DEFAULT_EVIDENCE_GRAPH_MODEL_PROVIDER,
+    DEFAULT_EVIDENCE_GRAPH_PROCESSING_TIMEOUT_SECONDS,
+    DEFAULT_EVIDENCE_GRAPH_QUESTION_MAX_CHARS,
+)
 from .engines.settings import (
     DEFAULT_GRAPH_INDEX_TIMEOUT_SECONDS,
     DEFAULT_GRAPH_POLL_INTERVAL_SECONDS,
@@ -49,6 +64,7 @@ class Settings(BaseSettings):
     - DOCUMENT_INGEST_DELAY_MS：解析前的可控延迟，仅用于验收放大慢解析窗口。
     - MODEL_API_BASE_URL / MODEL_API_KEY / MODEL_NAME：Chat Completions 兼容模型配置。
     - ZEP_API_KEY / ZEP_ACCEPTANCE_GRAPH_ID：固定验收图谱配置。
+    - EVIDENCE_GRAPH_*：业务建图 provider、替身开关、规模上限与预算。
     - 其余 GRAPH_* / SIMULATION_* / SMOKE_LIVE_*：引擎超时与预算。
     """
 
@@ -76,12 +92,72 @@ class Settings(BaseSettings):
     zep_api_key: str = DEFAULT_ZEP_API_KEY
     zep_api_base_url: str = DEFAULT_ZEP_API_BASE_URL
     zep_acceptance_graph_id: str = DEFAULT_ZEP_ACCEPTANCE_GRAPH_ID
+    evidence_graph_model_provider: str = DEFAULT_EVIDENCE_GRAPH_MODEL_PROVIDER
+    evidence_graph_graph_provider: str = DEFAULT_EVIDENCE_GRAPH_GRAPH_PROVIDER
+    evidence_graph_allow_stub: bool = DEFAULT_EVIDENCE_GRAPH_ALLOW_STUB
+    evidence_graph_max_documents: int = DEFAULT_EVIDENCE_GRAPH_MAX_DOCUMENTS
+    evidence_graph_max_nodes: int = DEFAULT_EVIDENCE_GRAPH_MAX_NODES
+    evidence_graph_max_edges: int = DEFAULT_EVIDENCE_GRAPH_MAX_EDGES
+    evidence_graph_max_sources_per_item: int = (
+        DEFAULT_EVIDENCE_GRAPH_MAX_SOURCES_PER_ITEM
+    )
+    evidence_graph_question_max_chars: int = (
+        DEFAULT_EVIDENCE_GRAPH_QUESTION_MAX_CHARS
+    )
+    evidence_graph_batch_size: int = DEFAULT_EVIDENCE_GRAPH_BATCH_SIZE
+    evidence_graph_index_timeout_seconds: float = (
+        DEFAULT_EVIDENCE_GRAPH_INDEX_TIMEOUT_SECONDS
+    )
+    evidence_graph_processing_timeout_seconds: float = (
+        DEFAULT_EVIDENCE_GRAPH_PROCESSING_TIMEOUT_SECONDS
+    )
     graph_write_timeout_seconds: float = DEFAULT_GRAPH_WRITE_TIMEOUT_SECONDS
     graph_status_timeout_seconds: float = DEFAULT_GRAPH_STATUS_TIMEOUT_SECONDS
     graph_index_timeout_seconds: float = DEFAULT_GRAPH_INDEX_TIMEOUT_SECONDS
     graph_poll_interval_seconds: float = DEFAULT_GRAPH_POLL_INTERVAL_SECONDS
     simulation_timeout_seconds: float = DEFAULT_SIMULATION_TIMEOUT_SECONDS
     smoke_live_total_timeout_seconds: float = DEFAULT_SMOKE_LIVE_TOTAL_TIMEOUT_SECONDS
+
+    @field_validator(
+        "evidence_graph_max_documents",
+        "evidence_graph_max_nodes",
+        "evidence_graph_max_edges",
+        "evidence_graph_max_sources_per_item",
+    )
+    @classmethod
+    def _clamp_evidence_graph_caps(cls, value: int, info: object) -> int:
+        caps = {
+            "evidence_graph_max_documents": DEFAULT_EVIDENCE_GRAPH_MAX_DOCUMENTS,
+            "evidence_graph_max_nodes": DEFAULT_EVIDENCE_GRAPH_MAX_NODES,
+            "evidence_graph_max_edges": DEFAULT_EVIDENCE_GRAPH_MAX_EDGES,
+            "evidence_graph_max_sources_per_item": (
+                DEFAULT_EVIDENCE_GRAPH_MAX_SOURCES_PER_ITEM
+            ),
+        }
+        field_name = getattr(info, "field_name", "")
+        limit = caps.get(field_name, value)
+        if value <= 0:
+            return limit
+        return min(value, limit)
+
+    @field_validator(
+        "evidence_graph_index_timeout_seconds",
+        "evidence_graph_processing_timeout_seconds",
+    )
+    @classmethod
+    def _finite_evidence_graph_budget(cls, value: float, info: object) -> float:
+        defaults = {
+            "evidence_graph_index_timeout_seconds": (
+                DEFAULT_EVIDENCE_GRAPH_INDEX_TIMEOUT_SECONDS
+            ),
+            "evidence_graph_processing_timeout_seconds": (
+                DEFAULT_EVIDENCE_GRAPH_PROCESSING_TIMEOUT_SECONDS
+            ),
+        }
+        default = defaults.get(getattr(info, "field_name", ""), value)
+        if not math.isfinite(value) or value <= 0:
+            return default
+        return value
 
 
 settings = Settings()

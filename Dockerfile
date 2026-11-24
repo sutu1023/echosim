@@ -28,6 +28,19 @@ RUN useradd --create-home --uid 10001 echosim \
     && chown -R echosim:echosim /app
 USER echosim
 
+# ---- 阶段 3：业务建图 worker，只额外安装 Zep 客户端 ----
+FROM runtime AS worker-graph
+
+USER root
+COPY app/requirements-worker-graph.txt ./requirements-worker-graph.txt
+RUN python -m pip install --no-cache-dir -r requirements-worker-graph.txt \
+    && python -m pip check \
+    && python -c "import importlib.metadata as m; import zep_cloud; from zep_cloud import Zep; assert m.version('zep-cloud') == '4.1.0'"
+USER echosim
+
+# ---- 阶段 4：HTTP app，不安装业务建图 worker 依赖 ----
+FROM runtime AS app
+
 EXPOSE 8080
 
 HEALTHCHECK --interval=10s --timeout=3s --start-period=5s --retries=3 \

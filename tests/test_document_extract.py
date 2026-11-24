@@ -145,3 +145,90 @@ class TextCleaningTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class GraphTextTests(unittest.TestCase):
+    def test_reconstruct_cross_page_text_preserves_boundary(self) -> None:
+        from types import SimpleNamespace
+
+        chunks = [
+            SimpleNamespace(
+                chunk_index=1,
+                page_no=1,
+                source_start=0,
+                source_end=6,
+                paragraph_start=None,
+                paragraph_end=None,
+                text="第一页正文",
+            ),
+            SimpleNamespace(
+                chunk_index=2,
+                page_no=2,
+                source_start=0,
+                source_end=6,
+                paragraph_start=None,
+                paragraph_end=None,
+                text="第二页正文",
+            ),
+        ]
+        text, positions = extract.reconstruct_graph_text(chunks)
+        self.assertIn("第一页正文\n\n第二页正文", text)
+        self.assertEqual(len(positions), len(text))
+        graph_chunks = extract.chunk_graph_text(text, positions, target=500, overlap=50)
+        self.assertEqual(len(graph_chunks), 1)
+        pages = [segment.page_no for segment in graph_chunks[0].segments]
+        self.assertEqual(pages, [1, 2])
+
+    def test_reconstruct_trims_same_page_overlap(self) -> None:
+        from types import SimpleNamespace
+
+        chunks = [
+            SimpleNamespace(
+                chunk_index=1,
+                page_no=3,
+                source_start=0,
+                source_end=8,
+                paragraph_start=None,
+                paragraph_end=None,
+                text="01234567",
+            ),
+            SimpleNamespace(
+                chunk_index=2,
+                page_no=3,
+                source_start=5,
+                source_end=11,
+                paragraph_start=None,
+                paragraph_end=None,
+                text="56789A",
+            ),
+        ]
+        text, _ = extract.reconstruct_graph_text(chunks)
+        self.assertEqual(text, "0123456789A")
+
+    def test_graph_chunk_positions_slice_original_range(self) -> None:
+        from types import SimpleNamespace
+
+        raw = "第一段。第二段。第三段。"
+        chunks = [
+            SimpleNamespace(
+                chunk_index=1,
+                page_no=None,
+                source_start=0,
+                source_end=len(raw),
+                paragraph_start=1,
+                paragraph_end=3,
+                text=raw,
+            )
+        ]
+        text, positions = extract.reconstruct_graph_text(chunks)
+        graph_chunks = extract.chunk_graph_text(text, positions, target=6, overlap=2)
+        self.assertGreater(len(graph_chunks), 1)
+        for chunk in graph_chunks:
+            segment = chunk.segments[0]
+            sliced = chunk.text[segment.text_start : segment.text_end]
+            self.assertTrue(sliced)
+            self.assertGreaterEqual(segment.source_end, segment.source_start)
+
+
+if __name__ == "__main__":
+    unittest.main()

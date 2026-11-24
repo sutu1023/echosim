@@ -22,9 +22,10 @@ from .config import settings
 
 logger = logging.getLogger(__name__)
 
-# 连接与命令超时固定 2 秒，`/health` 外层再用 HEALTH_DB_TIMEOUT_SECONDS 兜底。
+# 连接超时固定 2 秒；命令超时放宽到 30 秒以容纳建图快照批量写入。
+# `/health` 仍由外层 HEALTH_DB_TIMEOUT_SECONDS 保证 5 秒内返回。
 CONNECT_TIMEOUT_SECONDS = 2.0
-COMMAND_TIMEOUT_SECONDS = 2.0
+COMMAND_TIMEOUT_SECONDS = 30.0
 
 engine: AsyncEngine = create_async_engine(
     settings.database_url,

@@ -64,6 +64,16 @@ def _configured(value: str) -> bool:
     return bool(value) and not _is_placeholder(value)
 
 
+def is_placeholder(value: str) -> bool:
+    """公开的占位值判断，供业务建图配置复用。"""
+    return _is_placeholder(value)
+
+
+def is_configured(value: str) -> bool:
+    """公开的“非空且非占位”判断，供业务建图配置复用。"""
+    return _configured(value)
+
+
 def _number(env: Mapping[str, str], key: str, default: float) -> float:
     raw = _text(env, key)
     if not raw:

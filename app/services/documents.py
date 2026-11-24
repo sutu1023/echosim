@@ -419,8 +419,11 @@ def source_text(document: Document) -> str:
         raise DocumentNotText
     data = original_bytes(document)
     encoding = document.text_encoding or "utf-8"
+    # 入库使用 utf-8-sig 去掉 BOM，原文视图必须使用同一解码结果，
+    # 否则浏览器按 UTF-16 偏移高亮会整体漂移。
+    decode_encoding = "utf-8-sig" if encoding == "utf-8" else encoding
     try:
-        return data.decode(encoding)
+        return data.decode(decode_encoding)
     except (UnicodeDecodeError, LookupError):  # pragma: no cover - 记录已校验
         raise DocumentNotText from None
 

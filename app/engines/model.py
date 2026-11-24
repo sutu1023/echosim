@@ -136,6 +136,28 @@ def _build_payload(
     return payload
 
 
+def _parse_json_text(value: str) -> object:
+    text = value.strip()
+    if text.startswith("```"):
+        lines = text.splitlines()
+        if lines and lines[0].startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].strip().startswith("```"):
+            lines = lines[:-1]
+        text = "\n".join(lines).strip()
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        start = text.find("{")
+        if start < 0:
+            raise
+        try:
+            parsed, _ = json.JSONDecoder().raw_decode(text[start:])
+            return parsed
+        except json.JSONDecodeError:
+            raise
+
+
 def _extract_content(body: str) -> object:
     try:
         parsed = json.loads(body)
@@ -155,9 +177,11 @@ def _extract_content(body: str) -> object:
     content = message.get("content")
     if isinstance(content, str):
         try:
-            return json.loads(content)
+            return _parse_json_text(content)
         except json.JSONDecodeError as exc:
-            raise ValueError("message.content 不是 JSON") from exc
+            raise ValueError(
+                f"message.content 不是 JSON（长度 {len(content)}）"
+            ) from exc
     if isinstance(content, dict):
         return content
     raise ValueError("message.content 不是 JSON 对象")

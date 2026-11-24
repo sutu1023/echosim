@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import Literal
+import uuid
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -81,3 +82,36 @@ class JobStartRequest(BaseModel):
         "interaction",
     ]
     failAtStep: int | None = Field(default=None, ge=1, le=TEST_TOTAL_STEPS)
+
+
+EVIDENCE_GRAPH_QUESTION_MAX_CHARS = 500
+EVIDENCE_GRAPH_MAX_DOCUMENTS = 5
+
+
+class EvidenceGraphStartRequest(BaseModel):
+    """建图开始参数；材料去重后非空且不超过 5 份，问题去除首尾空白。"""
+
+    documentIds: list[uuid.UUID]
+    question: str
+
+    @field_validator("documentIds")
+    @classmethod
+    def check_documents(cls, value: list[uuid.UUID]) -> list[uuid.UUID]:
+        ordered = list(dict.fromkeys(value))
+        if not ordered:
+            raise ValueError("请至少选择一份已就绪材料")
+        if len(ordered) > EVIDENCE_GRAPH_MAX_DOCUMENTS:
+            raise ValueError(
+                f"单次最多选择 {EVIDENCE_GRAPH_MAX_DOCUMENTS} 份材料"
+            )
+        return ordered
+
+    @field_validator("question")
+    @classmethod
+    def check_question(cls, value: str) -> str:
+        stripped = value.strip()
+        if not 1 <= len(stripped) <= EVIDENCE_GRAPH_QUESTION_MAX_CHARS:
+            raise ValueError(
+                f"问题长度必须在 1–{EVIDENCE_GRAPH_QUESTION_MAX_CHARS} 字符之间"
+            )
+        return stripped

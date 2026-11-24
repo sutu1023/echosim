@@ -13,6 +13,7 @@ import io
 import math
 import re
 import unicodedata
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 # ---------------------------------------------------------------- 异常
@@ -81,6 +82,41 @@ class Chunk:
     paragraph_end: int | None
     source_start: int
     source_end: int
+
+
+@dataclass(frozen=True)
+class GraphTextChar:
+    """建图全文中的一个字符到材料坐标的映射。"""
+
+    page_no: int | None
+    source_offset: int
+    document_chunk_index: int
+    paragraph_start: int | None
+    paragraph_end: int | None
+
+
+@dataclass(frozen=True)
+class GraphSourceSegment:
+    """建图分块中连续落到同一入库分块的区间。"""
+
+    page_no: int | None
+    document_chunk_index: int
+    paragraph_start: int | None
+    paragraph_end: int | None
+    source_start: int
+    source_end: int
+    text_start: int
+    text_end: int
+
+
+@dataclass(frozen=True)
+class GraphChunk:
+    """专用于建图的原文分块，带逐字符材料映射。"""
+
+    index: int
+    text: str
+    positions: tuple[GraphTextChar | None, ...]
+    segments: tuple[GraphSourceSegment, ...]
 
 
 # ---------------------------------------------------------------- 基础工具
@@ -457,6 +493,169 @@ def chunk_text(
         )
         pending_length += len(cleaned) + (1 if len(pending) > 1 else 0)
     flush()
+    return chunks
+
+
+def _u16_index_for_offset(text: str, target: int) -> int:
+    """返回 UTF-16 偏移对应的 Python 字符索引；落在字符中间时向上取整。"""
+    if target <= 0:
+        return 0
+    total = 0
+    for index, ch in enumerate(text):
+        total += _char_width(ch)
+        if total >= target:
+            return index + 1 if total > target else index + 1
+    return len(text)
+
+
+def reconstruct_graph_text(
+    chunks: Sequence[object],
+) -> tuple[str, tuple[GraphTextChar | None, ...]]:
+    """把已入库的清洗分块重建为建图全文，并保留逐字符材料坐标。
+
+    `chunks` 只需提供 `chunk_index`、`text`、`page_no`、`source_start`、
+    `source_end`、`paragraph_start`、`paragraph_end` 属性；入库分块与数据库行都可使用。
+    同一页/同一原文出现重叠时按 UTF-16 区间裁掉重复前缀，页间与段落间保留换行。
+    """
+    ordered = sorted(chunks, key=lambda item: int(getattr(item, "chunk_index")))
+    chars: list[str] = []
+    positions: list[GraphTextChar | None] = []
+    previous_page: int | None = None
+    previous_end: int | None = None
+    has_previous = False
+    for chunk in ordered:
+        text = str(getattr(chunk, "text") or "")
+        if not text:
+            continue
+        page_no = getattr(chunk, "page_no")
+        source_start = int(getattr(chunk, "source_start"))
+        source_end = int(getattr(chunk, "source_end"))
+        paragraph_start = getattr(chunk, "paragraph_start")
+        paragraph_end = getattr(chunk, "paragraph_end")
+        skip = 0
+        if (
+            has_previous
+            and previous_page == page_no
+            and previous_end is not None
+            and source_start < previous_end
+        ):
+            skip = min(
+                len(text),
+                _u16_index_for_offset(text, previous_end - source_start),
+            )
+        if has_previous and (
+            previous_page != page_no
+            or skip == 0 and previous_end is not None and source_start > previous_end
+        ):
+            chars.extend(("\n", "\n"))
+            positions.extend((None, None))
+        offset = source_start
+        for ch in text[:skip]:
+            offset += _char_width(ch)
+        for ch in text[skip:]:
+            chars.append(ch)
+            positions.append(
+                GraphTextChar(
+                    page_no=page_no,
+                    source_offset=offset,
+                    document_chunk_index=int(getattr(chunk, "chunk_index")),
+                    paragraph_start=paragraph_start,
+                    paragraph_end=paragraph_end,
+                )
+            )
+            offset += _char_width(ch)
+        previous_page = page_no
+        previous_end = source_end
+        has_previous = True
+    return "".join(chars), tuple(positions)
+
+
+def chunk_graph_text(
+    text: str,
+    positions: Sequence[GraphTextChar | None],
+    *,
+    target: int = 500,
+    overlap: int = 50,
+) -> list[GraphChunk]:
+    """按句末优先的 500/50 切分建图全文，并生成每块的来源区间。"""
+    if len(positions) != len(text):
+        raise ValueError("建图全文与字符映射长度不一致")
+    chunks: list[GraphChunk] = []
+    for start, end in _split_ranges(text, target, overlap):
+        value = text[start:end]
+        if not value.strip():
+            continue
+        selected = positions[start:end]
+        segments: list[GraphSourceSegment] = []
+        current_start: int | None = None
+        current_key: tuple[int | None, int] | None = None
+        current_para: tuple[int | None, int | None] = (None, None)
+        current_source_start = 0
+        current_source_end = 0
+        for index, item in enumerate(selected):
+            if item is None:
+                if current_start is not None:
+                    segments.append(
+                        GraphSourceSegment(
+                            page_no=current_key[0],  # type: ignore[index]
+                            document_chunk_index=current_key[1],  # type: ignore[index]
+                            paragraph_start=current_para[0],
+                            paragraph_end=current_para[1],
+                            source_start=current_source_start,
+                            source_end=current_source_end,
+                            text_start=current_start,
+                            text_end=index,
+                        )
+                    )
+                    current_start = None
+                    current_key = None
+                continue
+            key = (item.page_no, item.document_chunk_index)
+            if current_start is None or key != current_key:
+                if current_start is not None and current_key is not None:
+                    segments.append(
+                        GraphSourceSegment(
+                            page_no=current_key[0],
+                            document_chunk_index=current_key[1],
+                            paragraph_start=current_para[0],
+                            paragraph_end=current_para[1],
+                            source_start=current_source_start,
+                            source_end=current_source_end,
+                            text_start=current_start,
+                            text_end=index,
+                        )
+                    )
+                current_start = index
+                current_key = key
+                current_source_start = item.source_offset
+                current_para = (item.paragraph_start, item.paragraph_end)
+            current_source_end = item.source_offset + _char_width(value[index])
+            if item.paragraph_start is not None:
+                current_para = (
+                    current_para[0] or item.paragraph_start,
+                    item.paragraph_end if item.paragraph_end is not None else current_para[1],
+                )
+        if current_start is not None and current_key is not None:
+            segments.append(
+                GraphSourceSegment(
+                    page_no=current_key[0],
+                    document_chunk_index=current_key[1],
+                    paragraph_start=current_para[0],
+                    paragraph_end=current_para[1],
+                    source_start=current_source_start,
+                    source_end=current_source_end,
+                    text_start=current_start,
+                    text_end=len(value),
+                )
+            )
+        chunks.append(
+            GraphChunk(
+                index=len(chunks) + 1,
+                text=value,
+                positions=tuple(selected),
+                segments=tuple(segments),
+            )
+        )
     return chunks
 
 

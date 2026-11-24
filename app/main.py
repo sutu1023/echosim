@@ -17,7 +17,13 @@ from .db import dispose_engine
 from .errors import (
     DocumentNotFound,
     DocumentNotText,
+    GraphBuildConflict,
+    GraphBuildNotFound,
+    GraphLimitExceeded,
+    GraphSnapshotInconsistent,
+    GraphSnapshotNotFound,
     InvalidCursor,
+    InvalidSnapshotRevision,
     JobNotFound,
     ProjectNotFound,
     ServiceUnavailable,
@@ -27,6 +33,7 @@ from .health import router as health_router
 from .middleware import enforce_same_origin
 from .routers.auth import router as auth_router
 from .routers.documents import router as documents_router
+from .routers.evidence_graph import router as evidence_graph_router
 from .routers.history import router as history_router
 from .routers.jobs import router as jobs_router
 from .routers.projects import router as projects_router
@@ -109,10 +116,65 @@ def create_app(web_dist_dir: Path | None = None) -> FastAPI:
     async def handle_invalid_cursor(_: Request, __: InvalidCursor) -> JSONResponse:
         return JSONResponse({"detail": "游标无效"}, status_code=400)
 
+    @app.exception_handler(GraphBuildNotFound)
+    async def handle_graph_build_not_found(
+        _: Request, __: GraphBuildNotFound
+    ) -> JSONResponse:
+        return JSONResponse({"detail": "建图不存在"}, status_code=404)
+
+    @app.exception_handler(GraphSnapshotNotFound)
+    async def handle_graph_snapshot_not_found(
+        _: Request, __: GraphSnapshotNotFound
+    ) -> JSONResponse:
+        return JSONResponse({"detail": "快照不存在"}, status_code=404)
+
+    @app.exception_handler(InvalidSnapshotRevision)
+    async def handle_snapshot_revision(
+        _: Request, __: InvalidSnapshotRevision
+    ) -> JSONResponse:
+        return JSONResponse({"detail": "快照版本无效"}, status_code=400)
+
+    @app.exception_handler(GraphBuildConflict)
+    async def handle_graph_build_conflict(
+        _: Request, exc: GraphBuildConflict
+    ) -> JSONResponse:
+        status = 422 if exc.code == "too_many_documents" else 409
+        detail = (
+            "单次最多选择 5 份材料"
+            if exc.code == "too_many_documents"
+            else "请等待所选材料解析完成"
+            if exc.code == "document_not_ready"
+            else "建图请求与当前任务状态冲突"
+        )
+        return JSONResponse(
+            {"detail": detail, "code": exc.code}, status_code=status
+        )
+
+    @app.exception_handler(GraphLimitExceeded)
+    async def handle_graph_limit(
+        _: Request, exc: GraphLimitExceeded
+    ) -> JSONResponse:
+        return JSONResponse(
+            {
+                "detail": "构建结果超过规模上限，未发布截断结果",
+                "code": exc.code,
+                "limit": exc.limit,
+                "actual": exc.actual,
+            },
+            status_code=409,
+        )
+
+    @app.exception_handler(GraphSnapshotInconsistent)
+    async def handle_graph_snapshot_inconsistent(
+        _: Request, __: GraphSnapshotInconsistent
+    ) -> JSONResponse:
+        return JSONResponse({"detail": "服务暂时不可用"}, status_code=503)
+
     app.include_router(auth_router)
     app.include_router(projects_router)
     app.include_router(jobs_router)
     app.include_router(documents_router)
+    app.include_router(evidence_graph_router)
     app.include_router(history_router)
     app.include_router(health_router)
     register_static_routes(app, web_dist_dir or settings.web_dist_dir)
