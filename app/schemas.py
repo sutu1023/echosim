@@ -115,3 +115,19 @@ class EvidenceGraphStartRequest(BaseModel):
                 f"问题长度必须在 1–{EVIDENCE_GRAPH_QUESTION_MAX_CHARS} 字符之间"
             )
         return stripped
+
+
+class EnvironmentConfigurationRequest(BaseModel):
+    """准备轮数配置；字段类型由服务端契约再次校验。"""
+
+    settingsRevision: int = Field(ge=1)
+    durationHours: int
+    minutesPerRound: int
+    roundsMode: Literal["auto", "manual"] = "auto"
+    manualRounds: int | None = None
+
+
+class EnvironmentConfirmRequest(BaseModel):
+    """确认冻结必须携带用户最后读到的设置版本。"""
+
+    settingsRevision: int = Field(ge=1)

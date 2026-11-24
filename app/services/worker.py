@@ -70,9 +70,24 @@ from ..engines.business_semantics import (
     select_mention_quote,
     select_support_quote,
 )
-from ..errors import GraphBindingConflict, GraphLimitExceeded, LeaseLost
+from ..engines.environment_contracts import (
+    EnvironmentContractError,
+    validate_simulation,
+)
+from ..engines.environment_model import (
+    EnvironmentCallMeter,
+    EnvironmentProfileError,
+    ProfileRole,
+)
+from ..errors import (
+    EnvironmentConflict,
+    GraphBindingConflict,
+    GraphLimitExceeded,
+    LeaseLost,
+)
 from . import document_extract
 from . import document_storage
+from . import environment as environment_store
 from . import evidence_graph as graph_store
 from . import graph_source
 from . import run_events
@@ -4624,6 +4639,1180 @@ async def execute_graph_build(
             session_factory=session_factory,
             code="graph_unavailable",
             message="建图执行失败，请稍后重试",
+        )
+
+
+# ---------------------------------------------------------------- 角色与环境准备
+
+PREPARE_STEP_KEYS = environment_store.PREPARE_STEP_KEYS
+PREPARE_TOTAL_STEPS = environment_store.PREPARE_TOTAL_STEPS
+
+
+class PreparationWorkError(Exception):
+    """准备步骤失败；`code` 为稳定原因码。"""
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+        self.message = message
+
+
+async def _prep_guard(
+    db: AsyncSession, claim: Claim, *, step: int
+) -> tuple[str, object | None]:
+    row = await _locked_job(db, claim)
+    if row is None:
+        await db.rollback()
+        return "lost", None
+    if row.status in TERMINAL_STATUSES:  # type: ignore[attr-defined]
+        await db.rollback()
+        return str(row.status), None  # type: ignore[attr-defined]
+    db_now = await _db_now(db)
+    if not _lease_valid(row, claim, db_now):
+        await db.rollback()
+        return "lost", None
+    next_step = int(row.next_step)  # type: ignore[attr-defined]
+    if next_step >= step:
+        await db.rollback()
+        return "duplicate", None
+    if next_step != step - 1:
+        await db.rollback()
+        return "lost", None
+    return "ready", row
+
+
+async def _prep_advance(
+    db: AsyncSession,
+    claim: Claim,
+    *,
+    step: int,
+    lease_seconds: float,
+    terminal: bool,
+) -> None:
+    if terminal:
+        await _finish(db, claim, step, status="succeeded", reason=None)
+        return
+    updated = await db.execute(
+        text(
+            "UPDATE jobs SET next_step = :step, "
+            "lease_expires_at = clock_timestamp() + make_interval(secs => "
+            + LEASE_SECONDS_PARAM
+            + "), updated_at = clock_timestamp() "
+            "WHERE id = :job_id AND lease_token = :lease_token "
+            "AND status = 'running'"
+        ),
+        {
+            "step": step,
+            "job_id": claim.job_id,
+            "lease_token": claim.lease_token,
+            "lease_seconds": lease_seconds,
+        },
+    )
+    if updated.rowcount != 1:
+        raise LeaseLost("准备任务的租约已失效")
+
+
+async def _prep_event_payload(
+    preparation: environment_store.EnvironmentPreparation,
+    *,
+    step: int,
+    step_key: str,
+    **extra: object,
+) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "preparationId": str(preparation.id),
+        "buildId": str(preparation.build_id),
+        "snapshotId": str(preparation.snapshot_id),
+        "step": step,
+        "stepKey": step_key,
+        "phase": preparation.phase,
+    }
+    payload.update({key: value for key, value in extra.items() if value is not None})
+    return payload
+
+
+async def _commit_prep_step(
+    db: AsyncSession,
+    claim: Claim,
+    *,
+    step: int,
+    step_key: str,
+    lease_seconds: float,
+    terminal: bool = False,
+    extra: dict[str, object] | None = None,
+    before_commit: Callable[[AsyncSession], Any] | None = None,
+) -> str:
+    status, row = await _prep_guard(db, claim, step=step)
+    if status != "ready":
+        return status
+    preparation = await environment_store.get_preparation_for_run(
+        db, run_id=claim.run_id
+    )
+    inserted = await db.execute(
+        text(
+            "INSERT INTO run_steps (run_id, step_index, step_key, payload) "
+            "VALUES (:run_id, :step, :step_key, CAST(:payload AS jsonb)) "
+            "ON CONFLICT (run_id, step_index) DO NOTHING"
+        ),
+        {
+            "run_id": claim.run_id,
+            "step": step,
+            "step_key": step_key,
+            "payload": json.dumps({"step": step}, ensure_ascii=False),
+        },
+    )
+    if inserted.rowcount != 1:
+        await db.rollback()
+        return "duplicate"
+    seq = await run_events.max_seq(db, run_id=claim.run_id) + 1
+    payload = await _prep_event_payload(
+        preparation,
+        step=step,
+        step_key=step_key,
+        stepsApplied=step,
+        totalSteps=claim.total_steps,
+        **(extra or {}),
+    )
+    await run_events.append_event(
+        db,
+        run_id=claim.run_id,
+        seq=seq,
+        type="completed" if terminal else "progress",
+        stage=claim.stage,
+        simulated_at=run_events.simulated_time(claim.simulated_epoch, seq),
+        payload=payload,
+    )
+    await _prep_advance(
+        db, claim, step=step, lease_seconds=lease_seconds, terminal=terminal
+    )
+    await db.execute(
+        text(
+            "UPDATE environment_preparations SET updated_at = clock_timestamp(), "
+            "finished_at = CASE WHEN :terminal THEN clock_timestamp() "
+            "ELSE finished_at END WHERE id = :preparation_id"
+        ),
+        {"terminal": terminal, "preparation_id": preparation.id},
+    )
+    if before_commit is not None:
+        await before_commit(db)
+    await db.commit()
+    return "succeeded" if terminal else "progress"
+
+
+async def _prep_bind(
+    claim: Claim,
+    *,
+    session_factory: SessionFactory,
+    stop_event: asyncio.Event | None,
+    lease_seconds: float,
+    heartbeat_seconds: float,
+    config: object,
+) -> str:
+    del heartbeat_seconds
+    if stop_event is not None and stop_event.is_set():
+        return "stopped"
+    async with session_factory() as db:
+        preparation = await environment_store.get_preparation_for_run(
+            db, run_id=claim.run_id
+        )
+        if preparation.phase in ("failed", "canceled"):
+            await db.rollback()
+            return preparation.phase
+        if preparation.phase == "ready":
+            await db.rollback()
+            return "duplicate"
+        build, snapshot = await graph_store.read_build_graph(
+            db,
+            project_id=preparation.project_id,
+            build_id=preparation.build_id,
+        )
+        del build
+        if snapshot is None or snapshot.id != preparation.snapshot_id:
+            raise PreparationWorkError(
+                "graph_snapshot_missing", "绑定快照不可用"
+            )
+        if not snapshot.complete or not snapshot.published:
+            raise PreparationWorkError("graph_not_ready", "绑定快照未完成")
+        selection = environment_store.select_for_snapshot(snapshot)
+        if not selection.roles:
+            raise PreparationWorkError(
+                "no_role_candidates", "材料中没有可作为角色的主体"
+            )
+        extra = {
+            "eligibleRoles": len(selection.roles),
+            "totalRoles": len(selection.roles),
+            "profiledRoles": 0,
+            "previewRoleCount": 0,
+        }
+        return await _commit_prep_step(
+            db,
+            claim,
+            step=1,
+            step_key="bind",
+            lease_seconds=lease_seconds,
+            extra=extra,
+        )
+
+
+async def _prep_select(
+    claim: Claim,
+    *,
+    session_factory: SessionFactory,
+    lease_seconds: float,
+    heartbeat_seconds: float,
+    config: object,
+) -> str:
+    del heartbeat_seconds
+    batch_size = int(getattr(config, "profile_batch_size", 2))
+    async with session_factory() as db:
+        preparation = await environment_store.get_preparation_for_run(
+            db, run_id=claim.run_id
+        )
+        snapshot = await environment_store.load_bound_snapshot(db, preparation)
+        selection = environment_store.select_for_snapshot(snapshot)
+        if not selection.roles:
+            raise PreparationWorkError(
+                "no_role_candidates", "材料中没有可作为角色的主体"
+            )
+        ordered = sorted(selection.roles, key=lambda item: item.node_key)
+        batch_index_by_key = {
+            role.node_key: index // max(1, batch_size)
+            for index, role in enumerate(ordered)
+        }
+        for role in ordered:
+            role_id = uuid.uuid4()
+            await db.execute(
+                text(
+                    "INSERT INTO environment_roles (role_id, preparation_id, "
+                    "snapshot_id, node_key, display_name, role_type, batch_index, "
+                    "mention, background, expressed_topics, involved_topics) "
+                    "VALUES (:role_id, :preparation_id, :snapshot_id, :node_key, "
+                    ":display_name, :role_type, :batch_index, CAST(:mention AS jsonb), "
+                    "CAST(:background AS jsonb), CAST(:expressed AS jsonb), "
+                    "CAST(:involved AS jsonb)) "
+                    "ON CONFLICT (preparation_id, node_key) DO UPDATE SET "
+                    "display_name = EXCLUDED.display_name, "
+                    "role_type = EXCLUDED.role_type, "
+                    "batch_index = EXCLUDED.batch_index, "
+                    "mention = EXCLUDED.mention, "
+                    "background = EXCLUDED.background, "
+                    "expressed_topics = EXCLUDED.expressed_topics, "
+                    "involved_topics = EXCLUDED.involved_topics, "
+                    "updated_at = clock_timestamp() "
+                    "WHERE environment_roles.published_at IS NULL"
+                ),
+                {
+                    "role_id": role_id,
+                    "preparation_id": preparation.id,
+                    "snapshot_id": preparation.snapshot_id,
+                    "node_key": role.node_key,
+                    "display_name": role.display_name,
+                    "role_type": role.role_type,
+                    "batch_index": batch_index_by_key[role.node_key],
+                    "mention": json.dumps(role.mention, ensure_ascii=False),
+                    "background": json.dumps(role.background, ensure_ascii=False),
+                    "expressed": json.dumps(
+                        list(role.expressed_topics), ensure_ascii=False
+                    ),
+                    "involved": json.dumps(
+                        list(role.involved_topics), ensure_ascii=False
+                    ),
+                },
+            )
+            stored = await db.execute(
+                text(
+                    "SELECT role_id FROM environment_roles "
+                    "WHERE preparation_id = :preparation_id AND node_key = :node_key"
+                ),
+                {
+                    "preparation_id": preparation.id,
+                    "node_key": role.node_key,
+                },
+            )
+            stored_id = stored.scalar_one()
+            if role.sources:
+                await db.execute(
+                    text(
+                        "INSERT INTO environment_role_sources (preparation_id, "
+                        "snapshot_id, role_id, material_field, field_index, "
+                        "source_index, target_kind, target_key, evidence_index, "
+                        "claim_nature) VALUES (:preparation_id, :snapshot_id, "
+                        ":role_id, :material_field, :field_index, :source_index, "
+                        ":target_kind, :target_key, :evidence_index, :claim_nature) "
+                        "ON CONFLICT DO NOTHING"
+                    ),
+                    [
+                        {
+                            "preparation_id": preparation.id,
+                            "snapshot_id": preparation.snapshot_id,
+                            "role_id": stored_id,
+                            "material_field": ref.material_field,
+                            "field_index": ref.field_index,
+                            "source_index": ref.source_index,
+                            "target_kind": ref.target_kind,
+                            "target_key": ref.target_key,
+                            "evidence_index": ref.evidence_index,
+                            "claim_nature": ref.claim_nature,
+                        }
+                        for ref in role.sources
+                    ],
+                )
+        batch_count = len({item for item in batch_index_by_key.values()})
+        extra = {
+            "eligibleRoles": len(ordered),
+            "totalRoles": len(ordered),
+            "profiledRoles": 0,
+            "previewRoleCount": 0,
+            "batchCount": batch_count,
+        }
+        return await _commit_prep_step(
+            db,
+            claim,
+            step=2,
+            step_key="select",
+            lease_seconds=lease_seconds,
+            extra=extra,
+        )
+
+
+def _profile_inputs(
+    role: environment_store.EnvironmentRoleRow,
+) -> ProfileRole:
+    expressed = [
+        str(item.get("text") or "") for item in role.expressed_topics
+    ]
+    involved = [str(item.get("text") or "") for item in role.involved_topics]
+    return ProfileRole(
+        role_key=role.node_key,
+        display_name=role.display_name,
+        role_type=role.role_type,
+        mention=str(role.mention.get("text") or ""),
+        background=str(role.background.get("text") or ""),
+        expressed_topics=tuple(item for item in expressed if item),
+        involved_topics=tuple(item for item in involved if item),
+    )
+
+
+async def _commit_prep_batch(
+    db: AsyncSession,
+    claim: Claim,
+    *,
+    preparation: environment_store.EnvironmentPreparation,
+    batch_index: int,
+    batch_roles: Sequence[environment_store.EnvironmentRoleRow],
+    profile: object,
+    is_last: bool,
+    lease_seconds: float,
+    total_roles: int,
+    batch_count: int,
+) -> str:
+    status, _row = await _prep_guard(db, claim, step=3)
+    if status != "ready":
+        return status
+    role_map = getattr(profile, "roles")
+    for role in batch_roles:
+        simulation = role_map.get(role.node_key)
+        if simulation is None:
+            await db.rollback()
+            raise PreparationWorkError(
+                "invalid_model_output", "画像输出缺少角色"
+            )
+        validate_simulation(simulation)
+        await db.execute(
+            text(
+                "UPDATE environment_roles SET simulation = CAST(:simulation AS jsonb), "
+                "preview_ready_at = COALESCE(preview_ready_at, clock_timestamp()), "
+                "updated_at = clock_timestamp() "
+                "WHERE preparation_id = :preparation_id AND role_id = :role_id "
+                "AND published_at IS NULL"
+            ),
+            {
+                "simulation": json.dumps(simulation, ensure_ascii=False),
+                "preparation_id": preparation.id,
+                "role_id": role.role_id,
+            },
+        )
+    counts = await db.execute(
+        text(
+            "SELECT count(*) FILTER (WHERE preview_ready_at IS NOT NULL) "
+            "AS preview_count, count(DISTINCT batch_index) FILTER "
+            "(WHERE preview_ready_at IS NOT NULL) AS preview_batches "
+            "FROM environment_roles WHERE preparation_id = :preparation_id"
+        ),
+        {"preparation_id": preparation.id},
+    )
+    row = counts.one()
+    preview_count = int(row.preview_count)
+    preview_batches = int(row.preview_batches)
+    await db.execute(
+        text(
+            "UPDATE environment_preparations SET "
+            "preview_role_count = :preview_count, "
+            "profile_batch_count = :preview_batches, "
+            "updated_at = clock_timestamp() WHERE id = :preparation_id"
+        ),
+        {
+            "preview_count": preview_count,
+            "preview_batches": preview_batches,
+            "preparation_id": preparation.id,
+        },
+    )
+    batch_topics = [
+        {
+            "text": text,
+            "origin": "simulation",
+            "claimNature": None,
+            "claimNatureKnown": False,
+            "sources": [],
+        }
+        for text in getattr(profile, "initial_topics", ())
+        if str(text).strip()
+    ]
+    if batch_topics:
+        await db.execute(
+            text(
+                "UPDATE environment_preparations SET profile_topics = ("
+                "SELECT COALESCE(jsonb_agg(DISTINCT item), '[]'::jsonb) "
+                "FROM jsonb_array_elements(profile_topics || CAST(:new AS jsonb)) "
+                "AS item) WHERE id = :preparation_id"
+            ),
+            {
+                "new": json.dumps(batch_topics, ensure_ascii=False),
+                "preparation_id": preparation.id,
+            },
+        )
+    if is_last:
+        inserted = await db.execute(
+            text(
+                "INSERT INTO run_steps (run_id, step_index, step_key, payload) "
+                "VALUES (:run_id, 3, 'profile', CAST(:payload AS jsonb)) "
+                "ON CONFLICT (run_id, step_index) DO NOTHING"
+            ),
+            {
+                "run_id": claim.run_id,
+                "payload": json.dumps(
+                    {
+                        "step": 3,
+                        "batchCount": batch_count,
+                        "previewRoleCount": preview_count,
+                    },
+                    ensure_ascii=False,
+                ),
+            },
+        )
+        if inserted.rowcount != 1:
+            await db.rollback()
+            return "duplicate"
+    seq = await run_events.max_seq(db, run_id=claim.run_id) + 1
+    payload = await _prep_event_payload(
+        preparation,
+        step=3,
+        step_key="profile",
+        stepsApplied=3 if is_last else 2,
+        totalSteps=claim.total_steps,
+        batchIndex=batch_index,
+        batchRoleIds=[str(role.role_id) for role in batch_roles],
+        eligibleRoles=total_roles,
+        totalRoles=total_roles,
+        profiledRoles=preview_count,
+        previewRoleCount=preview_count,
+        batchCount=batch_count,
+        batchCommitted=is_last,
+    )
+    await run_events.append_event(
+        db,
+        run_id=claim.run_id,
+        seq=seq,
+        type="progress",
+        stage=claim.stage,
+        simulated_at=run_events.simulated_time(claim.simulated_epoch, seq),
+        payload=payload,
+    )
+    if is_last:
+        await _prep_advance(
+            db, claim, step=3, lease_seconds=lease_seconds, terminal=False
+        )
+    else:
+        updated = await db.execute(
+            text(
+                "UPDATE jobs SET lease_expires_at = clock_timestamp() + "
+                "make_interval(secs => " + LEASE_SECONDS_PARAM + "), "
+                "updated_at = clock_timestamp() WHERE id = :job_id "
+                "AND lease_token = :lease_token AND status = 'running'"
+            ),
+            {
+                "job_id": claim.job_id,
+                "lease_token": claim.lease_token,
+                "lease_seconds": lease_seconds,
+            },
+        )
+        if updated.rowcount != 1:
+            await db.rollback()
+            return "lost"
+    await db.commit()
+    return "progress"
+
+
+async def _flush_preparation_calls(
+    claim: Claim,
+    *,
+    session_factory: SessionFactory,
+    preparation_id: uuid.UUID,
+    real_delta: int,
+    double_delta: int,
+) -> None:
+    """在 provider 调用边界持久化实际尝试，不依赖批次是否提交成功。"""
+    if real_delta <= 0 and double_delta <= 0:
+        return
+    try:
+        async with session_factory() as db:
+            await db.execute(
+                text(
+                    "UPDATE environment_preparations SET "
+                    "provider_calls_real = provider_calls_real + :real_delta, "
+                    "provider_calls_double = provider_calls_double + :double_delta, "
+                    "updated_at = clock_timestamp() "
+                    "WHERE id = :preparation_id AND run_id = :run_id"
+                ),
+                {
+                    "real_delta": max(0, real_delta),
+                    "double_delta": max(0, double_delta),
+                    "preparation_id": preparation_id,
+                    "run_id": claim.run_id,
+                },
+            )
+            await db.commit()
+    except DB_ERRORS:
+        logger.warning(
+            "准备 provider 计数写入失败 job_id=%s", claim.job_id
+        )
+
+
+async def _prep_profile(
+    claim: Claim,
+    *,
+    session_factory: SessionFactory,
+    stop_event: asyncio.Event | None,
+    lease_seconds: float,
+    heartbeat_seconds: float,
+    config: object,
+    profiler_factory: Callable[[EnvironmentCallMeter], Any],
+) -> str:
+    batch_size = int(getattr(config, "profile_batch_size", 2))
+    async with session_factory() as db:
+        preparation = await environment_store.get_preparation_for_run(
+            db, run_id=claim.run_id
+        )
+        roles = await environment_store.load_roles(db, preparation=preparation)
+        await db.commit()
+    if not roles:
+        raise PreparationWorkError("no_role_candidates", "准备没有角色")
+    batches: dict[int, list[environment_store.EnvironmentRoleRow]] = {}
+    for role in roles:
+        batches.setdefault(role.batch_index, []).append(role)
+    ordered_batches = sorted(batches)
+    first_batch = ordered_batches[0]
+    total_roles = len(roles)
+    batch_count = len(ordered_batches)
+    meter = EnvironmentCallMeter()
+    flushed_real = 0
+    flushed_double = 0
+    profiler = profiler_factory(meter)
+    for batch_index in ordered_batches:
+        batch_roles = sorted(
+            batches[batch_index], key=lambda item: item.node_key
+        )
+        if all(role.preview_ready_at is not None for role in batch_roles):
+            continue
+        ready = await _graph_step_ready(
+            claim, session_factory=session_factory, expected_step=3
+        )
+        if ready != "ready":
+            return ready
+        if stop_event is not None and stop_event.is_set():
+            return "stopped"
+        try:
+            outcome = await _run_with_heartbeat(
+                claim,
+                session_factory=session_factory,
+                lease_seconds=lease_seconds,
+                heartbeat_seconds=heartbeat_seconds,
+                func=profiler.profile,
+                question=preparation.question,
+                roles=[_profile_inputs(role) for role in batch_roles],
+                require_first_speaker=batch_index == first_batch,
+            )
+        finally:
+            await _flush_preparation_calls(
+                claim,
+                session_factory=session_factory,
+                preparation_id=preparation.id,
+                real_delta=meter.real - flushed_real,
+                double_delta=meter.double - flushed_double,
+            )
+            flushed_real = meter.real
+            flushed_double = meter.double
+        is_last = batch_index == ordered_batches[-1]
+        async with session_factory() as db:
+            status = await _commit_prep_batch(
+                db,
+                claim,
+                preparation=preparation,
+                batch_index=batch_index,
+                batch_roles=batch_roles,
+                profile=outcome.profile,
+                is_last=is_last,
+                lease_seconds=lease_seconds,
+                total_roles=total_roles,
+                batch_count=batch_count,
+            )
+        if status != "progress":
+            return status
+        delay = int(getattr(config, "profile_delay_ms", 0)) / 1000
+        if is_last is False and delay > 0:
+            # 仅用于验收放大“第一批已提交、第二批生成中”的窗口。
+            await asyncio.sleep(delay)
+    # 所有批次都已预览但第 3 步尚未提交时（例如上轮最后一批提交后接管），补齐步骤。
+    async with session_factory() as db:
+        preparation = await environment_store.get_preparation_for_run(
+            db, run_id=claim.run_id
+        )
+        roles = await environment_store.load_roles(db, preparation=preparation)
+        preview_count = len(
+            [role for role in roles if role.preview_ready_at is not None]
+        )
+        result = await _commit_prep_step(
+            db,
+            claim,
+            step=3,
+            step_key="profile",
+            lease_seconds=lease_seconds,
+            extra={
+                "eligibleRoles": total_roles,
+                "totalRoles": total_roles,
+                "profiledRoles": preview_count,
+                "previewRoleCount": preview_count,
+                "batchCount": batch_count,
+                "batchCommitted": True,
+            },
+        )
+        return "progress" if result == "duplicate" else result
+
+
+async def _compose_environment(
+    db: AsyncSession,
+    *,
+    preparation: environment_store.EnvironmentPreparation,
+    snapshot: graph_store.GraphSnapshot,
+) -> dict[str, object]:
+    selection = environment_store.select_for_snapshot(snapshot)
+    roles = await environment_store.load_roles(db, preparation=preparation)
+    if not roles:
+        raise PreparationWorkError("no_role_candidates", "准备没有角色")
+    for role in roles:
+        if role.simulation is None:
+            raise PreparationWorkError(
+                "preparation_not_ready", "角色画像尚未完成"
+            )
+        try:
+            validate_simulation(role.simulation)
+        except EnvironmentContractError as exc:
+            raise PreparationWorkError(exc.code, exc.message) from None
+    ordered = sorted(
+        roles,
+        key=lambda item: (
+            item.batch_index,
+            int((item.simulation or {}).get("orderIndex", 0)),
+            str(item.role_id),
+        ),
+    )
+    first = [role for role in ordered if bool((role.simulation or {}).get("firstSpeaker"))]
+    if not first:
+        raise PreparationWorkError(
+            "activation_order_invalid", "缺少首发角色"
+        )
+    if ordered[: len(first)] != first:
+        raise PreparationWorkError(
+            "activation_order_invalid", "首发角色必须是激活顺序前缀"
+        )
+
+    topics: list[dict[str, object]] = [
+        {
+            "topicId": "t1",
+            "text": preparation.question,
+            "origin": "question",
+            "claimNature": None,
+            "claimNatureKnown": False,
+            "sources": [],
+        }
+    ]
+    seen = {preparation.question.strip()}
+    topic_id_by_text = {preparation.question.strip(): "t1"}
+
+    async def add_topic(
+        text: str,
+        origin: str,
+        claim_nature: str | None,
+        sources: list[dict[str, object]],
+    ) -> None:
+        value = text.strip()
+        if not value:
+            return
+        if value in seen:
+            return
+        seen.add(value)
+        topic_id = f"t{len(topics) + 1}"
+        topic_id_by_text[value] = topic_id
+        topics.append(
+            {
+                "topicId": topic_id,
+                "text": value,
+                "origin": origin,
+                "claimNature": claim_nature,
+                "claimNatureKnown": claim_nature is not None,
+                "sources": sources,
+            }
+        )
+
+    for draft in selection.material_topics:
+        bodies = await environment_store.source_bodies_for_refs(
+            db, preparation=preparation, refs=draft.sources
+        )
+        await add_topic(
+            draft.text, draft.origin, draft.claim_nature, bodies
+        )
+    for topic in preparation.profile_topics:
+        if not isinstance(topic, dict):
+            continue
+        await add_topic(
+            str(topic.get("text") or ""),
+            str(topic.get("origin") or "simulation"),
+            topic.get("claimNature"),
+            list(topic.get("sources") or []),
+        )
+    for role in ordered:
+        for text in (role.simulation or {}).get("topics", []):
+            await add_topic(str(text), "simulation", None, [])
+    for role in first:
+        text = str((role.simulation or {}).get("firstTopic") or "").strip()
+        if not text:
+            raise PreparationWorkError(
+                "first_topic_missing", "首发角色缺少首发话题"
+            )
+        await add_topic(text, "simulation", None, [])
+
+    activation = []
+    for position, role in enumerate(ordered, start=1):
+        simulation = role.simulation or {}
+        first_topic = (
+            str(simulation.get("firstTopic") or "").strip()
+            if role in first
+            else ""
+        )
+        topic_id = topic_id_by_text.get(first_topic) if first_topic else None
+        if role in first and topic_id is None:
+            raise PreparationWorkError(
+                "first_topic_missing", "首发话题不在初始话题中"
+            )
+        activation.append(
+            {
+                "position": position,
+                "roleId": str(role.role_id),
+                "isFirstSpeaker": role in first,
+                "firstTopicId": topic_id,
+            }
+        )
+    return {
+        "platforms": [
+            {"platformKey": key, "nativePlatform": native}
+            for key, native in environment_store.PLATFORM_MAPPING
+        ],
+        "topics": topics,
+        "activation": activation,
+    }
+
+
+async def _prep_compose(
+    claim: Claim,
+    *,
+    session_factory: SessionFactory,
+    lease_seconds: float,
+    heartbeat_seconds: float,
+    config: object,
+) -> str:
+    del heartbeat_seconds
+    async with session_factory() as db:
+        preparation = await environment_store.get_preparation_for_run(
+            db, run_id=claim.run_id
+        )
+        snapshot = await environment_store.load_bound_snapshot(db, preparation)
+        composed = await _compose_environment(
+            db, preparation=preparation, snapshot=snapshot
+        )
+        extra = {
+            "eligibleRoles": len(composed["activation"]),  # type: ignore[arg-type]
+            "totalRoles": len(composed["activation"]),  # type: ignore[arg-type]
+            "profiledRoles": preparation.preview_role_count,
+            "previewRoleCount": preparation.preview_role_count,
+            "rounds": preparation.rounds,
+            "topicCount": len(composed["topics"]),  # type: ignore[arg-type]
+        }
+        return await _commit_prep_step(
+            db,
+            claim,
+            step=4,
+            step_key="compose",
+            lease_seconds=lease_seconds,
+            extra=extra,
+            before_commit=None,
+        )
+
+
+async def _read_compose_payload(
+    db: AsyncSession, *, run_id: uuid.UUID
+) -> dict[str, object] | None:
+    result = await db.execute(
+        text(
+            "SELECT payload::text AS payload FROM run_steps "
+            "WHERE run_id = :run_id AND step_index = 4"
+        ),
+        {"run_id": run_id},
+    )
+    row = result.first()
+    if row is None:
+        return None
+    try:
+        payload = json.loads(row.payload)
+    except (TypeError, json.JSONDecodeError):
+        return None
+    composed = payload.get("composed") if isinstance(payload, dict) else None
+    return composed if isinstance(composed, dict) else None
+
+
+async def _prep_publish(
+    claim: Claim,
+    *,
+    session_factory: SessionFactory,
+    lease_seconds: float,
+    heartbeat_seconds: float,
+    config: object,
+) -> str:
+    del heartbeat_seconds
+    async with session_factory() as db:
+        preparation = await environment_store.get_preparation_for_run(
+            db, run_id=claim.run_id
+        )
+        snapshot = await environment_store.load_bound_snapshot(db, preparation)
+        composed = await _compose_environment(
+            db, preparation=preparation, snapshot=snapshot
+        )
+        roles = await environment_store.load_roles(db, preparation=preparation)
+        role_ids = {str(role.role_id) for role in roles}
+        order = [item["roleId"] for item in composed["activation"]]  # type: ignore[index]
+        if len(order) != len(role_ids) or set(order) != role_ids:
+            raise PreparationWorkError(
+                "activation_order_invalid", "激活顺序必须覆盖全部角色"
+            )
+        first = [
+            item
+            for item in composed["activation"]  # type: ignore[index]
+            if item["isFirstSpeaker"]
+        ]
+        if not first or order[: len(first)] != [item["roleId"] for item in first]:
+            raise PreparationWorkError(
+                "activation_order_invalid", "首发角色必须是激活顺序前缀"
+            )
+        status, _row = await _prep_guard(db, claim, step=5)
+        if status != "ready":
+            return status
+        await db.execute(
+            text(
+                "DELETE FROM environment_activation WHERE preparation_id = :prep"
+            ),
+            {"prep": preparation.id},
+        )
+        await db.execute(
+            text(
+                "DELETE FROM environment_platforms WHERE preparation_id = :prep"
+            ),
+            {"prep": preparation.id},
+        )
+        await db.execute(
+            text("DELETE FROM environment_topics WHERE preparation_id = :prep"),
+            {"prep": preparation.id},
+        )
+        for platform in composed["platforms"]:  # type: ignore[index]
+            await db.execute(
+                text(
+                    "INSERT INTO environment_platforms (preparation_id, "
+                    "platform_key, native_platform, enabled) "
+                    "VALUES (:prep, :key, :native, true)"
+                ),
+                {
+                    "prep": preparation.id,
+                    "key": platform["platformKey"],
+                    "native": platform["nativePlatform"],
+                },
+            )
+        for topic in composed["topics"]:  # type: ignore[index]
+            await db.execute(
+                text(
+                    "INSERT INTO environment_topics (preparation_id, topic_id, "
+                    "topic_index, text, origin, claim_nature, claim_nature_known, "
+                    "sources) VALUES (:prep, :topic_id, :topic_index, :text, "
+                    ":origin, :claim, :known, CAST(:sources AS jsonb))"
+                ),
+                {
+                    "prep": preparation.id,
+                    "topic_id": topic["topicId"],
+                    "topic_index": int(str(topic["topicId"])[1:]) - 1,
+                    "text": topic["text"],
+                    "origin": topic["origin"],
+                    "claim": topic["claimNature"],
+                    "known": topic["claimNatureKnown"],
+                    "sources": json.dumps(topic["sources"], ensure_ascii=False),
+                },
+            )
+        for item in composed["activation"]:  # type: ignore[index]
+            await db.execute(
+                text(
+                    "INSERT INTO environment_activation (preparation_id, "
+                    "position, role_id, is_first_speaker, first_topic_id) "
+                    "VALUES (:prep, :position, :role_id, :first, :topic)"
+                ),
+                {
+                    "prep": preparation.id,
+                    "position": item["position"],
+                    "role_id": item["roleId"],
+                    "first": item["isFirstSpeaker"],
+                    "topic": item["firstTopicId"],
+                },
+            )
+        await db.execute(
+            text(
+                "UPDATE environment_roles SET published_at = clock_timestamp(), "
+                "updated_at = clock_timestamp() WHERE preparation_id = :prep "
+                "AND preview_ready_at IS NOT NULL"
+            ),
+            {"prep": preparation.id},
+        )
+        await db.execute(
+            text(
+                "UPDATE environment_preparations SET phase = 'ready', "
+                "failure_code = NULL, failure_message = NULL, "
+                "finished_at = clock_timestamp(), updated_at = clock_timestamp() "
+                "WHERE id = :prep"
+            ),
+            {"prep": preparation.id},
+        )
+        extra = {
+            "eligibleRoles": len(roles),
+            "totalRoles": len(roles),
+            "profiledRoles": len(roles),
+            "previewRoleCount": len(roles),
+            "rounds": preparation.rounds,
+            "topicCount": len(composed["topics"]),  # type: ignore[arg-type]
+            "phase": "ready",
+        }
+        return await _commit_prep_step(
+            db,
+            claim,
+            step=5,
+            step_key="publish",
+            lease_seconds=lease_seconds,
+            terminal=True,
+            extra=extra,
+        )
+
+
+async def _fail_preparation(
+    claim: Claim,
+    *,
+    session_factory: SessionFactory,
+    code: str,
+    message: str,
+) -> str:
+    async with session_factory() as db:
+        try:
+            row = await _locked_job(db, claim)
+            if row is None:
+                await db.rollback()
+                return "lost"
+            if row.status in TERMINAL_STATUSES:  # type: ignore[attr-defined]
+                await db.rollback()
+                return str(row.status)  # type: ignore[attr-defined]
+            db_now = await _db_now(db)
+            if not _lease_valid(row, claim, db_now):
+                await db.rollback()
+                return "lost"
+            preparation = await environment_store.get_preparation_for_run(
+                db, run_id=claim.run_id
+            )
+            seq = await run_events.max_seq(db, run_id=claim.run_id) + 1
+            await run_events.append_event(
+                db,
+                run_id=claim.run_id,
+                seq=seq,
+                type="failed",
+                stage=claim.stage,
+                simulated_at=run_events.simulated_time(
+                    claim.simulated_epoch, seq
+                ),
+                payload={
+                    "preparationId": str(preparation.id),
+                    "buildId": str(preparation.build_id),
+                    "snapshotId": str(preparation.snapshot_id),
+                    "step": int(row.next_step),  # type: ignore[attr-defined]
+                    "stepKey": (
+                        PREPARE_STEP_KEYS[min(int(row.next_step), 4)]  # type: ignore[attr-defined]
+                    ),
+                    "phase": "failed",
+                    "reason": code,
+                    "stepsApplied": int(row.next_step),  # type: ignore[attr-defined]
+                    "totalSteps": claim.total_steps,
+                    "previewRoleCount": preparation.preview_role_count,
+                },
+            )
+            await db.execute(
+                text(
+                    "UPDATE environment_preparations SET phase = 'failed', "
+                    "failure_code = :code, failure_message = :message, "
+                    "finished_at = clock_timestamp(), updated_at = clock_timestamp() "
+                    "WHERE id = :prep"
+                ),
+                {"code": code, "message": message, "prep": preparation.id},
+            )
+            await _finish(
+                db,
+                claim,
+                int(row.next_step),  # type: ignore[attr-defined]
+                status="failed",
+                reason=code,
+            )
+            await db.commit()
+            return "failed"
+        except LeaseLost:
+            await db.rollback()
+            return "lost"
+        except DB_ERRORS:
+            await db.rollback()
+            raise
+
+
+async def execute_preparation(
+    claim: Claim,
+    *,
+    session_factory: SessionFactory,
+    stop_event: asyncio.Event | None,
+    lease_seconds: float,
+    heartbeat_seconds: float,
+    config: object,
+    profiler_factory: Callable[[EnvironmentCallMeter], Any],
+) -> str:
+    """按五步执行角色与环境准备；失败写稳定原因码，不发布半成品。"""
+    try:
+        for step in range(claim.next_step + 1, PREPARE_TOTAL_STEPS + 1):
+            if stop_event is not None and stop_event.is_set():
+                return "stopped"
+            if step == 1:
+                outcome = await _prep_bind(
+                    claim,
+                    session_factory=session_factory,
+                    stop_event=stop_event,
+                    lease_seconds=lease_seconds,
+                    heartbeat_seconds=heartbeat_seconds,
+                    config=config,
+                )
+            elif step == 2:
+                outcome = await _prep_select(
+                    claim,
+                    session_factory=session_factory,
+                    lease_seconds=lease_seconds,
+                    heartbeat_seconds=heartbeat_seconds,
+                    config=config,
+                )
+            elif step == 3:
+                outcome = await _prep_profile(
+                    claim,
+                    session_factory=session_factory,
+                    stop_event=stop_event,
+                    lease_seconds=lease_seconds,
+                    heartbeat_seconds=heartbeat_seconds,
+                    config=config,
+                    profiler_factory=profiler_factory,
+                )
+            elif step == 4:
+                outcome = await _prep_compose(
+                    claim,
+                    session_factory=session_factory,
+                    lease_seconds=lease_seconds,
+                    heartbeat_seconds=heartbeat_seconds,
+                    config=config,
+                )
+            else:
+                outcome = await _prep_publish(
+                    claim,
+                    session_factory=session_factory,
+                    lease_seconds=lease_seconds,
+                    heartbeat_seconds=heartbeat_seconds,
+                    config=config,
+                )
+            if outcome in ("succeeded", "completed"):
+                return "succeeded"
+            if outcome in ("progress", "duplicate"):
+                continue
+            return outcome
+        return "succeeded"
+    except PreparationWorkError as exc:
+        logger.warning("准备失败 job_id=%s code=%s", claim.job_id, exc.code)
+        return await _fail_preparation(
+            claim,
+            session_factory=session_factory,
+            code=exc.code,
+            message=exc.message,
+        )
+    except EnvironmentProfileError as exc:
+        code = (
+            exc.code
+            if exc.code in ("invalid_model_output", "no_role_candidates")
+            else "model_unavailable"
+        )
+        logger.warning("准备画像失败 job_id=%s code=%s", claim.job_id, code)
+        return await _fail_preparation(
+            claim,
+            session_factory=session_factory,
+            code=code,
+            message=(
+                "画像输出不合法"
+                if code == "invalid_model_output"
+                else "画像服务暂时不可用"
+            ),
+        )
+    except EnvironmentContractError as exc:
+        logger.warning("准备契约失败 job_id=%s code=%s", claim.job_id, exc.code)
+        return await _fail_preparation(
+            claim,
+            session_factory=session_factory,
+            code="invalid_model_output",
+            message="画像输出不合法",
+        )
+    except EnvironmentConflict as exc:
+        logger.warning("准备状态冲突 job_id=%s code=%s", claim.job_id, exc.code)
+        return await _fail_preparation(
+            claim,
+            session_factory=session_factory,
+            code=exc.code,
+            message=exc.message,
+        )
+    except Exception as exc:  # noqa: BLE001 - 单任务失败写稳定终态
+        logger.exception(
+            "准备异常 job_id=%s: %s", claim.job_id, type(exc).__name__
+        )
+        return await _fail_preparation(
+            claim,
+            session_factory=session_factory,
+            code="preparation_failed",
+            message="准备执行失败，请稍后重试",
         )
 
 

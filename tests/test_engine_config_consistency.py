@@ -20,6 +20,14 @@ from app.engines.business_config import (
     DEFAULT_EVIDENCE_GRAPH_QUESTION_MAX_CHARS,
     BusinessGraphConfig,
 )
+from app.engines.environment_config import EnvironmentConfig
+from app.engines.environment_contracts import (
+    DEFAULT_DURATION_HOURS,
+    DEFAULT_MAX_MANUAL_ROUNDS,
+    DEFAULT_MINUTES_PER_ROUND,
+    DEFAULT_MODEL_TIMEOUT_SECONDS as DEFAULT_ENVIRONMENT_MODEL_TIMEOUT_SECONDS,
+    DEFAULT_PROFILE_BATCH_SIZE,
+)
 from app.engines.settings import (
     DEFAULT_GRAPH_INDEX_TIMEOUT_SECONDS,
     DEFAULT_MODEL_TIMEOUT_SECONDS,
@@ -43,6 +51,16 @@ ENGINE_VARS = (
     "SIMULATION_TIMEOUT_SECONDS",
     "SMOKE_LIVE_TOTAL_TIMEOUT_SECONDS",
 )
+ENVIRONMENT_VARS = (
+    "ENVIRONMENT_MODEL_PROVIDER",
+    "ENVIRONMENT_ALLOW_STUB",
+    "ENVIRONMENT_DEFAULT_DURATION_HOURS",
+    "ENVIRONMENT_DEFAULT_MINUTES_PER_ROUND",
+    "ENVIRONMENT_MAX_MANUAL_ROUNDS",
+    "ENVIRONMENT_PROFILE_BATCH_SIZE",
+    "ENVIRONMENT_MODEL_TIMEOUT_SECONDS",
+    "ENVIRONMENT_PROFILE_DELAY_MS",
+)
 BUSINESS_GRAPH_VARS = (
     "EVIDENCE_GRAPH_MODEL_PROVIDER",
     "EVIDENCE_GRAPH_GRAPH_PROVIDER",
@@ -64,7 +82,7 @@ class EngineConfigConsistencyTests(unittest.TestCase):
         compose = (REPO_ROOT / "docker-compose.yml").read_text(encoding="utf-8")
         readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
 
-        for name in ENGINE_VARS + BUSINESS_GRAPH_VARS:
+        for name in ENGINE_VARS + BUSINESS_GRAPH_VARS + ENVIRONMENT_VARS:
             with self.subTest(name=name):
                 self.assertIn(f"{name}=", env_example)
                 self.assertIn(f"{name}: ${{{name}:-", compose)
@@ -152,6 +170,44 @@ class EngineConfigConsistencyTests(unittest.TestCase):
             pure.max_sources_per_item,
             app_settings.evidence_graph_max_sources_per_item,
         )
+
+    def test_environment_defaults_match_app_and_pure_config(self) -> None:
+        app_settings = Settings()
+        pure = EnvironmentConfig.from_env({})
+
+        self.assertEqual(
+            app_settings.environment_model_provider,
+            pure.model_provider,
+        )
+        self.assertEqual(
+            app_settings.environment_allow_stub,
+            pure.allow_stub,
+        )
+        self.assertEqual(
+            app_settings.environment_default_duration_hours,
+            DEFAULT_DURATION_HOURS,
+        )
+        self.assertEqual(
+            app_settings.environment_default_minutes_per_round,
+            DEFAULT_MINUTES_PER_ROUND,
+        )
+        self.assertEqual(
+            app_settings.environment_max_manual_rounds,
+            DEFAULT_MAX_MANUAL_ROUNDS,
+        )
+        self.assertEqual(
+            app_settings.environment_profile_batch_size,
+            DEFAULT_PROFILE_BATCH_SIZE,
+        )
+        self.assertEqual(
+            app_settings.environment_model_timeout_seconds,
+            DEFAULT_ENVIRONMENT_MODEL_TIMEOUT_SECONDS,
+        )
+        self.assertEqual(pure.default_duration_hours, 72)
+        self.assertEqual(pure.default_minutes_per_round, 60)
+        self.assertEqual(pure.max_manual_rounds, 1000)
+        self.assertFalse(pure.allow_stub)
+        self.assertEqual(pure.resolve_provider(), "unconfigured")
 
 
 if __name__ == "__main__":

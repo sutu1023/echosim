@@ -47,6 +47,23 @@ class LeaseLost(Exception):
     """本次领取的租约令牌已失效或任务已进入终态，调用方必须停止写入。"""
 
 
+class EnvironmentBuildNotFound(Exception):
+    """准备引用的 build 不存在、属于他人或 ID 非法，对外统一 404 `图谱不存在`。"""
+
+
+class EnvironmentPreparationNotFound(Exception):
+    """准备不存在、属于他人或 ID 非法，对外统一 404 `准备不存在`。"""
+
+
+class EnvironmentConflict(Exception):
+    """准备状态、版本、轮数或归属冲突；`code` 为稳定原因码。"""
+
+    def __init__(self, code: str, message: str = "准备请求与当前状态冲突") -> None:
+        super().__init__(code)
+        self.code = code
+        self.message = message
+
+
 class GraphBuildNotFound(Exception):
     """建图任务不存在、属于其他项目或 ID 非法，对外统一 404。"""
 

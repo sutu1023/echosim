@@ -46,8 +46,11 @@ const sourceText = ref('')
 const sourceError = ref('')
 const sourceRef = ref<HTMLElement | null>(null)
 const fileInput = ref<HTMLInputElement | null>(null)
+const autoSourceKey = ref('')
 
 let pollTimer: number | undefined
+let detailToken = 0
+let sourceToken = 0
 
 function basePath(): string {
   return `/api/projects/${encodeURIComponent(props.projectId)}/documents`
@@ -110,6 +113,7 @@ async function loadList(showLoading = true): Promise<void> {
 }
 
 async function loadFirstChunks(id: string): Promise<void> {
+  const token = detailToken
   chunkError.value = ''
   chunksLoading.value = true
   try {
@@ -118,6 +122,9 @@ async function loadFirstChunks(id: string): Promise<void> {
       total: number
       ready: boolean
     }>(`${documentPath(id)}/chunks?after=0&limit=20`)
+    if (token !== detailToken || props.documentId !== id) {
+      return
+    }
     chunks.value = data.chunks
   } catch (caught) {
     if (await handleAuth(caught)) {
@@ -129,10 +136,54 @@ async function loadFirstChunks(id: string): Promise<void> {
   }
 }
 
+function requestedSource(): { start: number; end: number } | null {
+  if (route.query.source !== '1') {
+    return null
+  }
+  const start = Number(route.query.sourceStart)
+  const end = Number(route.query.sourceEnd)
+  if (
+    !Number.isInteger(start) ||
+    !Number.isInteger(end) ||
+    start < 0 ||
+    end <= start
+  ) {
+    return null
+  }
+  return { start, end }
+}
+
+async function openRequestedSource(): Promise<void> {
+  const range = requestedSource()
+  const document = selected.value
+  if (!range || !document || document.kind === 'pdf') {
+    return
+  }
+  const key = `${document.documentId}:${range.start}:${range.end}`
+  if (autoSourceKey.value === key) {
+    return
+  }
+  autoSourceKey.value = key
+  await viewSource({
+    index: 0,
+    pageNo: null,
+    paragraphStart: null,
+    paragraphEnd: null,
+    sourceStart: range.start,
+    sourceEnd: range.end,
+    text: '',
+    sourceUrl: null,
+  })
+}
+
 async function loadDetail(id: string): Promise<void> {
+  const token = ++detailToken
   detailLoading.value = true
   try {
     const data = await api.get<{ document: MaterialDocument }>(documentPath(id))
+    if (token !== detailToken || props.documentId !== id) {
+      return
+    }
     selected.value = data.document
     const entry = documents.value.find((item) => item.documentId === id)
     if (entry) {
@@ -140,6 +191,9 @@ async function loadDetail(id: string): Promise<void> {
     }
     if (data.document.status === 'ready') {
       await loadFirstChunks(id)
+      if (token === detailToken && props.documentId === id) {
+        await openRequestedSource()
+      }
     } else {
       chunks.value = []
     }
@@ -160,8 +214,10 @@ async function loadDetail(id: string): Promise<void> {
 }
 
 async function selectDocument(id: string): Promise<void> {
+  sourceToken += 1
   sourceOpen.value = false
   sourceText.value = ''
+  autoSourceKey.value = ''
   selected.value =
     documents.value.find((item) => item.documentId === id) ?? null
   emit('select', id)
@@ -169,7 +225,11 @@ async function selectDocument(id: string): Promise<void> {
 }
 
 function backToList(): void {
+  sourceToken += 1
+  detailToken += 1
   sourceOpen.value = false
+  sourceText.value = ''
+  autoSourceKey.value = ''
   selected.value = null
   chunks.value = []
   emit('select', null)
@@ -259,19 +319,30 @@ function highlight(start: number, end: number): void {
 }
 
 async function viewSource(chunk: MaterialChunk): Promise<void> {
-  if (!selected.value) {
+  const document = selected.value
+  if (!document || document.kind === 'pdf') {
     return
   }
-  if (selected.value.kind === 'pdf') {
-    return
-  }
+  const token = ++sourceToken
   sourceOpen.value = true
   sourceError.value = ''
   try {
     if (!sourceText.value) {
-      sourceText.value = await api.text(
-        `${documentPath(selected.value.documentId)}/source`,
-      )
+      const loaded = await api.text(`${documentPath(document.documentId)}/source`)
+      if (
+        token !== sourceToken ||
+        selected.value?.documentId !== document.documentId ||
+        props.documentId !== document.documentId
+      ) {
+        return
+      }
+      sourceText.value = loaded
+    }
+    if (
+      token !== sourceToken ||
+      selected.value?.documentId !== document.documentId
+    ) {
+      return
     }
     await nextTick()
     highlight(chunk.sourceStart, chunk.sourceEnd)
@@ -359,8 +430,19 @@ onBeforeUnmount(() => {
 })
 
 watch(
+  () => [route.query.source, route.query.sourceStart, route.query.sourceEnd],
+  async () => {
+    await openRequestedSource()
+  },
+)
+
+watch(
   () => props.documentId,
   async (value) => {
+    sourceToken += 1
+    sourceOpen.value = false
+    sourceText.value = ''
+    autoSourceKey.value = ''
     if (value === null) {
       selected.value = null
       chunks.value = []

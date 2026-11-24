@@ -122,6 +122,21 @@ make user EMAIL=a@example.com  # 从标准输入读取密码，创建/更新账�
 - `canContinue` 只由服务端根据最终已发布快照判定；前端不得自行推断可继续。
 - 默认 `make up`、默认 `make verify` 与 CI 不得触发业务建图真实外呼；离线走查必须显式启用 `EVIDENCE_GRAPH_ALLOW_STUB=true` 与 stub provider。私有 25 页报告与原创演示材料只留在仓库外，不得进入夹具、日志或报告。
 
+## 角色与环境准备
+
+- 第二阶段只能引用指定 build 的已发布最终快照；`buildId`、`snapshotId` 与 `question` 必须固定，角色、角色来源与冻结选择必须引用同一 `snapshotId`，不得跨 build 读取角色。
+- 角色候选直接读取已发布快照，同时识别中文显示类型与旧英文类型；`summary=null` 不得阻止筛选。只出现在关系终点的机构仍可入选；事件、待核实说法、建议与平台渠道不得成为角色。
+- 材料事实与模拟设定必须分层：节点来源只证明“材料提及”，关系支持原句才能支持背景或表达话题；仅关联时显示“材料涉及的话题”，无证据显示“材料未说明”；模型补充内容只标记为“模拟设定”。关系 `claimNature` 为空时保留未知，不得默认成其他材料陈述。
+- 来源定位复用证据图谱：PDF 使用物理页与 `#page=`，文本使用 UTF-16 偏移；来源跳转保留 `layout`、`lang`、`build`、`preparation` 与 `document`。文本深链接首次进入和切换材料都必须加载对应原文并按区间高亮，旧材料的迟到响应不得覆盖新材料。
+- 未知类型推断必须绑定当前主体名称及其所在从句，不得整句借用其他主体的身份；表达话题必须由当前主体自己的动作支持，同句其他人的“表示/主张”不得算给该主体。证据不足时保留未知或材料关联。角色详情显示该角色的 `simulation.topics` 并标为模拟设定。
+- 准备任务固定为 `bind`、`select`、`profile`、`compose`、`publish` 五步，复用现有 `runs`/`jobs`/租约/`run_steps`/事件事务。`profile` 按稳定批次写入 `preview_ready_at`，每批与预览计数、批次事件在同一事务提交；第 5 步在单事务原子发布最终角色、平台、话题、顺序与 `phase=ready`。
+- 普通开始遇到 `preparing`/`ready` 必须返回 200 与同一身份；失败或取消后普通开始返回 409 `preparation_retry_required`，只有显式重试创建新准备。worker 接手保持原身份并复用已提交批次，不重复生成角色或步骤。
+- 轮数由服务端计算与持久化：默认 72 小时、每轮 60 分钟即 72 轮；保存递增 `settingsRevision`，确认必须携带该版本，过期返回 `settings_conflict` 且不创建冻结记录；相同版本重复确认幂等；冻结后修改返回 `preparation_frozen`。有未保存修改或非法输入时必须禁用确认并说明原因，保存并从服务端读回轮数与版本后才允许确认。
+- 显式重试成功后必须按新 `preparationId` 切换状态、清空旧预览与事件游标并订阅新 job；旧任务迟到事件按身份丢弃。确认冻结后第三阶段应读取服务端 `frozenSelection` 并显示“准备已确认，运行功能待接入”，刷新同一地址保持一致；不得在本变更实现实际双平台运行。
+- 冻结选择是 Change 09 的唯一读取契约，必须保存问题、快照、完整角色、轮数、`platform_a/twitter` 与 `platform_b/reddit` 映射、初始话题来源性质、首发角色与话题对应及激活顺序。`create_post`/`create_comment` 只是连通性探针，不得写成唯一允许动作。
+- 准备任务不得进入测试任务面板、副作用计数或测试日志；事件只携带准备/快照/批次/角色标识、计数与原因码，不携带角色正文、材料正文、引文或来源地址。
+- 默认启动、默认 `make verify` 与 CI 不得触发画像真实外呼；离线验收显式使用 stub，报告从准备记录的 provider 边界读取 `calls.real`/`calls.double`。每次实际 provider 尝试在边界立即计数并持久化，超时、非法输出与批次提交前失去租约不得漏记，成功批次不得重复计数。分批画像的 `initialTopics` 必须并入最终配置与冻结选择并保留来源性质。私有材料与私有样本只留在仓库外，不得进入夹具、日志、截图或报告。
+
 ## 引擎接入与真实联调
 
 - `.env.example` 的 `replace-with-*`、`*.example.invalid` 与全零 UUID 必须按“未配置”处理；`make smoke-live` 不得自动复制 `.env`，避免占位值触发外部调用。
@@ -185,7 +200,8 @@ make user EMAIL=a@example.com  # 从标准输入读取密码，创建/更新账�
 - `make verify CHANGE=2026-11-21-ingest-seed-documents` 必须在默认场景之上追加：三页 PDF 的总页数、空白页零分块、第 3 页 `pageNo` 与 `#page=3` 来源、原件哈希与页对象结构；PDF 页眉页脚与打印路径清理；文本换行/空白归一、合法路径保留、emoji 偏移与 GB18030 原件/原文；20 MiB 边界、空文件、无文字层与页数上限；重复上传只留一套；匿名 401 与他人 404；worker 停止时取消排队任务；慢解析续租与中断接手。
 - `make verify CHANGE=2026-11-21-track-background-jobs` 必须在同一 SHA 上追加：真实 SSE 两段序号（1–4 与 5–10）、`Last-Event-ID` 优先、终态重连立即结束、并发开始只新增一对 job/run、worker 中断接手、真实 PostgreSQL 锁等待跨过期点与旧令牌拒绝回归、取消（含 `canceled seq=4`）、受控失败与取消/完成竞态。未注册的 `CHANGE` 必须以退出码 2 结束。
 - `make verify CHANGE=2026-11-22-build-evidence-graph` 必须在同一 SHA 上追加：原创材料开始/重复/未就绪/六份/空问题/匿名/他人边界；真实 worker 的阶段序列、增量部分快照与最终快照、PDF 第 3 页与文本 UTF-16 来源；绑定响应丢失、未提交、接手；失败原因码与超限不发布；发布/取消竞态；第二次建图隔离；日志/报告脱敏与 worker provider 恢复。未注册的 `CHANGE` 必须以退出码 2 结束。
-- `make verify` 必须使用独立的 Compose 项目、回环端口与数据卷，不得停止或改写本地 8080 工作台；Change 07 默认使用离线 stub provider，不读取真实模型/Zep 凭据。`graph_evidence.calls.real` 必须为 0、`calls.double` 必须大于 0；计数必须来自 provider 调用边界的逐 build 持久化值，并在 `callScope` 中列出覆盖的 buildId，不得用计划数、节点数或快照大小推算。
+- `make verify CHANGE=2026-11-24-prepare-agent-environment` 必须在同一 SHA 上追加：原创材料建图后的开始/重复/五步/ready/72 轮；中文快照角色筛选与事件/待核实说法/平台三个反例；材料提及/背景/表达/关联/模拟设定分层与旧 `claimNature` 未知；文本 UTF-16 与 PDF 第 3 页来源；72→40→3 读回、旧版本确认冲突且冻结记录为 0、重读确认与幂等；两批预览、停止 worker 后接手 `attempts>1` 且批次复用；无角色、模型不可用、普通开始 409 与显式重试 202；匿名/他人/不存在资源与停库 503；换材料后角色变化且旧冻结选择保持旧 `snapshotId`；`environment_evidence.calls.real=0`、`calls.double>0` 与 worker provider 恢复。未注册的 `CHANGE` 必须以退出码 2 结束。
+- `make verify` 必须使用独立的 Compose 项目、回环端口与数据卷，不得停止或改写本地 8080 工作台。`VERIFY_COMPOSE_PROJECT` 只允许 `echosim-verify` 或其安全后缀项目；启动前必须校验项目名并获取独占锁，清理只作用于本项目且检查退出码，误指开发栈必须在任何停止、删卷或重建命令前以退出码 2 拒绝。Change 07 与 Change 08 默认使用离线 stub provider，不读取真实模型/Zep 凭据。`graph_evidence.calls.real` 与 `environment_evidence.calls.real` 必须为 0、`calls.double` 必须大于 0；计数必须来自 provider 调用边界的逐 build/逐准备持久化值，并在 `callScope` 中列出覆盖的 buildId，不得用计划数、节点数、角色数或快照大小推算。
 - 报告必须在 `job_evidence` 中记录 `jobId`、`runId`、两段序号、接手前后 `attempts`、副作用计数与旧令牌结果；在 `document_evidence` 中记录材料标识、解析任务标识、页数、分块数、第 3 页页码与来源、原件哈希、重复上传与取消/接手结果；页面提示、布局、语言、断线时序与 PDF 浏览器实际落页仍只写入 `docs/acceptance/`。
 - 工作树存在未忽略改动时 `make verify` 默认拒绝执行；仅在本地调试时可用 `ALLOW_DIRTY=1`，此时报告记录 `dirty: true`，**不得**作为干净克隆证据。
 - CI 必须调用与本地相同的 `make verify`，并断言报告 `tested_sha` 等于触发 SHA；不得在 CI 中重复实现验收逻辑。

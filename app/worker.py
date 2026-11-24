@@ -17,6 +17,8 @@ from pathlib import Path
 from .config import settings
 from .db import SessionLocal, dispose_engine
 from .engines.business_config import BusinessGraphConfig
+from .engines.environment_config import EnvironmentConfig
+from .engines.environment_model import create_profiler
 from .engines.business_runtime import (
     ProviderCallMetrics,
     create_graph_client,
@@ -117,6 +119,19 @@ async def run(stop_event: asyncio.Event) -> None:
                     graph_client_factory=graph_client_factory,
                     storage_root=settings.document_storage_dir,
                     metrics=metrics,
+                )
+            elif claim.kind == "agent.environment.prepare":
+                environment_config = EnvironmentConfig.from_env()
+                outcome = await worker_service.execute_preparation(
+                    claim,
+                    session_factory=SessionLocal,
+                    stop_event=stop_event,
+                    lease_seconds=lease_seconds,
+                    heartbeat_seconds=heartbeat_seconds,
+                    config=environment_config,
+                    profiler_factory=lambda metrics=None: create_profiler(
+                        environment_config, metrics=metrics
+                    ),
                 )
             elif claim.kind == "document.ingest":
                 outcome = await worker_service.execute_ingest(

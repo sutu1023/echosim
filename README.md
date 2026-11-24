@@ -2,7 +2,7 @@
 
 材料驱动的双平台推演工作台。
 
-当前版本提供可启动、可复现的工程骨架，已实现本地账户登录、服务端会话、项目级隔离、材料入库，以及从工作台发起、由独立 worker 执行的证据图谱构建与原文定位。角色与环境、双平台推演、报告与案例回放尚未实现。
+当前版本提供可启动、可复现的工程骨架，已实现本地账户登录、服务端会话、项目级隔离、材料入库、由独立 worker 执行的证据图谱构建与原文定位，以及从图谱最终快照生成、审阅并冻结角色与环境。双平台推演、报告与案例回放尚未实现。
 
 ## 前置条件
 
@@ -114,7 +114,7 @@ echosim_session=<随机令牌>; HttpOnly; Path=/; SameSite=lax
 
 控制台把健康、会话与项目列表分开显示：系统状态只由 `/health` 决定；会话查询 503 时账户显示“暂时无法确认”并保留 Cookie；只有会话明确 401 才按访客处理。健康检查 200 但项目列表读取失败时，系统状态仍为“可用”，按钮进入 `/projects` 由项目页提示读取失败并重试。
 
-工作台外壳与阶段数据分开：真实项目加载成功后，项目名、阶段高亮、工具条与三种布局可正常操作。第一阶段在材料面板旁提供证据图谱面板：选择已就绪材料、输入情景问题、开始建图，页面按“等待索引 → 增量绘图 → 完成”展示服务端已发布快照；点击节点或材料关系可回到 PDF 物理页或文本原文高亮。第二阶段目前只显示“角色与环境尚未配置”。
+工作台外壳与阶段数据分开：真实项目加载成功后，项目名、阶段高亮、工具条与三种布局可正常操作。第一阶段在材料面板旁提供证据图谱面板：选择已就绪材料、输入情景问题、开始建图，页面按“等待索引 → 增量绘图 → 完成”展示服务端已发布快照；点击节点或材料关系可回到 PDF 物理页或文本原文高亮。第二阶段从该 build 的最终快照生成角色与环境：显示“图谱未完成 / 尚未准备 / 准备中（含分批预览）/ 已就绪待确认 / 已确认 / 失败或取消”六态，支持普通开始、失败后的显式重试、轮数保存、带版本确认冻结与进入第三阶段入口。
 
 所有项目接口先鉴权再判断归属，工作台页面也遵循“身份 → 项目归属 → 阶段合法性”的顺序：
 
@@ -161,6 +161,14 @@ echosim_session=<随机令牌>; HttpOnly; Path=/; SameSite=lax
 | `EVIDENCE_GRAPH_BATCH_SIZE` | `4` | 模型抽取批次大小 |
 | `EVIDENCE_GRAPH_INDEX_TIMEOUT_SECONDS` | `60` | episode 写入后等待索引匹配的预算（秒） |
 | `EVIDENCE_GRAPH_PROCESSING_TIMEOUT_SECONDS` | `120` | episode 处理与读回预算（秒） |
+| `ENVIRONMENT_MODEL_PROVIDER` | `auto` | 角色画像 provider：`auto`、`unconfigured`、`http`、`stub`；只注入 `worker` |
+| `ENVIRONMENT_ALLOW_STUB` | `false` | 是否允许显式启用画像替身；默认拒绝 stub |
+| `ENVIRONMENT_DEFAULT_DURATION_HOURS` | `72` | 新准备默认模拟总时长（小时） |
+| `ENVIRONMENT_DEFAULT_MINUTES_PER_ROUND` | `60` | 新准备默认每轮分钟数；72×60/60 = 72 轮 |
+| `ENVIRONMENT_MAX_MANUAL_ROUNDS` | `1000` | 手动轮数上限 |
+| `ENVIRONMENT_PROFILE_BATCH_SIZE` | `2` | 分批画像的角色数；批次按角色键稳定排序 |
+| `ENVIRONMENT_MODEL_TIMEOUT_SECONDS` | `30` | 单批画像模型预算（秒），最多 2 次实际 HTTP 请求 |
+| `ENVIRONMENT_PROFILE_DELAY_MS` | `0` | 批次之间的可控延迟（毫秒），仅用于验收放大分批预览窗口 |
 | `MODEL_API_BASE_URL` | 空 | Chat Completions 兼容 API 根地址，可包含 `/v1`；空表示未配置 |
 | `MODEL_API_KEY` | 空 | 模型密钥；只注入 `engine` 与业务 `worker` 服务 |
 | `MODEL_NAME` | 空 | 模型名；空表示未配置 |
@@ -331,6 +339,79 @@ EVIDENCE_GRAPH_ALLOW_STUB=true
 
 随后 `make up`，在工作台选择原创材料并开始建图。该模式下模型与图谱调用次数记为 `double`，真实调用为 0；私有材料与演示截图不得提交到仓库。
 
+## 角色与环境准备
+
+角色与环境只从第二阶段指定的 build 读取：`buildId`、`snapshotId` 与推演问题在开始准备时固定，角色节点、角色来源与冻结选择都引用同一 `snapshotId`。准备由独立 `worker` 执行，`app` 只负责开始、读取与确认，不在 HTTP 请求内调用模型。
+
+### 使用流程
+
+1. 在第一阶段完成建图，点击“进入角色与环境”；地址保留 `layout`、`lang` 与 `build`。直接打开没有 `build` 的地址时，服务端按“活动 build 优先、否则最近 build”返回，页面用替换历史记录把 `buildId` 固定到地址。
+2. 第二阶段显示推演问题、最终快照与开始入口。开始准备返回 `202`；同一 build 已有 `preparing` 或 `ready` 准备时返回 `200` 与同一 `preparationId`/`jobId`/`runId`。失败或取消后普通开始返回 `409 preparation_retry_required`，只有显式“重试准备”才创建新的准备与任务。
+3. worker 按 `bind → select → profile → compose → publish` 五步执行。`profile` 按稳定批次生成画像，每批通过校验后即可在详情中作为 `previewRoles` 展开；SSE 只携带准备/快照标识、批次标识、角色标识与计数。第一批可见时确认与第三阶段入口仍不可用。
+4. 第 5 步 `publish` 在单个事务内发布最终角色、平台映射、初始话题、首发话题、激活顺序、`phase=ready`、完成事件与 `succeeded`。发布前只能看到已完成批次预览，不能看到平台、话题、顺序或冻结选择。
+5. 页面显示服务端 `autoRounds` 与生效 `rounds`。默认 72 小时、每轮 60 分钟，自动轮数为 72；可切换手动保存 40、3 等值，刷新后从服务端读回。零时长、非法轮数与不能整除分别返回 `duration_invalid`、`rounds_invalid`、`rounds_not_integral`。
+6. 确认按钮携带用户最后读到的 `settingsRevision`。服务端在同一事务内核对版本、重新校验就绪条件、轮数与来源后创建冻结选择；版本不一致返回 `409 settings_conflict` 且不创建冻结记录。相同版本重复确认返回同一 `selectionId`；确认后修改轮数返回 `409 preparation_frozen`。
+7. 轮数表单有未保存修改或非法输入时，确认按钮禁用并说明原因；保存成功后从服务端读回轮数与 `settingsRevision` 才允许确认。
+8. 确认后“进入双平台运行”可用，并把 `build`、`preparation` 与当前 `layout`、`lang` 一起带过去。第三阶段只读取服务端持久化的 `frozenSelection`，显示“准备已确认，运行功能待接入”；直接刷新该地址也读取同一冻结选择。实际双平台运行属于后续变更。
+
+### 角色来源与材料事实
+
+角色候选直接读取已发布快照的 `nodeType`、`label`、节点来源与关系来源：
+
+- 同时识别中文显示类型（`个人`、`群体`、`高校`、`机构`、`媒体机构` 等）与旧英文 PascalCase（`*Person`、`*Organization`、`*University` 等）；`summary=null` 不影响筛选。
+- 媒体机构与平台渠道分开：`媒体机构`/`新闻机构`/`MediaOutlet` 可以发言；`平台`/`社交媒体`/`传播平台`/`Platform`/`Channel` 是环境渠道，不成为角色。
+- 关系方向只提供上下文：只出现在关系终点的高校仍可入选；有出边的事件、待核实说法与建议仍被排除。
+- `其他主体` 等未知类型只有在节点来源原句明确描述为人物/群体/组织/机构/媒体机构时才纳入。
+- 没有合格主体时开始请求返回 `422 no_role_candidates`，不创建准备、job 或 run。
+
+未知类型的角色判定绑定当前主体及其所在从句：“某大学聘请林记者担任讲师”不会把林记者判成高校，而按名称中的记者身份归为个人；表达话题只认当前主体自己的动作，“王同学参加咨询会，主办方表示……”不会把主办方表态算给王同学。证据不足时保留未知或“材料涉及的话题”。角色详情同时显示该角色的 `simulation.topics` 并标为模拟设定。
+
+角色详情把材料实际支持的内容分层显示：
+
+| 展示 | 依据 |
+| --- | --- |
+| 材料提及 | 节点来源引文，只证明材料提到该主体 |
+| 背景 | 关系支持原句明确描述该主体；否则显示“材料未说明” |
+| 该角色表达/主张 | 关系起点是该角色，且支持原句能读出表达、主张或回应 |
+| 材料涉及的话题 | 角色只是关系一端，原句只能证明材料把角色与话题关联 |
+| 模拟设定 | 模型或替身补充的动机、立场、活跃时段、发言频率、响应延迟、影响力权重与关注点 |
+
+来源定位复用证据图谱语义：PDF 返回物理页码与原件 `#page=<pageNo>`；文本返回 UTF-16 偏移与原文视图，并将 `sourceStart`/`sourceEnd` 带入材料深链接自动高亮。关系来源保留快照已有的 `claimNature`；旧边为空时保留未知并显示“来源性质未知”，不默认成其他材料陈述。`author_recommendation` 只作为环境背景，不作为角色表达或关注话题。
+
+### 环境、轮数与冻结
+
+- 平台使用稳定别名：`platform_a → twitter`、`platform_b → reddit`。这是平台映射；Change 06 的 `create_post`/`create_comment` 只是连通性探针动作，不会写入冻结选择或工作台作为唯一允许动作。
+- 初始话题至少包含 build 的推演问题；材料话题带来源与 `claimNature`（旧来源为空时保留未知）；替身或模型补充的话题标记为模拟设定。
+- 激活顺序覆盖全部角色且不重复；首发角色是顺序前缀，并通过 `firstSpeakerTopics` 与具体初始话题一一对应。
+- 冻结选择保存 `selectionId`、`preparationId`、`projectId`、`buildId`、`snapshotId`、`question`、`settingsRevision`、轮数、完整角色（提及/背景/表达话题/关联话题/模拟设定）、平台映射、初始话题的来源性质、首发角色与话题对应和激活顺序。之后的新 build 不会改变该冻结选择。
+- 分批画像返回的 `initialTopics` 会与材料话题、角色模拟话题合并进入最终配置与冻结选择；只出现在批次初始话题中的合法话题也不会丢失，模拟来源保留未知来源性质。
+- 同一 build 的 `preparing`/`ready` 准备最多一个；不同 build 的操作键不同，可各自准备。准备任务不会出现在“测试任务”面板或副作用计数中。
+- worker 停止或租约过期时，查询返回 `awaitingTakeover`；新 worker 接手保持 `preparationId`/`jobId`/`runId`，复用已 `preview_ready_at` 的批次，不重复生成已提交角色。失败或取消后已完成批次只读显示为“未完成预览”，`canContinue=false`，没有平台、话题、顺序或冻结选择。
+
+### 接口
+
+| 方法 | 路径 | 说明 | 成功 | 失败 |
+| --- | --- | --- | --- | --- |
+| GET | `/api/projects/{projectId}/environment?build=<buildId>` | build、最终快照、推演问题与当前准备上下文 | `200` | 401 / 404 项目或图谱 / 503 |
+| POST | `/api/projects/{projectId}/environment/preparations?build=<buildId>` | 普通开始 | `202` 新建 / `200` 复用 `preparing`/`ready` | 401 / 404 / 409 `graph_not_ready`/`preparation_retry_required` / 422 `no_role_candidates` / 503 |
+| POST | `/api/projects/{projectId}/environment/preparations/{id}/retry` | 失败或取消后的显式重试 | `202` | 401 / 404 `准备不存在` / 409 `preparation_not_retryable` / 422 `no_role_candidates` |
+| GET | `/api/projects/{projectId}/environment/preparations/{id}` | 准备详情、分批预览、最终角色、来源、平台、话题、顺序、轮数与冻结选择 | `200` | 401 / 404 / 503 |
+| PATCH | `/api/projects/{projectId}/environment/preparations/{id}/configuration` | 保存轮数，携带 `settingsRevision` | `200` | 401 / 404 / 409 `settings_conflict`/`preparation_frozen`/`preparation_not_editable` / 422 配置原因 / 503 |
+| POST | `/api/projects/{projectId}/environment/preparations/{id}/confirm` | 携带 `{settingsRevision}` 确认冻结；同版本幂等 | `200` | 401 / 404 / 409 `preparation_not_ready`/`settings_conflict` / 503 |
+
+所有接口先鉴权、再项目归属、再 build/准备归属；匿名立即 401 且不访问准备数据，他人项目与不存在项目统一 `404 {"detail":"项目不存在"}`，他人/不存在 build 与准备分别为 `图谱不存在`、`准备不存在`。错误响应只含中文说明、稳定原因码与可恢复动作。
+
+### 离线与私有边界
+
+默认 `make up`、默认 `make verify` 与 CI 不发起真实画像调用。需要离线演示时，在本地 `.env` 显式设置：
+
+```bash
+ENVIRONMENT_MODEL_PROVIDER=stub
+ENVIRONMENT_ALLOW_STUB=true
+```
+
+画像调用次数在 provider 边界逐准备持久化；默认与 Change 08 验收的 `calls.real` 必须为 0，替身次数大于 0。作者的私有材料只在私有项目中人工走查，私有 PDF、含正文截图、真实画像与模型原始输出留在仓库外，不进入自动化夹具、日志、报告或 CI 产物。
+
 ## 引擎联通验收
 
 本版本的引擎联通只做服务端接入与真实联通证据，不接入正式推演、角色准备或工作台页面。真实调用只由开发者显式执行：
@@ -407,7 +488,7 @@ make migrate
 make verify
 ```
 
-`make verify` 使用独立的 Compose 项目、回环端口与数据卷运行，不会停止或改写本地 8080 工作台；Change 07 场景显式使用离线 stub provider，不读取真实模型/Zep 凭据。连续执行两次以上时可用 `VERIFY_REPORT_LABEL` 保留命名报告；报告仍绑定同一 `tested_sha` 且 `dirty=false`。离线通过不替代人工签收。
+`make verify` 使用独立的 Compose 项目、回环端口与数据卷运行，不会停止或改写本地 8080 工作台。`VERIFY_COMPOSE_PROJECT` 只接受 `echosim-verify` 或其带安全后缀的隔离项目；启动前先校验项目名并获取独占锁，再清理本项目容器与数据卷。两个验收进程不能共用同一隔离项目，误指开发栈会在任何停止、删卷或重建命令前退出码 2 拒绝。Change 07/08 场景显式使用离线 stub provider，不读取真实模型/Zep 凭据。连续执行两次以上时可用 `VERIFY_REPORT_LABEL` 保留命名报告；报告仍绑定同一 `tested_sha` 且 `dirty=false`。离线通过不替代人工签收。
 
 `make verify` 会构建并启动环境，依次验证：
 
@@ -420,6 +501,7 @@ make verify
 - 材料变更专属场景（`make verify CHANGE=2026-11-21-ingest-seed-documents`）：三页 PDF 的总页数 3、第 2 页零分块、第 3 页 `pageNo=3` 与 `#page=3` 来源链接、原件哈希与页对象结构；PDF 页眉/页脚/打印路径清理；文本换行与空白归一、合法路径保留、emoji 偏移与 GB18030 原件/原文；恰好 20 MiB 通过、20 MiB + 1 与空文件被拒且不新增材料、无文字层失败；页数上限边界；重复上传只留一套；匿名 401 与他人 404；worker 停止时取消排队任务；慢解析续租与中断接手。
 - 任务变更专属场景（`make verify CHANGE=2026-11-21-track-background-jobs`）：真实 PostgreSQL 下两个任务互不影响、并发开始只新增一对 job/run、读到第 4 条后断开并以游标补到第 10 条（两段序号分别记录）、`Last-Event-ID` 优先、终态 `after=lastSeq` 立即结束、worker 中断后接手、旧租约令牌续租与写第 6 步被拒、运行中取消（3 步后 `seq=4`）、受控失败（`failAtStep=3` 持久化后仍生效）、终态后新任务、取消与最后一步竞态只留一个终态。
 - 建图变更专属场景（`make verify CHANGE=2026-11-22-build-evidence-graph`）：原创材料上传与就绪、开始 202/重复 200、未就绪 409、六份/空问题 422、匿名 401、他人 404；真实 worker 六步与 `waiting_index → drawing → ready` 阶段、增量部分快照与最终快照、PDF 第 3 页与文本 UTF-16 来源；图谱绑定响应丢失/未提交/接手、失败原因码、超限不发布、发布/取消竞态、第二次建图隔离；结束后 worker provider 恢复，`graph_evidence.calls.real=0`、`calls.double>0`。
+- 角色与环境专属场景（`make verify CHANGE=2026-11-24-prepare-agent-environment`）：原创 TXT 建图后开始准备 202/重复 200、五步事件 1–N、`ready` 与 72 轮；中文快照角色筛选与事件/待核实说法/平台三个反例；材料提及/背景/表达/关联/模拟设定分层、旧 `claimNature` 空值保留未知、文本 UTF-16 来源；默认 72→手动 40→3 刷新读回；A 用旧 revision 确认收到 `settings_conflict` 且冻结记录为 0，重读确认 3 轮并验证重复确认返回同一 `selectionId`；两批预览、停止 worker 后 `awaitingTakeover`、接手 `attempts>1` 且第一批复用、PDF 第 3 页来源；无角色 422 不建记录、模型不可用 failed、普通开始 409 与显式重试 202；匿名 401、他人/不存在资源 404、停库 503 保留 Cookie；换原创材料后角色变化且旧冻结选择仍绑定旧 `snapshotId`；报告 `environment_evidence.calls.real=0`、`calls.double>0`。
 
 > HTTP 200 加 `EchoSim` HTML 只证明 SPA 入口可达。阶段内容、布局、语言、截图与浏览器后退行为以实际浏览器结果为准。
 
@@ -434,6 +516,7 @@ make verify
 EXPECTED_SHA=$(git rev-parse HEAD) make verify
 EXPECTED_SHA=$(git rev-parse HEAD) make verify CHANGE=2026-11-21-track-background-jobs
 EXPECTED_SHA=$(git rev-parse HEAD) make verify CHANGE=2026-11-21-ingest-seed-documents
+EXPECTED_SHA=$(git rev-parse HEAD) make verify CHANGE=2026-11-24-prepare-agent-environment
 ```
 
 未注册的 `CHANGE` 会以退出码 2 结束，并在报告里写明原因。
@@ -448,7 +531,7 @@ gh workflow run verify --ref <branch> -f expected_sha=00000000000000000000000000
   该运行会失败，并上传记录 SHA 不一致原因的失败报告，用于证明失败路径可观测。
 - `scripts/verify.py` 对未预期异常也会写入 `verify-crash` 失败报告，保证 CI 有产物可下载。
 
-CI 在干净检出上执行同一命令，并断言报告中的 `tested_sha` 等于触发提交 SHA；工作流名称 `verify`，报告作为构建产物上传。CI 同时提供独立的 Change 06 离线检查（`make verify CHANGE=2026-11-21-connect-engine-providers`），两份报告使用不同 artifact 名称；专属检查额外断言 `calls.real=0`。CI 不注入模型或 Zep 密钥、不执行 `make smoke-live`、不构建 live 引擎镜像。
+CI 在干净检出上执行同一命令，并断言报告中的 `tested_sha` 等于触发提交 SHA；工作流名称 `verify`，报告作为构建产物上传。CI 同时提供独立的 Change 06 离线检查、Change 07 建图检查与 Change 08 角色准备检查，各自使用不同 artifact 名称；Change 08 检查额外断言 `environment_evidence.calls.real=0` 与 worker provider 已恢复。CI 不注入模型或 Zep 密钥、不执行 `make smoke-live`、不构建 live 引擎镜像。
 
 ### 浏览器人工走查
 
@@ -483,6 +566,7 @@ app/requirements-worker-graph.txt  worker 专用 Zep 客户端依赖
 app/worker.py        worker 进程入口（无 HTTP 端口）
 app/lease_probe.py   验收专用租约/竞态探针（仅 make verify 调用）
 app/routers/         HTTP 路由
+web/src/environment/ 第二阶段纯状态、来源链接与环境类型
 web/                 Vue 3 + TypeScript + Vite 前端
 tests/               Python 单元测试（unittest）
 scripts/verify.py    验收脚本（Python 标准库）
@@ -553,4 +637,4 @@ docker compose logs db
 
 ## 非目标
 
-本阶段不实现自助注册、找回密码、邮箱验证、多因素认证、登录限流与账户锁定；也不实现角色与环境配置、双平台正式推演编排、报告生成、深度互动、生产部署、nginx 反向代理或多环境编排。证据图谱的新 build 使用独立图谱以隔离旧 build 数据；不提供图算法、额外模型实体消歧、图谱编辑、跨项目共享或配额计费。引擎联通验收只证明一次真实调用与证据可核对，不构成产品推演能力。
+本阶段不实现自助注册、找回密码、邮箱验证、多因素认证、登录限流与账户锁定；也不实现双平台正式推演编排、报告生成、深度互动、生产部署、nginx 反向代理或多环境编排。角色与环境只做快照绑定、画像、轮数与冻结选择，不执行平台动作，也不提供人工编辑角色或跨项目复用。证据图谱的新 build 使用独立图谱以隔离旧 build 数据；不提供图算法、额外模型实体消歧、图谱编辑、跨项目共享或配额计费。引擎联通验收只证明一次真实调用与证据可核对，不构成产品推演能力。

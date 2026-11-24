@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures
+import fcntl
 import http.cookiejar
 import json
 import os
@@ -23,6 +24,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import traceback
 import time
 import urllib.error
 import urllib.request
@@ -126,6 +128,9 @@ def isolated_runtime_env() -> dict[str, str]:
         "EVIDENCE_GRAPH_MODEL_PROVIDER": "unconfigured",
         "EVIDENCE_GRAPH_GRAPH_PROVIDER": "unconfigured",
         "EVIDENCE_GRAPH_ALLOW_STUB": "false",
+        # 验收固定较短租约，不继承宿主 .env 的长租约，保证接手场景可复现。
+        "JOB_LEASE_SECONDS": "6",
+        "JOB_HEARTBEAT_SECONDS": "2",
     }
 
 
@@ -137,6 +142,17 @@ def graph_runtime_env() -> dict[str, str]:
         "EVIDENCE_GRAPH_MODEL_PROVIDER": "stub",
         "EVIDENCE_GRAPH_GRAPH_PROVIDER": "stub",
         "EVIDENCE_GRAPH_ALLOW_STUB": "true",
+    }
+
+
+def environment_runtime_env() -> dict[str, str]:
+    """Change 08：建图与画像都使用离线替身，真实调用必须为 0。"""
+    return {
+        **graph_runtime_env(),
+        "ENVIRONMENT_MODEL_PROVIDER": "stub",
+        "ENVIRONMENT_ALLOW_STUB": "true",
+        "ENVIRONMENT_PROFILE_BATCH_SIZE": "2",
+        "ENVIRONMENT_PROFILE_DELAY_MS": "0",
     }
 
 
@@ -167,6 +183,71 @@ def http_status(path: str, timeout: float = 5.0) -> tuple[int, str]:
 
 BASE_URL = "http://127.0.0.1:8080"
 COMPOSE_PROJECT = "echosim-verify"
+VERIFY_PROJECT_PATTERN = re.compile(r"^echosim-verify(?:-[a-z0-9][a-z0-9_-]*)?$")
+
+
+class VerifyIsolationError(Exception):
+    """验收隔离资源不合法或已被其它进程占用。"""
+
+
+def isolated_compose_project(value: str | None) -> str:
+    """只接受本次验收拥有的 Compose 项目名；拒绝开发栈或任意外部项目。"""
+    name = (value or "").strip().lower() or "echosim-verify"
+    if not VERIFY_PROJECT_PATTERN.fullmatch(name):
+        raise VerifyIsolationError(
+            "VERIFY_COMPOSE_PROJECT 必须是 echosim-verify 或其带后缀的隔离项目，"
+            f"拒绝操作 {name!r}"
+        )
+    return name
+
+
+def acquire_verify_lock(
+    project: str, *, directory: Path | None = None
+) -> Any:
+    """同一隔离项目只允许一个验收进程；锁在进程退出时自动释放。"""
+    directory = directory or REPORT_DIR
+    directory.mkdir(parents=True, exist_ok=True)
+    handle = open(directory / f".{project}.lock", "a+", encoding="utf-8")
+    try:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        handle.close()
+        raise VerifyIsolationError(
+            f"另一个验收进程正在使用隔离项目 {project}"
+        ) from None
+    handle.seek(0)
+    handle.truncate()
+    handle.write(str(os.getpid()))
+    handle.flush()
+    return handle
+
+
+def release_verify_lock(handle: Any) -> None:
+    if handle is None:
+        return
+    try:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    finally:
+        handle.close()
+
+
+def cleanup_isolated_compose(project: str, runner: Callable[[list[str]], Any]) -> None:
+    """只清理本次项目的容器与数据卷；非法项目在运行任何命令前拒绝。"""
+    name = isolated_compose_project(project)
+    result = runner(
+        [
+            "docker",
+            "compose",
+            "-p",
+            name,
+            "down",
+            "-v",
+            "--remove-orphans",
+        ]
+    )
+    if result.returncode != 0:
+        detail = (getattr(result, "stderr", "") or getattr(result, "stdout", ""))
+        raise RuntimeError(f"清理隔离验收资源失败：{str(detail).strip()[-400:]}")
 REDACTION_SECRET = "verify-secret-unset"
 
 SESSION_COOKIE = "echosim_session"
@@ -318,6 +399,7 @@ def scenario(report: dict[str, Any], scenario_id: str) -> Iterator[dict[str, Any
     try:
         yield entry
     except Exception as exc:  # noqa: BLE001 - 任意失败都要落进报告
+        traceback.print_exc()
         entry["status"] = "failed"
         entry["detail"] = f"{type(exc).__name__}: {exc}" if str(exc) else type(exc).__name__
         raise ScenarioFailed(scenario_id) from exc
@@ -329,6 +411,9 @@ def scenario(report: dict[str, Any], scenario_id: str) -> Iterator[dict[str, Any
 
 
 def scenario_compose_up() -> None:
+    # 隔离验收每次都从空数据卷开始，避免随机数据库密码与旧卷不一致；
+    # 清理只作用于通过命名校验且持有锁的 echosim-verify 项目。
+    cleanup_isolated_compose(COMPOSE_PROJECT, command)
     result = compose("up", "-d", "--build", "--wait", "--wait-timeout", "240")
     require(
         result.returncode == 0,
@@ -722,7 +807,14 @@ CHANGE_ID = "2026-11-21-track-background-jobs"
 DOCUMENT_CHANGE_ID = "2026-11-21-ingest-seed-documents"
 ENGINE_CHANGE_ID = "2026-11-21-connect-engine-providers"
 GRAPH_CHANGE_ID = "2026-11-22-build-evidence-graph"
-KNOWN_CHANGES = {CHANGE_ID, DOCUMENT_CHANGE_ID, ENGINE_CHANGE_ID, GRAPH_CHANGE_ID}
+ENVIRONMENT_CHANGE_ID = "2026-11-24-prepare-agent-environment"
+KNOWN_CHANGES = {
+    CHANGE_ID,
+    DOCUMENT_CHANGE_ID,
+    ENGINE_CHANGE_ID,
+    GRAPH_CHANGE_ID,
+    ENVIRONMENT_CHANGE_ID,
+}
 VERIFY_STEP_DELAY_MS = "800"
 JOB_TIMEOUT_SECONDS = 90.0
 JOB_EVENT_TIMEOUT_SECONDS = 60.0
@@ -3246,6 +3338,1279 @@ def scenario_graph_worker_restored(
     )
 
 
+def scenario_environment_worker_restored(
+    entry: dict[str, Any], report: dict[str, Any]
+) -> None:
+    result = compose("config", "--format", "json")
+    require(result.returncode == 0, f"docker compose config 失败：{result.stderr.strip()}")
+    config = json.loads(result.stdout)
+    env = (config.get("services") or {}).get("worker", {}).get("environment") or {}
+    provider = str(env.get("ENVIRONMENT_MODEL_PROVIDER", ""))
+    allow = str(env.get("ENVIRONMENT_ALLOW_STUB", "")).lower()
+    delay = str(env.get("ENVIRONMENT_PROFILE_DELAY_MS", "0"))
+    require(provider != "stub", f"画像 provider 未恢复：{provider}")
+    require(allow in ("false", "0", ""), f"画像 stub 开关未恢复：{allow}")
+    require(delay in ("0", ""), f"画像验收延迟未恢复：{delay}")
+    report["environment_evidence"]["workerRestored"] = {
+        "modelProvider": provider,
+        "stubAllowed": allow not in ("false", "0", ""),
+        "profileDelayMs": int(delay or 0),
+    }
+    entry["detail"] = "Change 08 结束后 worker 已恢复为非 stub 画像配置，验收延迟为 0"
+
+
+ENVIRONMENT_TIMEOUT_SECONDS = 180.0
+ENVIRONMENT_TEXT_HEADER = "EchoSim 原创角色材料 🌱"
+ENVIRONMENT_ROLE_NAMES = {"张同学", "某校学生群体", "某大学", "某报社", "校友李某"}
+
+
+def record_environment_evidence(
+    report: dict[str, Any], scenario_id: str, **fields: object
+) -> None:
+    if report.get("environment_evidence") is None:
+        report["environment_evidence"] = {
+            "mode": "offline-stub",
+            "calls": {"real": 0, "double": 0},
+            "callScope": [],
+            "scenarios": [],
+            "workerRestored": None,
+        }
+    report["environment_evidence"]["scenarios"].append(
+        {"scenario": scenario_id, **fields}
+    )
+
+
+def note_environment_calls(
+    report: dict[str, Any], *, preparation: dict[str, object], build_id: str
+) -> None:
+    if report.get("environment_evidence") is None:
+        report["environment_evidence"] = {
+            "mode": "offline-stub",
+            "calls": {"real": 0, "double": 0},
+            "callScope": [],
+            "scenarios": [],
+            "workerRestored": None,
+        }
+    evidence = report["environment_evidence"]
+    counts = preparation.get("counts") or {}
+    calls = counts.get("providerCalls") or {}
+    real = int(calls.get("real") or 0)
+    double = int(calls.get("double") or 0)
+    scope = evidence["callScope"]
+    existing = next(
+        (
+            item
+            for item in scope
+            if item.get("preparationId") == preparation.get("preparationId")
+        ),
+        None,
+    )
+    if existing is None:
+        scope.append(
+            {
+                "preparationId": preparation.get("preparationId"),
+                "buildId": build_id,
+                "real": real,
+                "double": double,
+            }
+        )
+    else:
+        existing["real"] = max(int(existing.get("real") or 0), real)
+        existing["double"] = max(int(existing.get("double") or 0), double)
+    evidence["calls"] = {
+        "real": sum(int(item.get("real") or 0) for item in scope),
+        "double": sum(int(item.get("double") or 0) for item in scope),
+    }
+
+
+def psql_scalar(sql: str) -> str:
+    result = compose(
+        "exec",
+        "-T",
+        "db",
+        "psql",
+        "-U",
+        os.environ.get("POSTGRES_USER", "echosim"),
+        "-d",
+        os.environ.get("POSTGRES_DB", "echosim"),
+        "-Atc",
+        sql,
+    )
+    require(result.returncode == 0, f"psql 查询失败：{result.stderr.strip()[-400:]}")
+    return result.stdout.strip().splitlines()[-1] if result.stdout.strip() else ""
+
+
+def psql_exec(sql: str) -> None:
+    result = compose(
+        "exec",
+        "-T",
+        "db",
+        "psql",
+        "-U",
+        os.environ.get("POSTGRES_USER", "echosim"),
+        "-d",
+        os.environ.get("POSTGRES_DB", "echosim"),
+        "-Atc",
+        sql,
+    )
+    require(result.returncode == 0, f"psql 写入失败：{result.stderr.strip()[-400:]}")
+
+
+def environment_path(project_id: str, build_id: str | None = None) -> str:
+    base = f"/api/projects/{project_id}/environment"
+    return base if build_id is None else f"{base}?build={build_id}"
+
+
+def preparation_path(
+    project_id: str, preparation_id: str, suffix: str = ""
+) -> str:
+    return (
+        f"/api/projects/{project_id}/environment/preparations/"
+        f"{preparation_id}{suffix}"
+    )
+
+
+def fetch_environment_context(
+    token: str, project_id: str, build_id: str | None = None
+) -> dict[str, object]:
+    status, _, body = api_call(
+        "GET", environment_path(project_id, build_id), token
+    )
+    require(status == 200, f"准备上下文期望 200，实际 {status}：{body}")
+    require(isinstance(body, dict), f"准备上下文不是对象：{body}")
+    return body
+
+
+def start_environment_preparation(
+    token: str, project_id: str, build_id: str
+) -> tuple[int, dict[str, object]]:
+    status, _, body = api_call(
+        "POST",
+        f"/api/projects/{project_id}/environment/preparations?build={build_id}",
+        token,
+        payload={},
+        headers={"Origin": BASE_URL},
+    )
+    require(isinstance(body, dict), f"开始准备响应不是对象：{body}")
+    return status, body
+
+
+def retry_environment_preparation(
+    token: str, project_id: str, preparation_id: str
+) -> tuple[int, dict[str, object]]:
+    status, _, body = api_call(
+        "POST",
+        preparation_path(project_id, preparation_id, "/retry"),
+        token,
+        payload={},
+        headers={"Origin": BASE_URL},
+    )
+    require(isinstance(body, dict), f"重试准备响应不是对象：{body}")
+    return status, body
+
+
+def fetch_preparation(
+    token: str, project_id: str, preparation_id: str
+) -> dict[str, object]:
+    status, _, body = api_call(
+        "GET", preparation_path(project_id, preparation_id), token
+    )
+    require(status == 200, f"准备详情期望 200，实际 {status}：{body}")
+    require(
+        isinstance(body, dict) and isinstance(body.get("preparation"), dict),
+        f"准备详情缺少 preparation：{body}",
+    )
+    return body["preparation"]  # type: ignore[index]
+
+
+def wait_preparation(
+    token: str,
+    project_id: str,
+    preparation_id: str,
+    predicate: Callable[[dict[str, object]], bool],
+    *,
+    timeout: float = ENVIRONMENT_TIMEOUT_SECONDS,
+) -> dict[str, object]:
+    def check() -> dict[str, object] | None:
+        try:
+            detail = fetch_preparation(token, project_id, preparation_id)
+        except AssertionError:
+            return None
+        return detail if predicate(detail) else None
+
+    result = wait_for(check, timeout=timeout, interval=0.2)
+    require(result is not None, "准备未在限定时间内进入期望状态")
+    return result  # type: ignore[return-value]
+
+
+def fetch_graph_ready(
+    token: str, project_id: str, build_id: str, job_id: str
+) -> tuple[dict[str, object], dict[str, object]]:
+    job = wait_job(
+        token,
+        project_id,
+        job_id,
+        lambda item: item["status"] in ("succeeded", "failed", "canceled"),
+        timeout=120.0,
+    )
+    require(job["status"] == "succeeded", f"建图任务未成功：{job['status']}")
+    build, snapshot = fetch_graph(token, project_id, build_id)
+    require(build["phase"] == "ready", f"建图 phase 不是 ready：{build['phase']}")
+    require(build["canContinue"] is True, "建图 canContinue 不是 true")
+    require(snapshot is not None, "建图缺少已发布快照")
+    assert snapshot is not None
+    require(snapshot["complete"] is True, "最终快照不是 complete")
+    return build, snapshot
+
+
+def create_environment_graph(
+    state: dict[str, Any],
+    fixtures: DocumentFixtures,
+    *,
+    filename: str,
+    data: bytes,
+    content_type: str,
+    question: str,
+) -> tuple[dict[str, object], dict[str, object]]:
+    token, project_id = state["token_a"], state["project_id"]
+    document = upload_and_wait(state, fixtures, filename, data, content_type)
+    status, body = start_graph_build(
+        token, project_id, [str(document["documentId"])], question
+    )
+    require(status in (200, 202), f"开始建图期望 200/202，实际 {status}：{body}")
+    assert body is not None
+    build = body["build"]  # type: ignore[index]
+    graph, snapshot = fetch_graph_ready(
+        token, project_id, str(build["buildId"]), str(build["jobId"])
+    )
+    return graph, snapshot
+
+
+def fetch_text_source(token: str, project_id: str, document_id: str) -> str:
+    status, _, body = raw_request(
+        "GET",
+        f"/api/projects/{project_id}/documents/{document_id}/source",
+        cookie_token=token,
+    )
+    require(status == 200, f"读取文本原文期望 200，实际 {status}")
+    return body
+
+
+def environment_role_names(detail: dict[str, object]) -> set[str]:
+    return {
+        str(role.get("displayName"))
+        for role in (detail.get("roles") or [])  # type: ignore[union-attr]
+    }
+
+
+def environment_role(
+    detail: dict[str, object], name: str
+) -> dict[str, object]:
+    for role in detail.get("roles") or []:  # type: ignore[union-attr]
+        if role.get("displayName") == name:
+            return role
+    raise AssertionError(f"准备详情缺少角色：{name}")
+
+
+def environment_sources(detail: dict[str, object]) -> list[dict[str, object]]:
+    items: list[dict[str, object]] = []
+    for role in (detail.get("roles") or []) + (detail.get("previewRoles") or []):  # type: ignore[operator]
+        for field in ("mention", "background"):
+            value = role.get(field) or {}
+            items.extend(value.get("sources") or [])  # type: ignore[union-attr]
+        for field in ("expressedTopics", "involvedTopics"):
+            for topic in role.get(field) or []:
+                items.extend(topic.get("sources") or [])
+    return items
+
+
+def scenario_environment_not_triggered(
+    entry: dict[str, Any],
+    state: dict[str, Any],
+    report: dict[str, Any],
+) -> None:
+    token, project_id = state["token_a"], state["project_id"]
+    status, _, body = api_call("GET", environment_path(project_id), token)
+    require(status == 404, f"无图谱时的准备上下文应为 404，实际 {status}")
+    require(
+        isinstance(body, dict) and body.get("detail") == "图谱不存在",
+        f"无图谱原因不可区分：{body}",
+    )
+    anonymous_status, _, anonymous_body = raw_request(
+        "GET", environment_path(project_id)
+    )
+    require(anonymous_status == 401, "匿名准备上下文应为 401")
+    report["environment_evidence"] = {
+        "mode": "not-triggered",
+        "calls": {"real": 0, "double": 0},
+        "callScope": [],
+        "scenarios": [
+            {
+                "scenario": "environment-not-triggered",
+                "status": status,
+                "reason": "graph_missing",
+                "anonymousStatus": anonymous_status,
+            }
+        ],
+        "workerRestored": None,
+    }
+    entry["detail"] = (
+        f"无 build 返回 404 图谱不存在；匿名 401；未运行准备 worker（real=0）"
+    )
+
+
+def scenario_environment_full_chain(
+    entry: dict[str, Any],
+    state: dict[str, Any],
+    report: dict[str, Any],
+    fixtures: DocumentFixtures,
+) -> None:
+    token, project_id = state["token_a"], state["project_id"]
+    suffix = fixtures.suffix
+    text = (
+        f"{ENVIRONMENT_TEXT_HEADER}-{suffix}\n"
+        "实体：张同学｜个人｜张同学是参与讨论的学生。\n"
+        "实体：某校学生群体｜群体｜某校学生群体关注接驳班次。\n"
+        "实体：某大学｜高校｜某大学位于东门附近。\n"
+        "实体：某报社｜媒体机构｜某报社关注校园交通。\n"
+        "实体：某争议事件｜事件｜某争议事件引发讨论。\n"
+        "实体：某传闻｜待核实说法｜某传闻称班次将取消。\n"
+        "实体：某社交平台｜平台｜某社交平台出现相关讨论。\n"
+        "实体：调整接驳班次｜话题｜调整接驳班次是讨论焦点。\n"
+        "实体：某地｜地点｜某地是事件发生地。\n"
+        "实体：校友李某｜其他主体｜校友李某参与了讨论。\n"
+        "关系：某报社｜报道｜某大学｜某报社报道某大学。\n"
+        "关系：某争议事件｜发生于｜某地｜某争议事件发生于某地。\n"
+        "关系：张同学｜主张｜调整接驳班次｜张同学主张调整接驳班次。\n"
+        "关系：某校学生群体｜支持｜调整接驳班次｜某校学生群体支持调整接驳班次。\n"
+        "关系：某社交平台｜传播｜某传闻｜某社交平台传播某传闻。\n"
+        "关系：校友李某｜关注｜调整接驳班次｜校友李某关注调整接驳班次。\n"
+    ).encode("utf-8")
+    question = f"原创问题-{suffix}：雨天是否调整校园接驳班次？"
+    graph, snapshot = create_environment_graph(
+        state,
+        fixtures,
+        filename=f"environment-rich-{suffix}.txt",
+        data=text,
+        content_type="text/plain",
+        question=question,
+    )
+    build_id = str(graph["buildId"])
+    snapshot_id = str(snapshot["snapshotId"])
+    document_id = str(
+        (snapshot.get("nodes") or [{}])[0].get("sources", [{}])[0].get(  # type: ignore[union-attr]
+            "documentId", ""
+        )
+    )
+    require(bool(document_id), "图谱快照缺少材料标识")
+
+    # 模拟旧快照边：把“关注”关系的来源性质置空，验证保留未知。
+    edge_key = psql_scalar(
+        "SELECT e.edge_key FROM graph_edges e "
+        "JOIN graph_nodes src ON src.snapshot_id = e.snapshot_id "
+        "AND src.node_key = e.source_node_key "
+        "JOIN graph_nodes tgt ON tgt.snapshot_id = e.snapshot_id "
+        "AND tgt.node_key = e.target_node_key "
+        f"WHERE e.snapshot_id = '{snapshot_id}' "
+        "AND src.label = '校友李某' AND tgt.label = '调整接驳班次' LIMIT 1"
+    )
+    require(bool(edge_key), "未找到用于旧来源性质的边")
+    psql_exec(
+        "UPDATE graph_edges SET claim_nature = NULL WHERE snapshot_id = "
+        f"'{snapshot_id}' AND edge_key = '{edge_key}'"
+    )
+
+    context = fetch_environment_context(token, project_id, build_id)
+    require(context["canPrepare"] is True, f"准备上下文不可开始：{context}")
+    require(context["snapshot"]["snapshotId"] == snapshot_id, "上下文快照不一致")
+    require(context["build"]["question"] == question, "上下文问题不一致")
+
+    status_one, body_one = start_environment_preparation(token, project_id, build_id)
+    require(status_one == 202, f"开始准备期望 202，实际 {status_one}：{body_one}")
+    preparation_one = body_one["preparation"]  # type: ignore[index]
+    preparation_id = str(preparation_one["preparationId"])
+    job_id = str(preparation_one["jobId"])
+    run_id = str(preparation_one["runId"])
+    status_two, body_two = start_environment_preparation(token, project_id, build_id)
+    require(status_two == 200, f"重复开始期望 200，实际 {status_two}：{body_two}")
+    preparation_two = body_two["preparation"]  # type: ignore[index]
+    require(
+        (
+            preparation_two["preparationId"],
+            preparation_two["jobId"],
+            preparation_two["runId"],
+        )
+        == (preparation_id, job_id, run_id),
+        "重复开始返回了不同准备身份",
+    )
+
+    detail = wait_preparation(
+        token, project_id, preparation_id, lambda item: item["phase"] == "ready"
+    )
+    require(detail["phase"] == "ready", "准备未进入 ready")
+    require(detail["settings"]["rounds"] == 72, "默认轮数不是 72")
+    require(detail["canContinue"] is False, "未确认时 canContinue 应为 false")
+    names = environment_role_names(detail)
+    require(
+        ENVIRONMENT_ROLE_NAMES.issubset(names),
+        f"角色筛选缺少主体：{sorted(ENVIRONMENT_ROLE_NAMES - names)}",
+    )
+    require("某争议事件" not in names, "有出边的事件不应成为角色")
+    require("某传闻" not in names, "待核实说法不应成为角色")
+    require("某社交平台" not in names, "平台渠道不应成为角色")
+    role_node_keys = {str(role["nodeKey"]) for role in detail["roles"]}  # type: ignore[index]
+    graph_nodes = {str(node["key"]): node for node in snapshot.get("nodes") or []}  # type: ignore[union-attr]
+    excluded = {
+        label: graph_nodes[key]["nodeType"]
+        for key, label in (
+            (node_key, graph_nodes[node_key]["label"])
+            for node_key in graph_nodes
+            if node_key not in role_node_keys
+        )
+        if label in {"某争议事件", "某传闻", "某社交平台"}
+    }
+    require(len(excluded) == 3, f"三个反例未全部排除：{excluded}")
+
+    student = environment_role(detail, "张同学")
+    university = environment_role(detail, "某大学")
+    alumnus = environment_role(detail, "校友李某")
+    require(student["expressedTopics"], "张同学缺少表达话题")
+    require(
+        student["expressedTopics"][0]["text"] == "调整接驳班次",
+        "张同学的表达话题不正确",
+    )
+    require(university["involvedTopics"], "某大学缺少材料涉及的话题")
+    require(
+        any(
+            item.get("claimNature") is None and item.get("claimNatureKnown") is False
+            for item in alumnus["involvedTopics"] + alumnus["expressedTopics"]
+        ),
+        "旧边空来源性质未保留未知",
+    )
+    require(
+        university["background"]["stated"] is True,
+        "某大学应有关系支持背景",
+    )
+    profile_topics = [
+        topic
+        for topic in detail["initialTopics"]
+        if str(topic.get("text", "")).startswith("模拟延伸话题：")
+    ]
+    require(profile_topics, "批次 initialTopics 未进入最终配置")
+    require(
+        all(
+            topic["origin"] == "simulation"
+            and topic["claimNature"] is None
+            and topic["claimNatureKnown"] is False
+            for topic in profile_topics
+        ),
+        "批次 initialTopics 的来源性质未保留",
+    )
+
+    source_text = fetch_text_source(token, project_id, document_id)
+    text_sources = [
+        item for item in environment_sources(detail) if item.get("kind") != "pdf"
+    ]
+    require(bool(text_sources), "角色缺少文本来源")
+    utf16_ok = 0
+    visible = lambda value: "".join(str(value).split())
+    for source in text_sources:
+        start = int(source["sourceStart"])
+        end = int(source["sourceEnd"])
+        quoted = utf16_slice(source_text, start, end)
+        if visible(quoted) == visible(source["quote"]):
+            utf16_ok += 1
+    require(utf16_ok == len(text_sources), "文本来源 UTF-16 切片与引文不一致")
+
+    events = fetch_job_events(token, project_id, job_id, after=0)
+    seqs = event_seqs(events)
+    require(seqs == list(range(1, len(seqs) + 1)), f"准备事件序号不连续：{seqs}")
+    require(event_types(events)[-1] == "completed", "准备终态事件不是 completed")
+    segment = fetch_job_events(token, project_id, job_id, after=2)
+    require(
+        event_seqs(segment)[0] == 3 if event_seqs(segment) else False,
+        "after 游标未从第 3 条继续",
+    )
+    status_priority, _, priority_body = api_call(
+        "GET",
+        f"{job_path(project_id, job_id)}/events?format=json&after=1",
+        token,
+        headers={"Last-Event-ID": f"{run_id}:2"},
+    )
+    require(status_priority == 200, f"Last-Event-ID 补发失败：{status_priority}")
+    require(
+        isinstance(priority_body, dict)
+        and event_seqs(priority_body)[0] == 3,
+        "Last-Event-ID 未优先于 after",
+    )
+
+    note_environment_calls(report, preparation=detail, build_id=build_id)
+    record_environment_evidence(
+        report,
+        "environment-full-chain",
+        preparationId=preparation_id,
+        jobId=job_id,
+        runId=run_id,
+        buildId=build_id,
+        snapshotId=snapshot_id,
+        question=question,
+        startStatus=status_one,
+        duplicateStatus=status_two,
+        rounds=detail["settings"]["rounds"],
+        roles=sorted(names),
+        excluded=excluded,
+        roleNodeKeys=sorted(role_node_keys),
+        textSourceChecks=utf16_ok,
+        textSourceTotal=len(text_sources),
+        expressedTopic=student["expressedTopics"][0]["text"],
+        involvedTopicCount=len(university["involvedTopics"]),
+        legacyNullClaimNature=True,
+        eventSeqs=seqs,
+        lastEventIdPriority=True,
+        providerCalls=detail["counts"]["providerCalls"],
+        profileTopicCount=len(profile_topics),
+        canContinueBeforeConfirm=detail["canContinue"],
+    )
+    state["environment_build"] = build_id
+    state["environment_snapshot"] = snapshot_id
+    state["environment_preparation"] = preparation_id
+    state["environment_job"] = job_id
+    state["environment_run"] = run_id
+    state["environment_question"] = question
+    entry["detail"] = (
+        f"ready；角色 {sorted(names)}；排除事件/说法/平台；"
+        f"文本 UTF-16 来源 {utf16_ok}/{len(text_sources)}；事件 1–{len(seqs)}"
+    )
+
+
+def scenario_environment_rounds_and_freeze(
+    entry: dict[str, Any],
+    state: dict[str, Any],
+    report: dict[str, Any],
+) -> None:
+    token, project_id = state["token_a"], state["project_id"]
+    preparation_id = state["environment_preparation"]
+    build_id = state["environment_build"]
+    snapshot_id = state["environment_snapshot"]
+
+    initial = fetch_preparation(token, project_id, preparation_id)
+    require(initial["settings"]["rounds"] == 72, "初始轮数不是 72")
+    require(initial["settings"]["settingsRevision"] == 1, "初始版本不是 1")
+    require(initial["settings"]["autoRounds"] == 72, "初始自动轮数不是 72")
+
+    def save(rounds: int, revision: int) -> dict[str, object]:
+        status, _, body = api_call(
+            "PATCH",
+            preparation_path(project_id, preparation_id, "/configuration"),
+            token,
+            payload={
+                "settingsRevision": revision,
+                "durationHours": 72,
+                "minutesPerRound": 60,
+                "roundsMode": "manual",
+                "manualRounds": rounds,
+            },
+            headers={"Origin": BASE_URL},
+        )
+        require(status == 200, f"保存 {rounds} 轮期望 200，实际 {status}：{body}")
+        require(isinstance(body, dict), "保存轮数响应不是对象")
+        return body["preparation"]  # type: ignore[index]
+
+    saved_40 = save(40, 1)
+    require(saved_40["settings"]["rounds"] == 40, "手动 40 轮未生效")
+    require(saved_40["settings"]["settingsRevision"] == 2, "保存后版本未递增")
+    reread = fetch_preparation(token, project_id, preparation_id)
+    require(reread["settings"]["rounds"] == 40, "刷新后未读回 40 轮")
+
+    saved_3 = save(3, 2)
+    require(saved_3["settings"]["rounds"] == 3, "手动 3 轮未生效")
+    require(saved_3["settings"]["settingsRevision"] == 3, "B 页保存后版本不是 3")
+
+    conflict_status, _, conflict_body = api_call(
+        "POST",
+        preparation_path(project_id, preparation_id, "/confirm"),
+        token,
+        payload={"settingsRevision": 2},
+        headers={"Origin": BASE_URL},
+    )
+    require(
+        conflict_status == 409, f"过期版本确认期望 409，实际 {conflict_status}"
+    )
+    require(
+        isinstance(conflict_body, dict)
+        and conflict_body.get("code") == "settings_conflict",
+        f"过期版本原因码异常：{conflict_body}",
+    )
+    frozen_count = int(
+        psql_scalar(
+            "SELECT count(*) FROM environment_frozen_selections WHERE "
+            f"preparation_id = '{preparation_id}'"
+        )
+        or 0
+    )
+    require(frozen_count == 0, f"冲突确认后冻结记录应为 0，实际 {frozen_count}")
+
+    refreshed = fetch_preparation(token, project_id, preparation_id)
+    require(refreshed["settings"]["rounds"] == 3, "冲突后未显示 3 轮")
+    require(
+        refreshed["settings"]["settingsRevision"] == 3, "冲突后版本未回到 3"
+    )
+
+    confirm_status, _, confirm_body = api_call(
+        "POST",
+        preparation_path(project_id, preparation_id, "/confirm"),
+        token,
+        payload={"settingsRevision": 3},
+        headers={"Origin": BASE_URL},
+    )
+    require(confirm_status == 200, f"确认期望 200，实际 {confirm_status}：{confirm_body}")
+    assert isinstance(confirm_body, dict)
+    frozen = confirm_body["frozenSelection"]  # type: ignore[index]
+    confirmation = confirm_body["preparation"]  # type: ignore[index]
+    require(confirm_body["preparation"]["canContinue"] is True, "确认后 canContinue 应为 true")
+    require(frozen["settings"]["rounds"] == 3, "冻结轮数不是 3")
+    require(frozen["buildId"] == build_id, "冻结 buildId 不一致")
+    require(frozen["snapshotId"] == snapshot_id, "冻结 snapshotId 不一致")
+    require(frozen["question"] == state["environment_question"], "冻结问题不一致")
+    require(
+        frozen["platforms"]
+        == [
+            {"platformKey": "platform_a", "nativePlatform": "twitter"},
+            {"platformKey": "platform_b", "nativePlatform": "reddit"},
+        ],
+        "冻结平台映射不正确",
+    )
+    frozen_text = json.dumps(frozen, ensure_ascii=False)
+    require("create_post" not in frozen_text, "冻结选择不应包含 create_post")
+    require("create_comment" not in frozen_text, "冻结选择不应包含 create_comment")
+    require(
+        any(topic["origin"] == "question" for topic in frozen["initialTopics"]),
+        "冻结初始话题缺少推演问题",
+    )
+    require(
+        any(
+            topic["origin"] == "material" and topic["sources"]
+            for topic in frozen["initialTopics"]
+        ),
+        "冻结材料话题缺少来源",
+    )
+    first = frozen["activation"]["firstSpeakerRoleIds"]
+    require(bool(first), "冻结选择缺少首发角色")
+    require(
+        frozen["activation"]["order"][: len(first)] == first,
+        "首发角色不是激活顺序前缀",
+    )
+    mapped = {
+        item["roleId"]: item["topicId"]
+        for item in frozen["activation"]["firstSpeakerTopics"]
+    }
+    require(set(mapped) == set(first), "首发角色与话题未一一对应")
+    require(
+        [role["roleId"] for role in frozen["roles"]]
+        == frozen["activation"]["order"],
+        "冻结角色顺序与激活顺序不一致",
+    )
+
+    repeat_status, _, repeat_body = api_call(
+        "POST",
+        preparation_path(project_id, preparation_id, "/confirm"),
+        token,
+        payload={"settingsRevision": 3},
+        headers={"Origin": BASE_URL},
+    )
+    require(repeat_status == 200, f"重复确认期望 200，实际 {repeat_status}")
+    assert isinstance(repeat_body, dict)
+    require(
+        repeat_body["frozenSelection"]["selectionId"] == frozen["selectionId"],
+        "重复确认返回了不同 selectionId",
+    )
+    frozen_count_after = int(
+        psql_scalar(
+            "SELECT count(*) FROM environment_frozen_selections WHERE "
+            f"preparation_id = '{preparation_id}'"
+        )
+        or 0
+    )
+    require(frozen_count_after == 1, "重复确认新增了冻结记录")
+
+    frozen_save_status, _, frozen_save_body = api_call(
+        "PATCH",
+        preparation_path(project_id, preparation_id, "/configuration"),
+        token,
+        payload={
+            "settingsRevision": 3,
+            "durationHours": 72,
+            "minutesPerRound": 60,
+            "roundsMode": "manual",
+            "manualRounds": 40,
+        },
+        headers={"Origin": BASE_URL},
+    )
+    require(
+        frozen_save_status == 409,
+        f"冻结后保存期望 409，实际 {frozen_save_status}",
+    )
+    require(
+        isinstance(frozen_save_body, dict)
+        and frozen_save_body.get("code") == "preparation_frozen",
+        f"冻结后原因码异常：{frozen_save_body}",
+    )
+
+    record_environment_evidence(
+        report,
+        "environment-rounds-and-freeze",
+        preparationId=preparation_id,
+        initialRounds=72,
+        rounds40=saved_40["settings"]["rounds"],
+        revisionAfter40=saved_40["settings"]["settingsRevision"],
+        rereadRounds=reread["settings"]["rounds"],
+        rounds3=saved_3["settings"]["rounds"],
+        revisionAfter3=saved_3["settings"]["settingsRevision"],
+        conflictCode=conflict_body.get("code"),  # type: ignore[union-attr]
+        frozenCountBefore=frozen_count,
+        frozenCountAfter=frozen_count_after,
+        frozenRounds=frozen["settings"]["rounds"],
+        selectionId=frozen["selectionId"],
+        repeatedSelectionSame=True,
+        firstSpeakerRoleCount=len(first),
+        topicOrigins=sorted({topic["origin"] for topic in frozen["initialTopics"]}),
+        canContinue=confirmation["canContinue"],
+    )
+    state["environment_frozen"] = frozen
+    entry["detail"] = (
+        f"72→40（revision 2）→3（revision 3）；A 用 revision 2 确认收到 "
+        f"settings_conflict 且冻结 0；重读后确认冻结 3 轮，selectionId 幂等"
+    )
+
+
+def scenario_environment_invalid_config(
+    entry: dict[str, Any],
+    state: dict[str, Any],
+    report: dict[str, Any],
+) -> None:
+    token, project_id = state["token_a"], state["project_id"]
+    preparation_id = state["environment_preparation"]
+    revision = fetch_preparation(token, project_id, preparation_id)["settings"][
+        "settingsRevision"
+    ]
+
+    def attempt(payload: dict[str, object], expected: str) -> int:
+        status, _, body = api_call(
+            "PATCH",
+            preparation_path(project_id, preparation_id, "/configuration"),
+            token,
+            payload=payload,
+            headers={"Origin": BASE_URL},
+        )
+        require(status == 422, f"{expected} 期望 422，实际 {status}：{body}")
+        require(
+            isinstance(body, dict) and body.get("code") == expected,
+            f"{expected} 原因码异常：{body}",
+        )
+        return status
+
+    zero = attempt(
+        {
+            "settingsRevision": revision,
+            "durationHours": 0,
+            "minutesPerRound": 60,
+            "roundsMode": "auto",
+        },
+        "duration_invalid",
+    )
+    invalid_rounds = attempt(
+        {
+            "settingsRevision": revision,
+            "durationHours": 72,
+            "minutesPerRound": 60,
+            "roundsMode": "manual",
+            "manualRounds": 0,
+        },
+        "rounds_invalid",
+    )
+    not_integral = attempt(
+        {
+            "settingsRevision": revision,
+            "durationHours": 2,
+            "minutesPerRound": 90,
+            "roundsMode": "auto",
+        },
+        "rounds_not_integral",
+    )
+    unchanged = fetch_preparation(token, project_id, preparation_id)
+    require(
+        unchanged["settings"]["rounds"] == 72,
+        "非法配置改写了当前生效轮数",
+    )
+    record_environment_evidence(
+        report,
+        "environment-invalid-config",
+        durationStatus=zero,
+        roundsStatus=invalid_rounds,
+        integralStatus=not_integral,
+        roundsAfter=unchanged["settings"]["rounds"],
+    )
+    entry["detail"] = "零时长/非法轮数/不能整除分别 422，生效轮数保持 72"
+
+
+def scenario_environment_batches_and_takeover(
+    entry: dict[str, Any],
+    state: dict[str, Any],
+    report: dict[str, Any],
+    fixtures: DocumentFixtures,
+) -> None:
+    token, project_id = state["token_a"], state["project_id"]
+    suffix = fixtures.suffix
+    pdf = build_pdf_bytes(
+        [
+            [f"PAGE-ONE-{suffix}"],
+            [],
+            [
+                f"PAGE-THREE-{suffix}",
+                "Entity: ReporterLee|Person|ReporterLee reported the campus issue.",
+                "Entity: CampusOffice|University|CampusOffice published a notice.",
+                "Entity: ParentGroup|Group|ParentGroup supports the plan.",
+                "Entity: CampusPlan|Topic|CampusPlan is the focus.",
+                "Relation: ReporterLee|reports|CampusOffice|ReporterLee reports CampusOffice.",
+                "Relation: ParentGroup|supports|CampusPlan|ParentGroup supports the CampusPlan.",
+                "Relation: CampusOffice|supports|CampusPlan|CampusOffice supports the CampusPlan.",
+            ],
+        ]
+    )
+    question = f"原创问题-{suffix}：是否调整课程安排？"
+    graph, snapshot = create_environment_graph(
+        state,
+        fixtures,
+        filename=f"environment-pages-{suffix}.pdf",
+        data=pdf,
+        content_type="application/pdf",
+        question=question,
+    )
+    build_id = str(graph["buildId"])
+    recreate_worker(
+        {
+            "ENVIRONMENT_MODEL_PROVIDER": "stub",
+            "ENVIRONMENT_ALLOW_STUB": "true",
+            "ENVIRONMENT_PROFILE_BATCH_SIZE": "2",
+            "ENVIRONMENT_PROFILE_DELAY_MS": "1500",
+        }
+    )
+    status, body = start_environment_preparation(token, project_id, build_id)
+    require(status == 202, f"开始准备期望 202，实际 {status}：{body}")
+    preparation = body["preparation"]  # type: ignore[index]
+    preparation_id = str(preparation["preparationId"])
+    job_id = str(preparation["jobId"])
+    run_id = str(preparation["runId"])
+
+    def first_batch_ready() -> bool:
+        value = psql_scalar(
+            "SELECT preview_role_count FROM environment_preparations WHERE "
+            f"id = '{preparation_id}'"
+        )
+        return bool(value) and int(value) >= 2
+
+    require(
+        wait_for(first_batch_ready, timeout=60.0, interval=0.05),
+        "第一批画像未在限定时间内完成",
+    )
+    compose("stop", "worker")
+    preview = fetch_preparation(token, project_id, preparation_id)
+    require(preview["phase"] == "preparing", "停止 worker 后准备应保持 preparing")
+    require(
+        len(preview["previewRoles"]) >= 2,
+        "第一批预览角色数量不足",
+    )
+    require(preview["previewOnly"] is True, "预览未标记 previewOnly")
+    require(preview["canContinue"] is False, "预览阶段 canContinue 应为 false")
+    require(preview["platforms"] == [], "预览阶段不应出现平台映射")
+    require(preview["initialTopics"] == [], "预览阶段不应出现初始话题")
+    require(preview["activation"] is None, "预览阶段不应出现激活顺序")
+    require(
+        preview["roles"] == [], "预览阶段不应返回最终角色"
+    )
+    first_ids = {str(role["roleId"]) for role in preview["previewRoles"]}
+
+    def awaiting_takeover() -> bool:
+        value = psql_scalar(
+            "SELECT (status = 'running' AND lease_expires_at <= clock_timestamp()) "
+            f"FROM jobs WHERE id = '{job_id}'"
+        )
+        return value == "t"
+
+    require(
+        wait_for(awaiting_takeover, timeout=30.0, interval=0.25),
+        "worker 停止后任务未进入等待接手",
+    )
+    start_worker()
+    ready = wait_preparation(
+        token, project_id, preparation_id, lambda item: item["phase"] == "ready"
+    )
+    job = fetch_job(token, project_id, job_id)
+    require(int(job["attempts"]) > 1, "接手后 attempts 未增加")
+    require(str(job["jobId"]) == job_id, "接手改变了 jobId")
+    require(str(job["runId"]) == run_id, "接手改变了 runId")
+    require(
+        env_identity(ready, "preparationId") == preparation_id,
+        "接手改变了 preparationId",
+    )
+    final_ids = {str(role["roleId"]) for role in ready["roles"]}  # type: ignore[index]
+    require(first_ids.issubset(final_ids), "接手后第一批角色被重复生成或丢失")
+    require(len(ready["roles"]) == 3, f"PDF 角色数量不是 3：{len(ready['roles'])}")
+    page_sources = [
+        source
+        for source in environment_sources(ready)
+        if source.get("kind") == "pdf" and int(source.get("pageNo") or 0) == 3
+    ]
+    require(bool(page_sources), "PDF 角色来源没有落在第 3 页")
+    require(
+        any("#page=3" in str(source["locator"]["url"]) for source in page_sources),
+        "PDF 来源链接不是 #page=3",
+    )
+    note_environment_calls(report, preparation=ready, build_id=build_id)
+    record_environment_evidence(
+        report,
+        "environment-batches-and-takeover",
+        preparationId=preparation_id,
+        jobId=job_id,
+        runId=run_id,
+        buildId=build_id,
+        snapshotId=str(snapshot["snapshotId"]),
+        firstBatchRoleIds=sorted(first_ids),
+        firstBatchCount=len(first_ids),
+        previewPhase=preview["phase"],
+        previewPlatforms=preview["platforms"],
+        attempts=job["attempts"],
+        samePreparation=True,
+        firstBatchReused=True,
+        pdfPageSources=len(page_sources),
+        pdfPageNo=3,
+        pdfLocator="#page=3",
+        providerCalls=ready["counts"]["providerCalls"],
+    )
+    state["environment_pdf_build"] = build_id
+    state["environment_pdf_preparation"] = preparation_id
+    entry["detail"] = (
+        f"第一批 {len(first_ids)} 个角色可预览且无平台/话题/顺序；停止 worker 后 "
+        f"awaitingTakeover，接手 attempts={job['attempts']}，PDF 来源 pageNo=3"
+    )
+
+
+def env_identity(detail: dict[str, object], key: str) -> str:
+    return str(detail.get(key) or "")
+
+
+def scenario_environment_no_roles_and_unavailable(
+    entry: dict[str, Any],
+    state: dict[str, Any],
+    report: dict[str, Any],
+    fixtures: DocumentFixtures,
+) -> None:
+    token, project_id = state["token_a"], state["project_id"]
+    suffix = fixtures.suffix
+    no_role_text = (
+        "实体：某争议事件｜事件｜某争议事件引发讨论。\n"
+        "实体：某传闻｜待核实说法｜某传闻称安排将取消。\n"
+        "实体：某社交平台｜平台｜某社交平台出现相关讨论。\n"
+        "实体：某地｜地点｜某地是事件发生地。\n"
+        "关系：某争议事件｜发生于｜某地｜某争议事件发生于某地。\n"
+        "关系：某社交平台｜传播｜某传闻｜某社交平台传播某传闻。\n"
+    ).encode("utf-8")
+    graph, snapshot = create_environment_graph(
+        state,
+        fixtures,
+        filename=f"environment-no-roles-{suffix}.txt",
+        data=no_role_text,
+        content_type="text/plain",
+        question=f"原创问题-{suffix}：只有事件和说法吗？",
+    )
+    build_id = str(graph["buildId"])
+    before = psql_scalar(
+        "SELECT count(*) FROM environment_preparations WHERE build_id = "
+        f"'{build_id}'"
+    )
+    no_role_status, no_role_body = start_environment_preparation(
+        token, project_id, build_id
+    )
+    require(
+        no_role_status == 422,
+        f"无角色开始期望 422，实际 {no_role_status}：{no_role_body}",
+    )
+    require(
+        isinstance(no_role_body, dict)
+        and no_role_body.get("code") == "no_role_candidates",
+        f"无角色原因码异常：{no_role_body}",
+    )
+    after = psql_scalar(
+        "SELECT count(*) FROM environment_preparations WHERE build_id = "
+        f"'{build_id}'"
+    )
+    require(before == after == "0", "无角色请求创建了准备记录")
+
+    available_text = (
+        "实体：赵同学｜个人｜赵同学参与讨论。\n"
+        "实体：某课程安排｜话题｜某课程安排是讨论焦点。\n"
+        "关系：赵同学｜主张｜某课程安排｜赵同学主张调整课程安排。\n"
+    ).encode("utf-8")
+    graph, snapshot = create_environment_graph(
+        state,
+        fixtures,
+        filename=f"environment-unavailable-{suffix}.txt",
+        data=available_text,
+        content_type="text/plain",
+        question=f"原创问题-{suffix}：画像不可用时如何处理？",
+    )
+    build_id = str(graph["buildId"])
+    recreate_worker(
+        {
+            "ENVIRONMENT_MODEL_PROVIDER": "unconfigured",
+            "ENVIRONMENT_ALLOW_STUB": "false",
+        }
+    )
+    status, body = start_environment_preparation(token, project_id, build_id)
+    require(status == 202, f"开始准备期望 202，实际 {status}：{body}")
+    preparation = body["preparation"]  # type: ignore[index]
+    preparation_id = str(preparation["preparationId"])
+    failed = wait_preparation(
+        token, project_id, preparation_id, lambda item: item["phase"] == "failed"
+    )
+    require(
+        failed["failure"]["code"] == "model_unavailable",
+        f"模型不可用原因码异常：{failed['failure']}",
+    )
+    require(failed["canContinue"] is False, "失败准备不应可继续")
+    published = int(
+        psql_scalar(
+            "SELECT count(*) FROM environment_roles WHERE preparation_id = "
+            f"'{preparation_id}' AND published_at IS NOT NULL"
+        )
+        or 0
+    )
+    frozen = int(
+        psql_scalar(
+            "SELECT count(*) FROM environment_frozen_selections WHERE "
+            f"preparation_id = '{preparation_id}'"
+        )
+        or 0
+    )
+    require(published == 0 and frozen == 0, "失败准备发布了最终角色或冻结选择")
+
+    retry_required, retry_required_body = start_environment_preparation(
+        token, project_id, build_id
+    )
+    require(
+        retry_required == 409,
+        f"失败后普通开始期望 409，实际 {retry_required}",
+    )
+    require(
+        isinstance(retry_required_body, dict)
+        and retry_required_body.get("code") == "preparation_retry_required",
+        f"普通开始原因码异常：{retry_required_body}",
+    )
+
+    recreate_worker(environment_runtime_env())
+    retry_status, retry_body = retry_environment_preparation(
+        token, project_id, preparation_id
+    )
+    require(retry_status == 202, f"显式重试期望 202，实际 {retry_status}：{retry_body}")
+    retried = retry_body["preparation"]  # type: ignore[index]
+    require(
+        retried["preparationId"] != preparation_id,
+        "显式重试未创建新的准备",
+    )
+    retried_ready = wait_preparation(
+        token,
+        project_id,
+        str(retried["preparationId"]),
+        lambda item: item["phase"] == "ready",
+    )
+    note_environment_calls(report, preparation=retried_ready, build_id=build_id)
+    record_environment_evidence(
+        report,
+        "environment-no-roles-and-model-unavailable",
+        noRoleStatus=no_role_status,
+        noRoleCode=no_role_body.get("code"),  # type: ignore[union-attr]
+        noRoleRecordsBefore=before,
+        noRoleRecordsAfter=after,
+        unavailablePreparationId=preparation_id,
+        unavailableCode=failed["failure"]["code"],
+        publishedRoles=published,
+        frozenSelections=frozen,
+        normalStartAfterFailure=retry_required,
+        retryStatus=retry_status,
+        retriedPreparationId=retried["preparationId"],
+        retriedPhase=retried_ready["phase"],
+    )
+    entry["detail"] = (
+        "无角色 422 且不建记录；模型不可用 failed/model_unavailable；普通开始 409，"
+        "显式重试 202 并最终 ready"
+    )
+
+
+def scenario_environment_access_boundaries(
+    entry: dict[str, Any],
+    state: dict[str, Any],
+    report: dict[str, Any],
+) -> None:
+    token, project_id = state["token_a"], state["project_id"]
+    preparation_id = state["environment_preparation"]
+    build_id = state["environment_build"]
+
+    anonymous = [
+        raw_request("GET", environment_path(project_id)),
+        raw_request("POST", f"/api/projects/{project_id}/environment/preparations"),
+        raw_request("GET", preparation_path(project_id, preparation_id)),
+    ]
+    require(
+        [item[0] for item in anonymous] == [401, 401, 401],
+        f"匿名准备接口未全部 401：{[item[0] for item in anonymous]}",
+    )
+
+    client_b = HttpClient()
+    status_login, _, body_login = client_b.request(
+        "POST",
+        "/api/auth/login",
+        payload={"email": ACCOUNT_B, "password": state["password"]},
+        headers={"Origin": BASE_URL},
+    )
+    require(status_login == 200, f"B 登录失败：{body_login[:200]}")
+    other_project, _, other_body = client_b.request(
+        "GET", environment_path(project_id)
+    )
+    missing_project, _, missing_body = client_b.request(
+        "GET", environment_path(str(uuid.uuid4()))
+    )
+    require(other_project == 404 and missing_project == 404, "他人/不存在项目不是 404")
+    require(other_body == missing_body == '{"detail":"项目不存在"}', "他人项目响应体不同")
+
+    missing_build_status, _, missing_build_body = api_call(
+        "GET", environment_path(project_id, str(uuid.uuid4())), token
+    )
+    require(missing_build_status == 404, "不存在 build 期望 404")
+    require(
+        isinstance(missing_build_body, dict)
+        and missing_build_body.get("detail") == "图谱不存在",
+        f"不存在 build 响应异常：{missing_build_body}",
+    )
+    missing_prep_status, _, missing_prep_body = api_call(
+        "GET", preparation_path(project_id, str(uuid.uuid4())), token
+    )
+    require(missing_prep_status == 404, "不存在准备期望 404")
+    require(
+        isinstance(missing_prep_body, dict)
+        and missing_prep_body.get("detail") == "准备不存在",
+        f"不存在准备响应异常：{missing_prep_body}",
+    )
+
+    compose("stop", "db")
+    outage = wait_for(
+        lambda: http_status("/health")[0] == 503,
+        timeout=30.0,
+        interval=0.25,
+    )
+    require(outage, "停止数据库后 /health 未返回 503")
+    outage_status, outage_headers, outage_body = state["client_a"].request(
+        "GET", preparation_path(project_id, preparation_id)
+    )
+    require(outage_status == 503, f"数据库不可达时准备详情应 503，实际 {outage_status}")
+    require(
+        SESSION_COOKIE not in outage_headers.get("set-cookie", ""),
+        "503 响应清除了会话 Cookie",
+    )
+    compose("start", "db")
+    require(
+        wait_for(lambda: http_status("/health")[0] == 200, timeout=60.0, interval=0.5),
+        "数据库恢复后 /health 未返回 200",
+    )
+    recovered = fetch_preparation(token, project_id, preparation_id)
+    require(recovered["phase"] == "ready", "数据库恢复后准备详情不可用")
+    record_environment_evidence(
+        report,
+        "environment-access-boundaries",
+        anonymousStatuses=[item[0] for item in anonymous],
+        otherProjectStatus=other_project,
+        missingBuildStatus=missing_build_status,
+        missingPreparationStatus=missing_prep_status,
+        outageStatus=outage_status,
+        cookiePreserved=True,
+        recoveredPhase=recovered["phase"],
+    )
+    entry["detail"] = (
+        "匿名 401；他人/不存在项目 404；不存在 build/准备分别为图谱不存在/准备不存在；"
+        "停库 503 且 Cookie 保留，恢复后可读"
+    )
+
+
+def scenario_environment_change_material(
+    entry: dict[str, Any],
+    state: dict[str, Any],
+    report: dict[str, Any],
+    fixtures: DocumentFixtures,
+) -> None:
+    token, project_id = state["token_a"], state["project_id"]
+    suffix = fixtures.suffix
+    text = (
+        "实体：李老师｜个人｜李老师是参与讨论的教师。\n"
+        "实体：家长委员会｜群体｜家长委员会关注校车安排。\n"
+        "实体：调整校车路线｜话题｜调整校车路线是讨论焦点。\n"
+        "关系：李老师｜主张｜调整校车路线｜李老师主张调整校车路线。\n"
+        "关系：家长委员会｜支持｜调整校车路线｜家长委员会支持调整校车路线。\n"
+    ).encode("utf-8")
+    graph, snapshot = create_environment_graph(
+        state,
+        fixtures,
+        filename=f"environment-second-{suffix}.txt",
+        data=text,
+        content_type="text/plain",
+        question=f"原创问题-{suffix}：是否调整校车路线？",
+    )
+    build_id = str(graph["buildId"])
+    status, body = start_environment_preparation(token, project_id, build_id)
+    require(status == 202, f"新 build 开始准备期望 202，实际 {status}：{body}")
+    preparation = body["preparation"]  # type: ignore[index]
+    preparation_id = str(preparation["preparationId"])
+    ready = wait_preparation(
+        token, project_id, preparation_id, lambda item: item["phase"] == "ready"
+    )
+    names = environment_role_names(ready)
+    require(
+        {"李老师", "家长委员会"}.issubset(names),
+        f"换材料后角色未变化：{names}",
+    )
+    require(
+        "张同学" not in names and "某报社" not in names,
+        "新准备复用了旧材料角色",
+    )
+    old = fetch_preparation(
+        token, project_id, state["environment_preparation"]
+    )
+    require(
+        old["snapshotId"] == state["environment_snapshot"],
+        "旧准备快照被新 build 覆盖",
+    )
+    old_frozen = old["frozenSelection"]
+    require(
+        old_frozen is not None
+        and old_frozen["snapshotId"] == state["environment_snapshot"],
+        "旧冻结选择被新 build 改写",
+    )
+    note_environment_calls(report, preparation=ready, build_id=build_id)
+    record_environment_evidence(
+        report,
+        "environment-change-material",
+        firstBuildId=state["environment_build"],
+        firstSnapshotId=state["environment_snapshot"],
+        firstRoles=sorted(ENVIRONMENT_ROLE_NAMES),
+        secondBuildId=build_id,
+        secondSnapshotId=str(snapshot["snapshotId"]),
+        secondRoles=sorted(names),
+        oldPreparationSnapshot=old["snapshotId"],
+        oldFrozenSnapshot=old_frozen["snapshotId"],
+    )
+    entry["detail"] = (
+        f"新 build 角色 {sorted(names)}；旧准备与冻结选择仍绑定旧 snapshotId"
+    )
+
+
 def run_acceptance(report: dict[str, Any], change: str | None = None) -> bool:
     state: dict[str, Any] = {}
     fixtures = DocumentFixtures()
@@ -3348,6 +4713,28 @@ def run_acceptance(report: dict[str, Any], change: str | None = None) -> bool:
                 scenario_graph_second_build(entry, state, report)
             with scenario(report, "graph-redaction") as entry:
                 scenario_graph_redaction(entry, report, fixtures)
+        if change is None:
+            with scenario(report, "environment-not-triggered") as entry:
+                scenario_environment_not_triggered(entry, state, report)
+        if change == ENVIRONMENT_CHANGE_ID:
+            with scenario(report, "environment-full-chain") as entry:
+                scenario_environment_full_chain(entry, state, report, fixtures)
+            with scenario(report, "environment-invalid-config") as entry:
+                scenario_environment_invalid_config(entry, state, report)
+            with scenario(report, "environment-rounds-and-freeze") as entry:
+                scenario_environment_rounds_and_freeze(entry, state, report)
+            with scenario(report, "environment-batches-and-takeover") as entry:
+                scenario_environment_batches_and_takeover(
+                    entry, state, report, fixtures
+                )
+            with scenario(report, "environment-no-roles-and-model-unavailable") as entry:
+                scenario_environment_no_roles_and_unavailable(
+                    entry, state, report, fixtures
+                )
+            with scenario(report, "environment-access-boundaries") as entry:
+                scenario_environment_access_boundaries(entry, state, report)
+            with scenario(report, "environment-change-material") as entry:
+                scenario_environment_change_material(entry, state, report, fixtures)
         if change == DOCUMENT_CHANGE_ID:
             with scenario(report, "document-pdf-pages") as entry:
                 scenario_document_pdf_pages(entry, state, report, fixtures)
@@ -3463,6 +4850,7 @@ def new_report(expected_sha: str | None) -> dict[str, Any]:
         "document_evidence": [],
         "engine_evidence": None,
         "graph_evidence": None,
+        "environment_evidence": None,
         "started_at": utc_now(),
         "finished_at": None,
         "exit_code": None,
@@ -3478,9 +4866,21 @@ def new_report(expected_sha: str | None) -> dict[str, Any]:
 
 def run(report: dict[str, Any], args: argparse.Namespace) -> int:
     global COMPOSE_PROJECT
-    COMPOSE_PROJECT = (
-        os.environ.get("VERIFY_COMPOSE_PROJECT", "").strip() or "echosim-verify"
-    )
+    try:
+        COMPOSE_PROJECT = isolated_compose_project(
+            os.environ.get("VERIFY_COMPOSE_PROJECT")
+        )
+    except VerifyIsolationError as exc:
+        print(f"[verify] {exc}")
+        report["scenarios"].append(
+            {
+                "id": "verify-isolation",
+                "status": "failed",
+                "duration_ms": 0,
+                "detail": str(exc),
+            }
+        )
+        return finalize(report, 2)
     allow_dirty = os.environ.get("ALLOW_DIRTY", "").strip().lower() in {"1", "true", "yes"}
 
     try:
@@ -3558,10 +4958,35 @@ def run(report: dict[str, Any], args: argparse.Namespace) -> int:
         )
         return finalize(report, 2)
 
+    try:
+        verify_lock = acquire_verify_lock(COMPOSE_PROJECT)
+    except VerifyIsolationError as exc:
+        print(f"[verify] {exc}")
+        report["scenarios"].append(
+            {
+                "id": "verify-isolation",
+                "status": "failed",
+                "duration_ms": 0,
+                "detail": str(exc),
+            }
+        )
+        return finalize(report, 2)
+    report["scenarios"].append(
+        {
+            "id": "verify-isolation",
+            "status": "passed",
+            "duration_ms": 0,
+            "detail": f"隔离项目 {COMPOSE_PROJECT} 已通过命名校验并获取独占锁",
+        }
+    )
+
     isolated_saved = apply_runtime_env(isolated_runtime_env())
     graph_saved: dict[str, str | None] | None = None
+    environment_saved: dict[str, str | None] | None = None
     if change == GRAPH_CHANGE_ID:
         graph_saved = apply_runtime_env(graph_runtime_env())
+    if change == ENVIRONMENT_CHANGE_ID:
+        environment_saved = apply_runtime_env(environment_runtime_env())
     if change == CHANGE_ID:
         # 放大步骤间隔，让“读到第 4 条后断开”、worker 中断等窗口足够宽。
         os.environ["TEST_TASK_STEP_DELAY_MS"] = VERIFY_STEP_DELAY_MS
@@ -3574,6 +4999,8 @@ def run(report: dict[str, Any], args: argparse.Namespace) -> int:
             restore_database()
             if graph_saved is not None:
                 restore_runtime_env(graph_saved)
+            if environment_saved is not None:
+                restore_runtime_env(environment_saved)
             restore_worker_defaults()
         if change == GRAPH_CHANGE_ID and passed:
             try:
@@ -3581,8 +5008,15 @@ def run(report: dict[str, Any], args: argparse.Namespace) -> int:
                     scenario_graph_worker_restored(entry, report)
             except ScenarioFailed:
                 passed = False
+        if change == ENVIRONMENT_CHANGE_ID and passed:
+            try:
+                with scenario(report, "environment-worker-env-restored") as entry:
+                    scenario_environment_worker_restored(entry, report)
+            except ScenarioFailed:
+                passed = False
     finally:
         restore_runtime_env(isolated_saved)
+        release_verify_lock(verify_lock)
 
     return finalize(report, 0 if passed else 1)
 

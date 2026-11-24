@@ -290,6 +290,62 @@ class MigrationRunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("0002_b", connection.applied)
 
 
+class EnvironmentMigrationFileTests(unittest.TestCase):
+    def test_0011_adds_environment_tables_and_run_kind(self) -> None:
+        migrations = discover_migrations(Path("app/migrations"))
+        versions = [m.version for m in migrations]
+        self.assertIn("0011_agent_environment_preparation", versions)
+        self.assertLess(
+            versions.index("0010_author_recommendation"),
+            versions.index("0011_agent_environment_preparation"),
+        )
+        migration = next(
+            m
+            for m in migrations
+            if m.version == "0011_agent_environment_preparation"
+        )
+        joined = "\n".join(
+            split_sql_statements(migration.path.read_text(encoding="utf-8"))
+        )
+        for table in (
+            "environment_preparations",
+            "environment_roles",
+            "environment_role_sources",
+            "environment_platforms",
+            "environment_topics",
+            "environment_activation",
+            "environment_frozen_selections",
+        ):
+            self.assertIn(f"CREATE TABLE {table}", joined)
+        self.assertIn("'agent.environment.prepare'", joined)
+        self.assertIn("environment_preparations_active_build_idx", joined)
+        self.assertIn("environment_roles_preparation_node_unique", joined)
+        self.assertIn("environment_role_sources_evidence_fk", joined)
+        self.assertIn("environment_platforms_mapping_check", joined)
+
+
+class EnvironmentProfileTopicsMigrationTests(unittest.TestCase):
+    def test_0012_adds_profile_topics_array_column(self) -> None:
+        migrations = discover_migrations(Path("app/migrations"))
+        versions = [m.version for m in migrations]
+        self.assertIn("0012_environment_profile_topics", versions)
+        self.assertLess(
+            versions.index("0011_agent_environment_preparation"),
+            versions.index("0012_environment_profile_topics"),
+        )
+        migration = next(
+            m
+            for m in migrations
+            if m.version == "0012_environment_profile_topics"
+        )
+        joined = "\n".join(
+            split_sql_statements(migration.path.read_text(encoding="utf-8"))
+        )
+        self.assertIn("ADD COLUMN profile_topics jsonb", joined)
+        self.assertIn("DEFAULT '[]'::jsonb", joined)
+        self.assertIn("jsonb_typeof(profile_topics) = 'array'", joined)
+
+
 @unittest.skipUnless(HAS_TEST_DATABASE, SKIP_REASON)
 class PostgresMigrationTests(unittest.IsolatedAsyncioTestCase):
     """在独立临时数据库验证空库、旧库升级、重复迁移与约束。"""
@@ -333,6 +389,8 @@ class PostgresMigrationTests(unittest.IsolatedAsyncioTestCase):
                 "0008_graph_build_provider_calls",
                 "0009_graph_claim_nature",
                 "0010_author_recommendation",
+                "0011_agent_environment_preparation",
+                "0012_environment_profile_topics",
             ],
         )
         self.assertEqual(rerun, [])
@@ -409,6 +467,8 @@ class PostgresMigrationTests(unittest.IsolatedAsyncioTestCase):
                 "0008_graph_build_provider_calls",
                 "0009_graph_claim_nature",
                 "0010_author_recommendation",
+                "0011_agent_environment_preparation",
+                "0012_environment_profile_topics",
             ],
         )
         self.assertEqual(rerun, [])

@@ -5,6 +5,8 @@ import { api, ApiError, type Project } from '../api'
 import EvidenceGraphPanel from './EvidenceGraphPanel.vue'
 import JobPanel from './JobPanel.vue'
 import MaterialsPanel from './MaterialsPanel.vue'
+import RolesEnvironmentPanel from './RolesEnvironmentPanel.vue'
+import DualPlatformRunPanel from './DualPlatformRunPanel.vue'
 import { checkHealth, healthState } from '../health'
 import { messagesFor } from '../i18n'
 import { buildMaterialQuery } from '../materials/format'
@@ -47,27 +49,23 @@ const documentId = computed(() =>
   typeof route.query.document === 'string' ? route.query.document : null,
 )
 
-// 当前变更没有阶段数据源；正常分支只由隔离测试数据证明，产品页面始终使用真实 API。
-const stageHasData = false
+// 第一、二阶段已有真实业务接口；第三至第五阶段仍未接入业务数据。
+const stageHasData = computed(
+  () => currentStage.value?.hasDataInThisChange === true,
+)
 const stageContentState = computed(() =>
-  resolveStageContentState(stageHasData),
+  resolveStageContentState(stageHasData.value),
 )
 
-const missingTitle = computed(() => {
-  if (currentStage.value?.id === 2) {
-    return t.value.empty.rolesTitle
-  }
-  return currentStage.value?.id === 1
+const missingTitle = computed(() =>
+  currentStage.value?.id === 1
     ? t.value.empty.materialsTitle
-    : t.value.empty.missingTitle
-})
+    : t.value.empty.missingTitle,
+)
 
 const missingBody = computed(() => {
   if (!currentStage.value) {
     return ''
-  }
-  if (currentStage.value.id === 2) {
-    return t.value.empty.rolesBody
   }
   if (currentStage.value.id === 1) {
     return t.value.empty.materialsBody
@@ -410,7 +408,19 @@ onBeforeUnmount(() => {
             :lang="lang"
           />
 
-          <section v-if="currentStage.id !== 1" class="wb-empty card">
+          <RolesEnvironmentPanel
+            v-if="currentStage.id === 2"
+            :project-id="project.id"
+            :lang="lang"
+          />
+
+          <DualPlatformRunPanel
+            v-if="currentStage.id === 3"
+            :project-id="project.id"
+            :lang="lang"
+          />
+
+          <section v-if="currentStage.id >= 4" class="wb-empty card">
             <h2>{{ missingTitle }}</h2>
             <p class="muted">{{ missingBody }}</p>
             <button type="button" class="primary" @click="continueStage">
@@ -418,7 +428,7 @@ onBeforeUnmount(() => {
             </button>
           </section>
 
-          <section v-if="layout !== 'workbench' && currentStage.id !== 1" class="wb-summary card">
+          <section v-if="layout !== 'workbench' && currentStage.id >= 4" class="wb-summary card">
             <strong>{{ t.stage.statusReady }}</strong>
             <span class="muted">{{ t.stage.statusPending }}</span>
           </section>
