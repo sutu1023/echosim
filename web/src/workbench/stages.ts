@@ -26,7 +26,7 @@ export const stageDefinitions: readonly StageDefinition[] = [
       en: 'Turn materials into traceable evidence and relationships.',
     },
     prerequisite: { zh: '至少一份材料', en: 'At least one material' },
-    hasDataInThisChange: false,
+    hasDataInThisChange: true,
   },
   {
     id: 2,
@@ -37,7 +37,7 @@ export const stageDefinitions: readonly StageDefinition[] = [
       en: 'Configure roles, environments and constraints for the dual-platform run.',
     },
     prerequisite: { zh: '证据图谱已构建', en: 'Evidence graph is ready' },
-    hasDataInThisChange: false,
+    hasDataInThisChange: true,
   },
   {
     id: 3,
@@ -48,7 +48,7 @@ export const stageDefinitions: readonly StageDefinition[] = [
       en: 'Run the simulation on both platforms and observe divergence.',
     },
     prerequisite: { zh: '角色与环境已准备', en: 'Roles and environment are ready' },
-    hasDataInThisChange: false,
+    hasDataInThisChange: true,
   },
   {
     id: 4,

@@ -79,6 +79,98 @@ export interface WorkbenchMessages {
     backProjects: string
     backConsole: string
   }
+  environment: {
+    title: string
+    intro: string
+    loading: string
+    loadFailed: string
+    retry: string
+    serviceUnavailable: string
+    question: string
+    snapshot: string
+    start: string
+    starting: string
+    retryPreparation: string
+    graphNotReady: string
+    graphNotReadyBody: string
+    backToGraph: string
+    notStarted: string
+    startHint: string
+    preparing: string
+    preparingHint: string
+    previewBatch: string
+    profileProgress: string
+    previewOnly: string
+    failed: string
+    canceled: string
+    retryHint: string
+    ready: string
+    readyHint: string
+    confirm: string
+    confirming: string
+    confirmed: string
+    confirmedHint: string
+    confirmNeeded: string
+    confirmDirty: string
+    confirmInvalid: string
+    enterNextStage: string
+    roles: string
+    roleCount: string
+    selectRole: string
+    roleDetail: string
+    pageNumber: string
+    mention: string
+    background: string
+    backgroundMissing: string
+    expressedTopics: string
+    involvedTopics: string
+    noExpressed: string
+    simulation: string
+    simulationTopics: string
+    motive: string
+    stance: string
+    activeHours: string
+    postingFrequency: string
+    responseDelay: string
+    influenceWeight: string
+    platformPreference: string
+    sources: string
+    openSource: string
+    openPdf: string
+    backToMaterial: string
+    sourceNatureUnknown: string
+    environmentConfig: string
+    platforms: string
+    initialTopics: string
+    firstSpeakers: string
+    activationOrder: string
+    roundsTitle: string
+    durationHours: string
+    minutesPerRound: string
+    roundsMode: string
+    auto: string
+    manual: string
+    manualRounds: string
+    autoRounds: string
+    effectiveRounds: string
+    save: string
+    saving: string
+    saved: string
+    conflictReload: string
+    frozen: string
+    frozenHint: string
+    newerGraph: string
+    newerGraphHint: string
+    runPendingTitle: string
+    runPendingBody: string
+    runPendingMissing: string
+    goPrepare: string
+    frozenSelection: string
+    frozenQuestion: string
+    frozenRounds: string
+    frozenRoles: string
+    errorCodes: Record<string, string>
+  }
   materials: {
     title: string
     intro: string
@@ -319,6 +411,116 @@ const messages: Record<Lang, WorkbenchMessages> = {
       retry: '重试',
       backProjects: '返回项目列表',
       backConsole: '返回控制台',
+    },
+    environment: {
+      title: '准备角色与环境',
+      intro: '从证据图谱的最终快照选择角色，核对材料事实与模拟设定，确认轮数后冻结本次选择。',
+      loading: '正在读取准备状态…',
+      loadFailed: '准备状态读取失败，请重试。',
+      retry: '重试',
+      serviceUnavailable: '服务暂时不可用，登录状态已保留。',
+      question: '推演问题',
+      snapshot: '快照',
+      start: '开始准备',
+      starting: '正在开始…',
+      retryPreparation: '重试准备',
+      graphNotReady: '证据图谱尚未完成',
+      graphNotReadyBody: '该 build 还没有已发布的最终快照，请回到第一阶段完成建图。',
+      backToGraph: '返回证据图谱',
+      notStarted: '尚未准备角色与环境',
+      startHint: '使用同一 build 的最终快照生成角色；准备过程由独立 worker 执行。',
+      preparing: '准备中',
+      preparingHint: '已完成批次可以展开查看；确认与进入第三阶段在发布完成前不可用。',
+      previewBatch: '第 {index} 批（已完成预览）',
+      profileProgress: '已生成 {profiled} / {total} 个角色',
+      previewOnly: '未完成预览',
+      failed: '准备失败',
+      canceled: '准备已取消',
+      retryHint: '已完成批次只读；重试会创建新的准备与任务，旧记录保留。',
+      ready: '已就绪，待确认',
+      readyHint: '核对角色、平台映射、初始话题与轮数后确认冻结。',
+      confirm: '确认并冻结',
+      confirming: '正在确认…',
+      confirmed: '已确认',
+      confirmedHint: '本次选择已冻结，第三阶段只读取这份冻结结果。',
+      confirmNeeded: '需要确认后才能进入第三阶段。',
+      confirmDirty: '有未保存的轮数修改，请先保存并从服务端读回后再确认。',
+      confirmInvalid: '轮数配置不合法，无法确认；请修正后保存。',
+      enterNextStage: '进入双平台运行',
+      roles: '角色',
+      roleCount: '{count} 个角色',
+      selectRole: '查看角色详情',
+      roleDetail: '角色详情',
+      pageNumber: '第 {page} 页',
+      mention: '材料提及',
+      background: '背景',
+      backgroundMissing: '材料未说明',
+      expressedTopics: '该角色表达/主张',
+      involvedTopics: '材料涉及的话题',
+      noExpressed: '材料未说明关注话题',
+      simulation: '模拟设定',
+      simulationTopics: '模拟关注点',
+      motive: '动机',
+      stance: '立场',
+      activeHours: '活跃时段',
+      postingFrequency: '发言频率',
+      responseDelay: '响应延迟（分钟）',
+      influenceWeight: '影响力权重',
+      platformPreference: '平台偏好',
+      sources: '来源',
+      openSource: '打开原文并高亮',
+      openPdf: '打开原件对应页',
+      backToMaterial: '回到材料',
+      sourceNatureUnknown: '来源性质未知',
+      environmentConfig: '环境配置',
+      platforms: '平台映射',
+      initialTopics: '初始话题',
+      firstSpeakers: '首发角色与话题',
+      activationOrder: '激活顺序',
+      roundsTitle: '轮数配置',
+      durationHours: '模拟总时长（小时）',
+      minutesPerRound: '每轮分钟数',
+      roundsMode: '轮数模式',
+      auto: '自动',
+      manual: '手动',
+      manualRounds: '手动轮数',
+      autoRounds: '自动轮数',
+      effectiveRounds: '生效轮数',
+      save: '保存轮数',
+      saving: '正在保存…',
+      saved: '轮数已保存。',
+      conflictReload: '配置已被其他页面更新，已重新读取，请核对后再确认。',
+      frozen: '已冻结，轮数不可再修改。',
+      frozenHint: '冻结选择包含问题、快照、角色、轮数、平台映射与首发话题。',
+      newerGraph: '已有更新的图谱',
+      newerGraphHint: '本次准备仍绑定旧快照；为新图准备请回到第一阶段并在新 build 下开始。',
+      runPendingTitle: '准备已确认，运行功能待接入',
+      runPendingBody: '角色与环境已按服务端冻结选择确认；双平台实际运行将在后续变更接入。',
+      runPendingMissing: '尚未确认角色与环境',
+      goPrepare: '前往准备角色与环境',
+      frozenSelection: '冻结选择',
+      frozenQuestion: '冻结问题',
+      frozenRounds: '冻结轮数',
+      frozenRoles: '冻结角色',
+      errorCodes: {
+        graph_not_ready: '证据图谱尚未完成。',
+        graph_snapshot_missing: '该 build 没有可用的最终快照。',
+        no_role_candidates: '材料中没有可作为角色的主体。',
+        preparation_retry_required: '失败或取消的准备需要显式重试。',
+        preparation_not_retryable: '当前准备不需要重试。',
+        preparation_not_ready: '准备尚未完成，不能确认。',
+        preparation_not_editable: '失败或取消的准备不可编辑。',
+        preparation_frozen: '准备已确认冻结，轮数不可再修改。',
+        settings_conflict: '配置已被其他页面更新，请重新读取后再确认。',
+        duration_invalid: '模拟总时长必须是 1–720 小时的整数。',
+        rounds_invalid: '手动轮数必须是 1–1000 的整数。',
+        rounds_not_integral: '自动轮数不能整除，请调整时长或每轮分钟数。',
+        model_unavailable: '画像服务暂时不可用，请稍后重试。',
+        invalid_model_output: '画像输出不合法，未发布任何角色。',
+        role_source_missing: '角色缺少材料来源，未发布。',
+        role_source_mismatch: '角色来源与快照不一致，未发布。',
+        preparation_failed: '准备执行失败，请稍后重试。',
+      },
     },
     materials: {
       title: '项目材料',
@@ -598,6 +800,116 @@ const messages: Record<Lang, WorkbenchMessages> = {
       retry: 'Retry',
       backProjects: 'Back to projects',
       backConsole: 'Back to console',
+    },
+    environment: {
+      title: 'Prepare roles and environment',
+      intro: 'Choose roles from the final graph snapshot, review material facts separately from simulated settings, and freeze the selection after confirming rounds.',
+      loading: 'Loading preparation…',
+      loadFailed: 'Could not load the preparation. Please retry.',
+      retry: 'Retry',
+      serviceUnavailable: 'Service temporarily unavailable. Your session is kept.',
+      question: 'Scenario question',
+      snapshot: 'Snapshot',
+      start: 'Start preparation',
+      starting: 'Starting…',
+      retryPreparation: 'Retry preparation',
+      graphNotReady: 'The evidence graph is not ready',
+      graphNotReadyBody: 'This build has no published final snapshot. Complete the first stage first.',
+      backToGraph: 'Back to evidence graph',
+      notStarted: 'Roles and environment not prepared yet',
+      startHint: 'Roles are generated from the final snapshot of this build by the background worker.',
+      preparing: 'Preparing',
+      preparingHint: 'Completed batches can be expanded. Confirmation and the next stage stay disabled until publishing completes.',
+      previewBatch: 'Batch {index} (preview ready)',
+      profileProgress: '{profiled} / {total} roles generated',
+      previewOnly: 'Unfinished preview',
+      failed: 'Preparation failed',
+      canceled: 'Preparation canceled',
+      retryHint: 'Completed batches stay read-only. Retry creates a new preparation and job; old records remain.',
+      ready: 'Ready to confirm',
+      readyHint: 'Review roles, platform mapping, initial topics and rounds, then freeze the selection.',
+      confirm: 'Confirm and freeze',
+      confirming: 'Confirming…',
+      confirmed: 'Confirmed',
+      confirmedHint: 'This selection is frozen; the next stage reads only this record.',
+      confirmNeeded: 'Confirm before entering the next stage.',
+      confirmDirty: 'Rounds changed but not saved. Save and read them back before confirming.',
+      confirmInvalid: 'The rounds configuration is invalid; fix and save it before confirming.',
+      enterNextStage: 'Go to dual-platform run',
+      roles: 'Roles',
+      roleCount: '{count} roles',
+      selectRole: 'Open role detail',
+      roleDetail: 'Role detail',
+      pageNumber: 'Page {page}',
+      mention: 'Mentioned in material',
+      background: 'Background',
+      backgroundMissing: 'Not stated in material',
+      expressedTopics: 'Expressed by this role',
+      involvedTopics: 'Topics involving this role',
+      noExpressed: 'No expressed topics in material',
+      simulation: 'Simulated setting',
+      simulationTopics: 'Simulated focus',
+      motive: 'Motive',
+      stance: 'Stance',
+      activeHours: 'Active hours',
+      postingFrequency: 'Posting frequency',
+      responseDelay: 'Response delay (minutes)',
+      influenceWeight: 'Influence weight',
+      platformPreference: 'Platform preference',
+      sources: 'Sources',
+      openSource: 'Open source and highlight',
+      openPdf: 'Open original page',
+      backToMaterial: 'Back to material',
+      sourceNatureUnknown: 'Source nature unknown',
+      environmentConfig: 'Environment',
+      platforms: 'Platform mapping',
+      initialTopics: 'Initial topics',
+      firstSpeakers: 'First speakers and topics',
+      activationOrder: 'Activation order',
+      roundsTitle: 'Rounds',
+      durationHours: 'Duration (hours)',
+      minutesPerRound: 'Minutes per round',
+      roundsMode: 'Rounds mode',
+      auto: 'Auto',
+      manual: 'Manual',
+      manualRounds: 'Manual rounds',
+      autoRounds: 'Auto rounds',
+      effectiveRounds: 'Effective rounds',
+      save: 'Save rounds',
+      saving: 'Saving…',
+      saved: 'Rounds saved.',
+      conflictReload: 'The configuration changed in another tab. It has been reloaded; review before confirming.',
+      frozen: 'Frozen; rounds can no longer change.',
+      frozenHint: 'The frozen selection keeps the question, snapshot, roles, rounds, platform mapping and first topics.',
+      newerGraph: 'A newer graph exists',
+      newerGraphHint: 'This preparation stays bound to the older snapshot. Start again on the new build to use it.',
+      runPendingTitle: 'Preparation confirmed; run is not connected yet',
+      runPendingBody: 'Roles and environment are confirmed from the server-side frozen selection; the dual-platform run arrives in a later change.',
+      runPendingMissing: 'Roles and environment are not confirmed yet',
+      goPrepare: 'Go to prepare roles and environment',
+      frozenSelection: 'Frozen selection',
+      frozenQuestion: 'Frozen question',
+      frozenRounds: 'Frozen rounds',
+      frozenRoles: 'Frozen roles',
+      errorCodes: {
+        graph_not_ready: 'The evidence graph is not ready.',
+        graph_snapshot_missing: 'This build has no usable final snapshot.',
+        no_role_candidates: 'No material subject can act as a role.',
+        preparation_retry_required: 'A failed or canceled preparation needs an explicit retry.',
+        preparation_not_retryable: 'This preparation does not need a retry.',
+        preparation_not_ready: 'The preparation is not ready to confirm.',
+        preparation_not_editable: 'A failed or canceled preparation is read-only.',
+        preparation_frozen: 'The preparation is frozen; rounds cannot change.',
+        settings_conflict: 'The configuration changed in another tab. Reload before confirming.',
+        duration_invalid: 'Duration must be an integer between 1 and 720 hours.',
+        rounds_invalid: 'Manual rounds must be an integer between 1 and 1000.',
+        rounds_not_integral: 'Auto rounds are not an integer; adjust duration or minutes per round.',
+        model_unavailable: 'The profiling service is unavailable. Retry later.',
+        invalid_model_output: 'Model output was invalid; no roles were published.',
+        role_source_missing: 'A role had no material source and was not published.',
+        role_source_mismatch: 'A role source did not match the snapshot; nothing was published.',
+        preparation_failed: 'Preparation failed. Retry later.',
+      },
     },
     materials: {
       title: 'Project materials',

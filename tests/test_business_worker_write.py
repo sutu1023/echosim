@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import threading
 import time
 import unittest
@@ -214,10 +215,17 @@ class Step5ControlClient:
             )
         return items
 
+    def _search_text(self, key: str) -> str:
+        try:
+            payload = json.loads(self.episodes[key].content)
+        except json.JSONDecodeError:
+            return self.episodes[key].content[:120]
+        return str(payload.get("searchText") or "")[:120]
+
     def search_episodes(self, graph_uuid: str, *, query: str, page_size: int = 50):
         del graph_uuid, page_size
         with self.lock:
-            if query == self.episodes[self.b_key].content[:120]:
+            if query == self._search_text(self.b_key):
                 self.b_searches += 1
                 first_b = self.b_searches == 1
             else:

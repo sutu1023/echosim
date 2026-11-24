@@ -17,6 +17,9 @@ from .db import dispose_engine
 from .errors import (
     DocumentNotFound,
     DocumentNotText,
+    EnvironmentBuildNotFound,
+    EnvironmentConflict,
+    EnvironmentPreparationNotFound,
     GraphBuildConflict,
     GraphBuildNotFound,
     GraphLimitExceeded,
@@ -33,6 +36,7 @@ from .health import router as health_router
 from .middleware import enforce_same_origin
 from .routers.auth import router as auth_router
 from .routers.documents import router as documents_router
+from .routers.environment import router as environment_router
 from .routers.evidence_graph import router as evidence_graph_router
 from .routers.history import router as history_router
 from .routers.jobs import router as jobs_router
@@ -164,6 +168,37 @@ def create_app(web_dist_dir: Path | None = None) -> FastAPI:
             status_code=409,
         )
 
+    @app.exception_handler(EnvironmentBuildNotFound)
+    async def handle_environment_build_not_found(
+        _: Request, __: EnvironmentBuildNotFound
+    ) -> JSONResponse:
+        return JSONResponse({"detail": "图谱不存在"}, status_code=404)
+
+    @app.exception_handler(EnvironmentPreparationNotFound)
+    async def handle_environment_preparation_not_found(
+        _: Request, __: EnvironmentPreparationNotFound
+    ) -> JSONResponse:
+        return JSONResponse({"detail": "准备不存在"}, status_code=404)
+
+    @app.exception_handler(EnvironmentConflict)
+    async def handle_environment_conflict(
+        _: Request, exc: EnvironmentConflict
+    ) -> JSONResponse:
+        status = (
+            422
+            if exc.code
+            in {
+                "no_role_candidates",
+                "duration_invalid",
+                "rounds_invalid",
+                "rounds_not_integral",
+            }
+            else 409
+        )
+        return JSONResponse(
+            {"detail": exc.message, "code": exc.code}, status_code=status
+        )
+
     @app.exception_handler(GraphSnapshotInconsistent)
     async def handle_graph_snapshot_inconsistent(
         _: Request, __: GraphSnapshotInconsistent
@@ -175,6 +210,7 @@ def create_app(web_dist_dir: Path | None = None) -> FastAPI:
     app.include_router(jobs_router)
     app.include_router(documents_router)
     app.include_router(evidence_graph_router)
+    app.include_router(environment_router)
     app.include_router(history_router)
     app.include_router(health_router)
     register_static_routes(app, web_dist_dir or settings.web_dist_dir)

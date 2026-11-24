@@ -18,6 +18,158 @@ def _short(text: str, limit: int) -> str:
     return cleaned[:limit] or "EchoSim 原创材料"
 
 
+# 原创材料可以用「实体：名称｜类型｜原句」与「关系：起点｜动作｜终点｜原句」声明
+# 结构化事实；替身据此产生带中文类型与支持原句的图谱。普通材料仍走默认路径。
+_ENTITY_LINE = re.compile(
+    r"^(?:实体|Entity)[：:]\s*(?P<name>[^｜|]+?)\s*[｜|]\s*"
+    r"(?P<type>[^｜|]+?)\s*[｜|]\s*(?P<quote>.+)$"
+)
+_RELATION_LINE = re.compile(
+    r"^(?:关系|Relation)[：:]\s*(?P<source>[^｜|]+?)\s*[｜|]\s*"
+    r"(?P<action>[^｜|]+?)\s*[｜|]\s*(?P<target>[^｜|]+?)\s*[｜|]\s*"
+    r"(?P<quote>.+)$"
+)
+_TYPE_KEYS = {
+    "个人": "person",
+    "人物": "person",
+    "群体": "group",
+    "高校": "university",
+    "大学": "university",
+    "机构": "organization",
+    "机构组织": "organization",
+    "部门": "organization",
+    "政府机构": "government",
+    "法院": "court",
+    "医疗机构": "hospital",
+    "社会组织": "organization",
+    "媒体机构": "media",
+    "新闻机构": "media",
+    "媒体": "media",
+    "平台": "platform",
+    "社交媒体": "platform",
+    "传播平台": "platform",
+    "媒体平台": "platform",
+    "事件": "event",
+    "事故": "event",
+    "待核实说法": "claim",
+    "传言": "claim",
+    "建议": "recommendation",
+    "措施": "measure",
+    "话题": "topic",
+    "地点": "location",
+    "决定安排": "decision",
+    "Person": "person",
+    "User": "person",
+    "Group": "group",
+    "Community": "group",
+    "University": "university",
+    "School": "university",
+    "Organization": "organization",
+    "Institution": "organization",
+    "Company": "organization",
+    "MediaOutlet": "media",
+    "NewsAgency": "media",
+    "Platform": "platform",
+    "Channel": "platform",
+    "Event": "event",
+    "Incident": "event",
+    "Claim": "claim",
+    "Rumor": "claim",
+    "Topic": "topic",
+    "Location": "location",
+    "Decision": "decision",
+}
+
+
+def _utf16_len(text: str) -> int:
+    return len(text.encode("utf-16-le")) // 2
+
+
+def _declaration_parts(text: str) -> list[tuple[int, str]]:
+    """按 `实体：`/`关系：` 前缀切分；兼容换行被归一为空格的材料。"""
+    starts = [
+        match.start()
+        for match in re.finditer(r"(?=实体[：:]|关系[：:])", text)
+    ]
+    parts: list[tuple[int, str]] = []
+    for index, start in enumerate(starts):
+        end = starts[index + 1] if index + 1 < len(starts) else len(text)
+        value = text[start:end].strip()
+        if value:
+            parts.append((start, value))
+    return parts
+
+
+def _structured_entities(chunks: Sequence[ChunkInput]) -> list[dict[str, Any]]:
+    entities: list[dict[str, Any]] = []
+    for chunk in chunks:
+        for offset, part in _declaration_parts(chunk.text):
+            match = _ENTITY_LINE.match(part)
+            if not match:
+                continue
+            name = match.group("name").strip()
+            label = match.group("type").strip()
+            quote = part
+            start = chunk.source_start + _utf16_len(chunk.text[:offset])
+            entities.append(
+                {
+                    "name": name,
+                    "type": label,
+                    "type_key": _TYPE_KEYS.get(label, "entity"),
+                    "quote": quote,
+                    "source_start": start,
+                    "source_end": min(
+                        chunk.source_end, start + _utf16_len(quote)
+                    ),
+                    "document_id": chunk.document_id,
+                    "chunk_index": chunk.chunk_index,
+                    "page_no": chunk.page_no,
+                    "paragraph_start": chunk.paragraph_start,
+                    "paragraph_end": chunk.paragraph_end,
+                    "key": f"role-{uuid.uuid5(uuid.NAMESPACE_URL, name).hex[:10]}",
+                }
+            )
+    return entities
+
+
+def _structured_relations(
+    chunks: Sequence[ChunkInput], entities: Sequence[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    names = {item["name"] for item in entities}
+    relations: list[dict[str, Any]] = []
+    for chunk in chunks:
+        for offset, part in _declaration_parts(chunk.text):
+            match = _RELATION_LINE.match(part)
+            if not match:
+                continue
+            source = match.group("source").strip()
+            target = match.group("target").strip()
+            action = match.group("action").strip()
+            quote = match.group("quote").strip()
+            if source not in names or target not in names or not quote:
+                continue
+            position = offset + max(0, part.find(quote))
+            start = chunk.source_start + _utf16_len(chunk.text[:position])
+            relations.append(
+                {
+                    "source": source,
+                    "target": target,
+                    "action": action,
+                    "fact": quote,
+                    "source_start": start,
+                    "source_end": min(
+                        chunk.source_end, start + _utf16_len(quote)
+                    ),
+                    "document_id": chunk.document_id,
+                    "chunk_index": chunk.chunk_index,
+                    "page_no": chunk.page_no,
+                    "paragraph_start": chunk.paragraph_start,
+                    "paragraph_end": chunk.paragraph_end,
+                }
+            )
+    return relations
+
+
 @dataclass
 class StubModelTransport:
     """确定性模型替身；调用计为 double，不会产生真实网络请求。"""
@@ -28,6 +180,9 @@ class StubModelTransport:
     double_calls: int = 0
     real_calls: int = 0
     _plan_emitted: bool = field(default=False, init=False)
+    _structured_cache: dict[str, Any] | None = field(
+        default=None, init=False, repr=False
+    )
 
     def __call__(
         self,
@@ -53,6 +208,17 @@ class StubModelTransport:
         batch_key = match.group(1) if match else ""
         return HttpResponse(200, json.dumps({"choices": [{"message": {"content": json.dumps(self._extract(batch_key), ensure_ascii=False)}}]}, ensure_ascii=False))
 
+    def _structured(self) -> dict[str, Any]:
+        if self._structured_cache is None:
+            entities = _structured_entities(self.chunks)
+            relations = _structured_relations(self.chunks, entities)
+            self._structured_cache = {
+                "entities": entities,
+                "relations": relations,
+                "active": bool(entities) and bool(relations),
+            }
+        return self._structured_cache
+
     def _batches(self) -> list[tuple[str, list[ChunkInput]]]:
         batches: list[tuple[str, list[ChunkInput]]] = []
         for index, chunk in enumerate(self.chunks, start=1):
@@ -60,6 +226,27 @@ class StubModelTransport:
         return batches
 
     def _ontology_plan(self) -> dict[str, Any]:
+        structured = self._structured()
+        if structured["active"]:
+            seen: dict[str, str] = {}
+            for item in structured["entities"]:
+                seen[item["type_key"]] = item["type"]
+            first_key = next(iter(seen))
+            return {
+                "entityTypes": [
+                    {"key": key, "name": name, "description": "原创材料声明的实体类型"}
+                    for key, name in seen.items()
+                ],
+                "relationTypes": [
+                    {
+                        "key": "material_action",
+                        "name": "材料行动",
+                        "description": "材料中的关系陈述",
+                        "sourceType": first_key,
+                        "targetType": first_key,
+                    }
+                ],
+            }
         return {
             "entityTypes": [
                 {"key": "university", "name": "高校", "description": "高校主体"},
@@ -83,6 +270,64 @@ class StubModelTransport:
         }
 
     def _plan(self) -> dict[str, Any]:
+        structured = self._structured()
+        if structured["active"]:
+            subjects = []
+            for item in structured["entities"]:
+                subjects.append(
+                    {
+                        "key": f"subject-{item['key']}",
+                        "label": item["name"],
+                        "typeKey": item["type_key"],
+                        "aliases": [item["name"]],
+                        "evidence": [
+                            {
+                                "documentId": item["document_id"],
+                                "chunkIndex": item["chunk_index"],
+                                "quote": item["quote"],
+                                "sourceStart": item["source_start"],
+                                "sourceEnd": item["source_end"],
+                                "pageNo": item["page_no"],
+                                "paragraphStart": item["paragraph_start"],
+                                "paragraphEnd": item["paragraph_end"],
+                            }
+                        ],
+                    }
+                )
+            seen: dict[str, str] = {}
+            for item in structured["entities"]:
+                seen[item["type_key"]] = item["type"]
+            return {
+                "entityTypes": [
+                    {"key": key, "name": name}
+                    for key, name in seen.items()
+                ],
+                "relationTypes": [
+                    {
+                        "key": "material_action",
+                        "name": "材料行动",
+                        "sourceType": next(iter(seen)),
+                        "targetType": next(iter(seen)),
+                    }
+                ],
+                "subjects": subjects,
+                "batches": [
+                    {
+                        "key": key,
+                        "ordinal": index,
+                        "chunks": [
+                            {
+                                "documentId": chunk.document_id,
+                                "chunkIndex": chunk.chunk_index,
+                            }
+                            for chunk in chunks
+                        ],
+                    }
+                    for index, (key, chunks) in enumerate(
+                        self._batches(), start=1
+                    )
+                ],
+            }
         subjects: list[dict[str, Any]] = []
         for chunk in self.chunks:
             token = uuid.uuid5(
@@ -149,6 +394,84 @@ class StubModelTransport:
             ((key, chunks) for key, chunks in self._batches() if key == batch_key),
             ("", []),
         )
+        structured = self._structured()
+        if structured["active"]:
+            entities = [
+                item
+                for item in structured["entities"]
+                if any(
+                    item["document_id"] == chunk.document_id
+                    and item["chunk_index"] == chunk.chunk_index
+                    for chunk in batch[1]
+                )
+            ]
+            names = {item["name"] for item in entities}
+            node_payloads: list[dict[str, Any]] = []
+            for item in entities:
+                node_payloads.append(
+                    {
+                        "key": item["key"],
+                        "nodeType": item["type_key"],
+                        "subjectKey": f"subject-{item['key']}",
+                        "label": item["name"],
+                        "origin": "material",
+                        "summary": None,
+                        "sources": [
+                            {
+                                "documentId": item["document_id"],
+                                "chunkIndex": item["chunk_index"],
+                                "quote": item["quote"],
+                                "sourceStart": item["source_start"],
+                                "sourceEnd": item["source_end"],
+                                "pageNo": item["page_no"],
+                                "paragraphStart": item["paragraph_start"],
+                                "paragraphEnd": item["paragraph_end"],
+                            }
+                        ],
+                    }
+                )
+            edge_payloads: list[dict[str, Any]] = []
+            for relation in structured["relations"]:
+                if relation["source"] not in names or relation["target"] not in names:
+                    continue
+                source = next(
+                    item for item in entities if item["name"] == relation["source"]
+                )
+                target = next(
+                    item for item in entities if item["name"] == relation["target"]
+                )
+                edge_payloads.append(
+                    {
+                        "key": "rel-"
+                        + uuid.uuid5(
+                            uuid.NAMESPACE_URL,
+                            f"{relation['source']}|{relation['action']}|{relation['target']}|{relation['fact']}",
+                        ).hex[:12],
+                        "edgeType": "material_action",
+                        "label": relation["action"],
+                        "origin": "material",
+                        "sourceKey": source["key"],
+                        "targetKey": target["key"],
+                        "summary": relation["fact"],
+                        "sources": [
+                            {
+                                "documentId": relation["document_id"],
+                                "chunkIndex": relation["chunk_index"],
+                                "quote": relation["quote"],
+                                "sourceStart": relation["source_start"],
+                                "sourceEnd": relation["source_end"],
+                                "pageNo": relation["page_no"],
+                                "paragraphStart": relation["paragraph_start"],
+                                "paragraphEnd": relation["paragraph_end"],
+                            }
+                        ],
+                    }
+                )
+            return {
+                "batchKey": batch_key,
+                "nodes": node_payloads,
+                "edges": edge_payloads,
+            }
         nodes: list[dict[str, Any]] = []
         edges: list[dict[str, Any]] = []
         for chunk in batch[1]:
@@ -353,11 +676,13 @@ class StubGraphClient:
                 )
             )
             node_uuid_by_key[key] = node_uuid
+            node_type = str(raw.get("nodeType") or "").strip()
             self.nodes.append(
                 {
                     "uuid": node_uuid,
                     "graph_uuid": graph_uuid,
                     "name": label,
+                    "labels": [node_type] if node_type else [],
                     "episode_uuids": [episode_uuid],
                 }
             )
@@ -403,7 +728,13 @@ class StubGraphClient:
             uuid.uuid5(uuid.NAMESPACE_URL, f"{graph_uuid}:node:{name}")
         )
 
-    def _add_node(self, graph_uuid: str, episode_uuid: str, name: str) -> str:
+    def _add_node(
+        self,
+        graph_uuid: str,
+        episode_uuid: str,
+        name: str,
+        label_type: str | None = None,
+    ) -> str:
         node_uuid = self._node_uuid(graph_uuid, name)
         existing = next(
             (item for item in self.nodes if item["uuid"] == node_uuid), None
@@ -414,17 +745,78 @@ class StubGraphClient:
                     "uuid": node_uuid,
                     "graph_uuid": graph_uuid,
                     "name": name,
+                    "labels": [label_type] if label_type else [],
                     "episode_uuids": [episode_uuid],
                 }
             )
-        elif episode_uuid not in existing["episode_uuids"]:
-            existing["episode_uuids"].append(episode_uuid)
+        else:
+            if episode_uuid not in existing["episode_uuids"]:
+                existing["episode_uuids"].append(episode_uuid)
+            labels = existing.setdefault("labels", [])
+            if label_type and label_type not in labels:
+                labels.append(label_type)
         return node_uuid
 
     def _ingest_text(self, graph_uuid: str, episode_uuid: str, data: str) -> None:
         """替身从纯文本产生最小可回归事实；绝不用于真实建图。"""
         text = " ".join(data.split())
         if not text:
+            return
+        structured_entities: dict[str, str] = {}
+        structured_relations: list[tuple[str, str, str, str]] = []
+        # 建图全文会把段落换行归一为空格；按声明前缀切分而不是按行。
+        for part in re.split(
+            r"(?=实体[：:]|Entity:|关系[：:]|Relation:)", data
+        ):
+            raw = part.strip()
+            entity_match = _ENTITY_LINE.match(raw)
+            if entity_match:
+                name = entity_match.group("name").strip()
+                label = entity_match.group("type").strip()
+                structured_entities[name] = _TYPE_KEYS.get(label, "entity")
+                continue
+            relation_match = _RELATION_LINE.match(raw)
+            if relation_match:
+                structured_relations.append(
+                    (
+                        relation_match.group("source").strip(),
+                        relation_match.group("action").strip(),
+                        relation_match.group("target").strip(),
+                        relation_match.group("quote").strip(),
+                    )
+                )
+        if structured_entities:
+            for name, type_key in structured_entities.items():
+                self._add_node(graph_uuid, episode_uuid, name, type_key)
+            for source, action, target, fact in structured_relations:
+                if source not in structured_entities or target not in structured_entities:
+                    continue
+                source_uuid = self._node_uuid(graph_uuid, source)
+                target_uuid = self._node_uuid(graph_uuid, target)
+                edge_uuid = str(
+                    uuid.uuid5(
+                        uuid.NAMESPACE_URL,
+                        f"{graph_uuid}:edge:{source}:{target}:{action}:{fact}",
+                    )
+                )
+                existing = next(
+                    (item for item in self.edges if item["uuid"] == edge_uuid),
+                    None,
+                )
+                if existing is None:
+                    self.edges.append(
+                        {
+                            "uuid": edge_uuid,
+                            "graph_uuid": graph_uuid,
+                            "source_node_uuid": source_uuid,
+                            "target_node_uuid": target_uuid,
+                            "name": action,
+                            "fact": fact,
+                            "episode_uuids": [episode_uuid],
+                        }
+                    )
+                elif episode_uuid not in existing["episode_uuids"]:
+                    existing["episode_uuids"].append(episode_uuid)
             return
         created = False
         for _, _, sentence in split_sentences(data):
@@ -559,6 +951,9 @@ class _StubEpisodeNamespace:
     def list(self, graph_uuid: str, *, page_size: int = 100, **kwargs: Any):
         del page_size, kwargs
         self._client._count()
+        # 列表读取与语义检索承担同一“确认 episode”职责，计入 search 边界。
+        self._client.search_calls += 1
+        self._client.events.append(("search", "episode.list"))
         return StubPager(
             [
                 {

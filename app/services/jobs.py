@@ -315,6 +315,10 @@ async def cancel_job(
             await documents.cancel_for_run(db, run_id=row.run_id)
         if row.kind == "evidence.graph.build":
             await evidence_graph.cancel_for_run(db, run_id=row.run_id)
+        if row.kind == "agent.environment.prepare":
+            from . import environment
+
+            await environment.cancel_for_run(db, run_id=row.run_id)
         await db.commit()
     except DB_ERRORS as exc:
         await db.rollback()

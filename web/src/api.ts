@@ -92,6 +92,12 @@ export const api = {
       body: body === undefined ? undefined : JSON.stringify(body),
     })
   },
+  patch<T>(path: string, body?: unknown): Promise<T> {
+    return request<T>(path, {
+      method: 'PATCH',
+      body: body === undefined ? undefined : JSON.stringify(body),
+    })
+  },
   /** multipart 上传；不设置 Content-Type，交给浏览器生成边界。 */
   postForm<T>(path: string, form: FormData): Promise<T> {
     return request<T>(path, { method: 'POST', body: form })

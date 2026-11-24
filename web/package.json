@@ -11,7 +11,8 @@
     "build": "vite build",
     "preview": "vite preview",
     "typecheck": "vue-tsc --noEmit",
-    "test": "node --test tests/*.test.mjs"
+    "test": "npm run build:page-tests && node --test tests/*.test.mjs",
+    "build:page-tests": "vite build --config vite.page-tests.config.ts"
   },
   "dependencies": {
     "d3": "7.9.0",
@@ -21,6 +22,8 @@
   "devDependencies": {
     "@types/d3": "7.4.3",
     "@vitejs/plugin-vue": "^5.2.1",
+    "@vue/test-utils": "^2.4.6",
+    "jsdom": "^26.1.0",
     "typescript": "~5.7.2",
     "vite": "^6.0.7",
     "vue-tsc": "^2.2.0"

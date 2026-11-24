@@ -67,6 +67,10 @@ jobs:
           calls = graph.get("calls") or {}
           if calls.get("real") != 0:
               sys.exit("默认验收出现建图真实外呼")
+          environment = report.get("environment_evidence") or {}
+          environment_calls = environment.get("calls") or {}
+          if environment_calls.get("real") != 0:
+              sys.exit("默认验收出现角色画像真实外呼")
           PY
 
       - name: Upload verification report
@@ -74,6 +78,82 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: verify-report-${{ github.sha }}
+          path: runtime/verify/
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Stop environment
+        if: always()
+        run: make down || true
+
+  verify-change-08:
+    name: verify-change-08
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run Change 08 offline acceptance
+        env:
+          EXPECTED_SHA: ${{ inputs.expected_sha || github.sha }}
+        run: make verify CHANGE=2026-11-24-prepare-agent-environment
+
+      - name: Assert Change 08 report
+        if: always()
+        env:
+          EXPECTED_SHA: ${{ inputs.expected_sha || github.sha }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import pathlib
+          import sys
+
+          report_path = pathlib.Path("runtime/verify/last-run.json")
+          if not report_path.is_file():
+              sys.exit("缺少 Change 08 验收报告: %s" % report_path)
+
+          report = json.loads(report_path.read_text(encoding="utf-8"))
+          expected = os.environ["EXPECTED_SHA"]
+          tested = report.get("tested_sha")
+          result = report.get("result")
+          environment = report.get("environment_evidence") or {}
+          calls = environment.get("calls") or {}
+
+          print(f"expected_sha={expected}")
+          print(f"tested_sha={tested}")
+          print(f"result={result}")
+          print(f"dirty={report.get('dirty')}")
+          print(f"change={report.get('change')}")
+          print(f"environment_mode={environment.get('mode')}")
+          print(f"calls_real={calls.get('real')}")
+          print(f"calls_double={calls.get('double')}")
+
+          if tested != expected:
+              sys.exit("报告 SHA 与触发 SHA 不一致")
+          if result != "passed":
+              sys.exit("Change 08 验收结果不是 passed")
+          if report.get("dirty") is not False:
+              sys.exit("Change 08 报告标记为脏工作树")
+          if report.get("change") != "2026-11-24-prepare-agent-environment":
+              sys.exit("Change 08 报告 change 字段不一致")
+          if environment.get("mode") != "offline-stub":
+              sys.exit("Change 08 报告不是 offline-stub")
+          if calls.get("real") != 0:
+              sys.exit("Change 08 出现真实画像调用")
+          if int(calls.get("double") or 0) <= 0:
+              sys.exit("Change 08 未记录任何替身调用")
+          if not (environment.get("workerRestored") or {}).get("modelProvider"):
+              sys.exit("Change 08 结束后 worker provider 未恢复")
+          PY
+
+      - name: Upload Change 08 report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: verify-report-change-08-${{ github.sha }}
           path: runtime/verify/
           if-no-files-found: error
           retention-days: 30

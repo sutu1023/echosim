@@ -21,6 +21,17 @@ from .engines.business_config import (
     DEFAULT_EVIDENCE_GRAPH_PROCESSING_TIMEOUT_SECONDS,
     DEFAULT_EVIDENCE_GRAPH_QUESTION_MAX_CHARS,
 )
+from .engines.environment_config import (
+    DEFAULT_ENVIRONMENT_ALLOW_STUB,
+    DEFAULT_ENVIRONMENT_MODEL_PROVIDER,
+)
+from .engines.environment_contracts import (
+    DEFAULT_DURATION_HOURS,
+    DEFAULT_MAX_MANUAL_ROUNDS,
+    DEFAULT_MINUTES_PER_ROUND,
+    DEFAULT_MODEL_TIMEOUT_SECONDS,
+    DEFAULT_PROFILE_BATCH_SIZE,
+)
 from .engines.settings import (
     DEFAULT_GRAPH_INDEX_TIMEOUT_SECONDS,
     DEFAULT_GRAPH_POLL_INTERVAL_SECONDS,
@@ -65,6 +76,7 @@ class Settings(BaseSettings):
     - MODEL_API_BASE_URL / MODEL_API_KEY / MODEL_NAME：Chat Completions 兼容模型配置。
     - ZEP_API_KEY / ZEP_ACCEPTANCE_GRAPH_ID：固定验收图谱配置。
     - EVIDENCE_GRAPH_*：业务建图 provider、替身开关、规模上限与预算。
+    - ENVIRONMENT_*：角色画像 provider、替身开关、默认轮数与画像批次。
     - 其余 GRAPH_* / SIMULATION_* / SMOKE_LIVE_*：引擎超时与预算。
     """
 
@@ -111,6 +123,13 @@ class Settings(BaseSettings):
     evidence_graph_processing_timeout_seconds: float = (
         DEFAULT_EVIDENCE_GRAPH_PROCESSING_TIMEOUT_SECONDS
     )
+    environment_model_provider: str = DEFAULT_ENVIRONMENT_MODEL_PROVIDER
+    environment_allow_stub: bool = DEFAULT_ENVIRONMENT_ALLOW_STUB
+    environment_default_duration_hours: int = DEFAULT_DURATION_HOURS
+    environment_default_minutes_per_round: int = DEFAULT_MINUTES_PER_ROUND
+    environment_max_manual_rounds: int = DEFAULT_MAX_MANUAL_ROUNDS
+    environment_profile_batch_size: int = DEFAULT_PROFILE_BATCH_SIZE
+    environment_model_timeout_seconds: float = DEFAULT_MODEL_TIMEOUT_SECONDS
     graph_write_timeout_seconds: float = DEFAULT_GRAPH_WRITE_TIMEOUT_SECONDS
     graph_status_timeout_seconds: float = DEFAULT_GRAPH_STATUS_TIMEOUT_SECONDS
     graph_index_timeout_seconds: float = DEFAULT_GRAPH_INDEX_TIMEOUT_SECONDS
