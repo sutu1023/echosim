@@ -267,8 +267,8 @@ async def cancel_job(
     try:
         result = await db.execute(
             text(
-                "SELECT j.status, j.run_id, j.next_step, r.total_steps, r.stage, "
-                "r.simulated_epoch, r.kind, r.document_id "
+                "SELECT j.status, j.run_id, j.next_step, j.cancel_requested_at, "
+                "r.total_steps, r.stage, r.simulated_epoch, r.kind, r.document_id "
                 "FROM jobs j JOIN runs r ON r.id = j.run_id "
                 "WHERE j.id = :job_id AND j.project_id = :project_id "
                 "FOR UPDATE OF j"
@@ -282,6 +282,26 @@ async def cancel_job(
         if row.status in TERMINAL_STATUSES:
             await db.commit()
             return await get_job(db, project_id=project_id, job_id=parsed), False
+
+        if row.kind == "simulation.run":
+            # 运行停止只是请求：worker 在下一个轮次边界读回在途动作后再写取消终态。
+            if row.cancel_requested_at is not None:
+                await db.commit()
+                return await get_job(db, project_id=project_id, job_id=parsed), False
+            updated = await db.execute(
+                text(
+                    "UPDATE jobs SET cancel_requested_at = clock_timestamp(), "
+                    "updated_at = clock_timestamp() WHERE id = :job_id "
+                    "AND status IN ('queued', 'running') "
+                    "AND cancel_requested_at IS NULL"
+                ),
+                {"job_id": parsed},
+            )
+            await db.commit()
+            return (
+                await get_job(db, project_id=project_id, job_id=parsed),
+                updated.rowcount == 1,
+            )
 
         seq = await run_events.max_seq(db, run_id=row.run_id) + 1
         await run_events.append_event(
@@ -319,6 +339,10 @@ async def cancel_job(
             from . import environment
 
             await environment.cancel_for_run(db, run_id=row.run_id)
+        if row.kind == "simulation.run":
+            from . import simulation
+
+            await simulation.cancel_for_run(db, run_id=row.run_id)
         await db.commit()
     except DB_ERRORS as exc:
         await db.rollback()

@@ -103,18 +103,30 @@ SessionFactory = Callable[[], AbstractAsyncContextManager[AsyncSession]]
 
 CLAIM_SQL = """
 WITH candidate AS (
-    SELECT id FROM jobs
+    SELECT j.id FROM jobs j
+      JOIN runs r ON r.id = j.run_id
+      LEFT JOIN simulations s ON s.run_id = r.id
      WHERE (
-            status = 'queued'
+            j.status = 'queued'
             OR (
-                status = 'running'
-                AND lease_expires_at IS NOT NULL
-                AND lease_expires_at <= clock_timestamp()
+                j.status = 'running'
+                AND j.lease_expires_at IS NOT NULL
+                AND j.lease_expires_at <= clock_timestamp()
             )
            )
-       AND (CAST(:job_id AS uuid) IS NULL OR id = CAST(:job_id AS uuid))
-     ORDER BY created_at
-     FOR UPDATE SKIP LOCKED
+       AND (CAST(:job_id AS uuid) IS NULL OR j.id = CAST(:job_id AS uuid))
+       AND (
+            (
+                :run_kinds = ''
+                OR r.kind = ANY(string_to_array(:run_kinds, ','))
+            )
+            AND (
+                r.kind <> 'simulation.run'
+                OR s.engine_mode = :simulation_engine
+            )
+           )
+     ORDER BY j.created_at
+     FOR UPDATE OF j SKIP LOCKED
      LIMIT 1
 )
 UPDATE jobs j
@@ -196,8 +208,14 @@ async def claim_next(
     worker_id: str,
     lease_seconds: float,
     job_id: uuid.UUID | None = None,
+    run_kinds: Sequence[str] | None = None,
+    simulation_engine: str | None = None,
 ) -> Claim | None:
-    """领取一个 `queued` 或租约已过期的 `running` 任务并生成新租约令牌。"""
+    """领取一个 `queued` 或租约已过期的 `running` 任务并生成新租约令牌。
+
+    只领取本 worker 声明的 run 类型；`simulation.run` 还必须匹配引擎模式，
+    使替身 worker 与真实本地 OASIS worker 各领各的任务。
+    """
     try:
         result = await db.execute(
             text(CLAIM_SQL),
@@ -205,6 +223,8 @@ async def claim_next(
                 "worker_id": worker_id,
                 "lease_seconds": lease_seconds,
                 "job_id": job_id,
+                "run_kinds": ",".join(run_kinds or ()),
+                "simulation_engine": simulation_engine or "double",
             },
         )
         row = result.first()

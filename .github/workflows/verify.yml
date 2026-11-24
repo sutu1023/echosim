@@ -86,6 +86,107 @@ jobs:
         if: always()
         run: make down || true
 
+  verify-change-09:
+    name: verify-change-09
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run Change 09 offline acceptance
+        env:
+          EXPECTED_SHA: ${{ inputs.expected_sha || github.sha }}
+        run: make verify CHANGE=2026-11-24-run-dual-platform-simulation
+
+      - name: Assert Change 09 report
+        if: always()
+        env:
+          EXPECTED_SHA: ${{ inputs.expected_sha || github.sha }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import pathlib
+          import sys
+
+          report_path = pathlib.Path("runtime/verify/last-run.json")
+          if not report_path.is_file():
+              sys.exit("缺少 Change 09 验收报告: %s" % report_path)
+
+          report = json.loads(report_path.read_text(encoding="utf-8"))
+          expected = os.environ["EXPECTED_SHA"]
+          evidence = report.get("simulation_evidence") or {}
+          calls = evidence.get("calls") or {}
+          scope = evidence.get("callScope") or []
+          scenarios = {
+              item.get("scenario"): item for item in evidence.get("scenarios") or []
+          }
+
+          print(f"expected_sha={expected}")
+          print(f"tested_sha={report.get('tested_sha')}")
+          print(f"result={report.get('result')}")
+          print(f"dirty={report.get('dirty')}")
+          print(f"change={report.get('change')}")
+          print(f"mode={evidence.get('mode')}")
+          print(f"engine={evidence.get('engine')}")
+          print(f"calls_real={calls.get('real')}")
+          print(f"calls_double={calls.get('double')}")
+          print(f"callScope={scope}")
+
+          if report.get("tested_sha") != expected:
+              sys.exit("报告 SHA 与触发 SHA 不一致")
+          if report.get("result") != "passed":
+              sys.exit("Change 09 验收结果不是 passed")
+          if report.get("dirty") is not False:
+              sys.exit("Change 09 报告标记为脏工作树")
+          if report.get("change") != "2026-11-24-run-dual-platform-simulation":
+              sys.exit("Change 09 报告 change 字段不一致")
+          if evidence.get("mode") != "offline-double":
+              sys.exit("Change 09 报告不是 offline-double")
+          if evidence.get("engine") != "double":
+              sys.exit("Change 09 报告引擎不是 double")
+          if calls.get("real") != 0:
+              sys.exit("Change 09 出现真实引擎或模型调用")
+          if int(calls.get("double") or 0) <= 0:
+              sys.exit("Change 09 未记录任何替身调用")
+          if len(scope) < 5:
+              sys.exit("callScope 未覆盖全部运行")
+          if any(int(item.get("real") or 0) != 0 for item in scope):
+              sys.exit("callScope 中某个运行出现真实调用")
+          for required in (
+              "simulation-full-chain",
+              "simulation-stop-and-rerun",
+              "simulation-takeover",
+              "simulation-partial-failure",
+              "simulation-boundaries",
+          ):
+              if required not in scenarios:
+                  sys.exit(f"缺少 Change 09 场景: {required}")
+          takeover = scenarios["simulation-takeover"]
+          if int(takeover.get("attempts") or 0) < 2:
+              sys.exit("接手场景 attempts 小于 2")
+          partial = scenarios["simulation-partial-failure"]
+          if partial.get("failedPlatforms") != ["platform_a"]:
+              sys.exit("部分失败场景 failedPlatforms 不一致")
+          if not (evidence.get("workerRestored") or {}).get("fault") == "":
+              sys.exit("Change 09 结束后 worker 故障注入未清除")
+          PY
+
+      - name: Upload Change 09 report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: verify-report-change-09-${{ github.sha }}
+          path: runtime/verify/
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Stop environment
+        if: always()
+        run: make down || true
+
   verify-change-08:
     name: verify-change-08
     runs-on: ubuntu-latest

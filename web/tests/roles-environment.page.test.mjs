@@ -600,6 +600,9 @@ test('冻结后第三阶段显示准备已确认，刷新同一地址保持一�
     if (url.endsWith(`/preparations/${PREP}`)) {
       return jsonResponse({ preparation: detail })
     }
+    if (url.includes('/simulations')) {
+      return jsonResponse({ simulations: [], simulation: null })
+    }
     throw new Error(`unexpected fetch ${url}`)
   }
   for (const attempt of [1, 2]) {
@@ -612,7 +615,8 @@ test('冻结后第三阶段显示准备已确认，刷新同一地址保持一�
       global: { plugins: [router] },
     })
     await flush(6)
-    assert.match(wrapper.text(), /准备已确认，运行功能待接入/)
+    assert.match(wrapper.text(), /暂无运行记录/)
+    assert.match(wrapper.text(), /开始运行/)
     assert.match(wrapper.text(), /原创问题：是否调整安排？/)
     assert.match(wrapper.text(), /3/)
     wrapper.unmount()

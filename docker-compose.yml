@@ -45,8 +45,23 @@ services:
       ENVIRONMENT_DEFAULT_DURATION_HOURS: ${ENVIRONMENT_DEFAULT_DURATION_HOURS:-72}
       ENVIRONMENT_DEFAULT_MINUTES_PER_ROUND: ${ENVIRONMENT_DEFAULT_MINUTES_PER_ROUND:-60}
       ENVIRONMENT_MAX_MANUAL_ROUNDS: ${ENVIRONMENT_MAX_MANUAL_ROUNDS:-1000}
+      SIMULATION_ENGINE: ${SIMULATION_ENGINE:-double}
+      SIMULATION_ALLOW_OASIS: ${SIMULATION_ALLOW_OASIS:-false}
+      SIMULATION_DATA_DIR: /app/data/simulations
+      SIMULATION_ACTIONS_PER_ROUND: ${SIMULATION_ACTIONS_PER_ROUND:-6}
+      SIMULATION_ROUND_TIMEOUT_SECONDS: ${SIMULATION_ROUND_TIMEOUT_SECONDS:-120}
+      SIMULATION_ROUND_DELAY_MS: ${SIMULATION_ROUND_DELAY_MS:-0}
+      SIMULATION_MAX_ACTIONS: ${SIMULATION_MAX_ACTIONS:-5000}
+      SIMULATION_FAULT: ${SIMULATION_FAULT:-}
+      SIMULATION_KEEP_RUNTIME: ${SIMULATION_KEEP_RUNTIME:-false}
+      SIMULATION_ENGINE_COMMAND: ${SIMULATION_ENGINE_COMMAND:-}
+      SIMULATION_ENGINE_RUNTIME: ${SIMULATION_ENGINE_RUNTIME:-/out}
+      DUET_CHILD_SLEEP_MS: ${DUET_CHILD_SLEEP_MS:-0}
+      WORKER_RUN_KINDS: ${WORKER_RUN_KINDS:-}
+      WORKER_SIMULATION_ENGINE: ${WORKER_SIMULATION_ENGINE:-}
     volumes:
       - echosim-documents:/app/data/documents
+      - echosim-simulations:/app/data/simulations
     ports:
       - "127.0.0.1:${ECHOSIM_PORT:-8080}:8080"
     healthcheck:
@@ -121,6 +136,20 @@ services:
       EVIDENCE_GRAPH_BATCH_SIZE: ${EVIDENCE_GRAPH_BATCH_SIZE:-4}
       EVIDENCE_GRAPH_INDEX_TIMEOUT_SECONDS: ${EVIDENCE_GRAPH_INDEX_TIMEOUT_SECONDS:-60}
       EVIDENCE_GRAPH_PROCESSING_TIMEOUT_SECONDS: ${EVIDENCE_GRAPH_PROCESSING_TIMEOUT_SECONDS:-120}
+      SIMULATION_ENGINE: ${SIMULATION_ENGINE:-double}
+      SIMULATION_ALLOW_OASIS: ${SIMULATION_ALLOW_OASIS:-false}
+      SIMULATION_DATA_DIR: /app/data/simulations
+      SIMULATION_ACTIONS_PER_ROUND: ${SIMULATION_ACTIONS_PER_ROUND:-6}
+      SIMULATION_ROUND_TIMEOUT_SECONDS: ${SIMULATION_ROUND_TIMEOUT_SECONDS:-120}
+      SIMULATION_ROUND_DELAY_MS: ${SIMULATION_ROUND_DELAY_MS:-0}
+      SIMULATION_MAX_ACTIONS: ${SIMULATION_MAX_ACTIONS:-5000}
+      SIMULATION_FAULT: ${SIMULATION_FAULT:-}
+      SIMULATION_KEEP_RUNTIME: ${SIMULATION_KEEP_RUNTIME:-false}
+      SIMULATION_ENGINE_COMMAND: ${SIMULATION_ENGINE_COMMAND:-}
+      SIMULATION_ENGINE_RUNTIME: ${SIMULATION_ENGINE_RUNTIME:-/out}
+      DUET_CHILD_SLEEP_MS: ${DUET_CHILD_SLEEP_MS:-0}
+      WORKER_RUN_KINDS: ${WORKER_RUN_KINDS:-}
+      WORKER_SIMULATION_ENGINE: ${WORKER_SIMULATION_ENGINE:-}
       JOB_LEASE_SECONDS: ${JOB_LEASE_SECONDS:-6}
       JOB_HEARTBEAT_SECONDS: ${JOB_HEARTBEAT_SECONDS:-2}
       WORKER_POLL_INTERVAL_SECONDS: ${WORKER_POLL_INTERVAL_SECONDS:-0.25}
@@ -141,6 +170,7 @@ services:
       ENVIRONMENT_PROFILE_DELAY_MS: ${ENVIRONMENT_PROFILE_DELAY_MS:-0}
     volumes:
       - echosim-documents:/app/data/documents:ro
+      - echosim-simulations:/app/data/simulations
     # 镜像继承的 HEALTHCHECK 探测 127.0.0.1:8080/livez，worker 没有 HTTP 端口，
     # 因此用 worker 自己的心跳文件替换继承探针（而不是让镜像探针永远 unhealthy）。
     healthcheck:
@@ -155,6 +185,52 @@ services:
       start_period: 10s
     restart: unless-stopped
 
+  # 真实本地 OASIS 运行的可选打包方式；镜像需先完成依赖四阶段验证。
+  # 默认不启用：`docker compose --profile simulation up -d worker-simulation`。
+  worker-simulation:
+    profiles: ["simulation"]
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: worker-simulation
+    image: echosim-worker-simulation:dev
+    command: ["python", "-m", "app.simulation_worker"]
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-echosim}:${POSTGRES_PASSWORD:-echosim_dev_password}@db:5432/${POSTGRES_DB:-echosim}
+      WORKER_RUN_KINDS: simulation.run
+      WORKER_SIMULATION_ENGINE: oasis
+      SIMULATION_ENGINE: oasis
+      SIMULATION_ALLOW_OASIS: "true"
+      SIMULATION_DATA_DIR: /app/data/simulations
+      SIMULATION_ENGINE_COMMAND: ""
+      SIMULATION_ENGINE_RUNTIME: /out
+      # 专用 worker 固定保留引擎证据目录，供 make simulate-live 逐平台核对原生记录。
+      SIMULATION_KEEP_RUNTIME: "true"
+      MODEL_API_BASE_URL: ${MODEL_API_BASE_URL:-}
+      MODEL_API_KEY: ${MODEL_API_KEY:-}
+      MODEL_NAME: ${MODEL_NAME:-}
+      JOB_LEASE_SECONDS: ${JOB_LEASE_SECONDS:-6}
+      JOB_HEARTBEAT_SECONDS: ${JOB_HEARTBEAT_SECONDS:-2}
+      WORKER_POLL_INTERVAL_SECONDS: ${WORKER_POLL_INTERVAL_SECONDS:-0.25}
+      WORKER_HEARTBEAT_PATH: /tmp/echosim-simulation-heartbeat
+    volumes:
+      - echosim-simulations:/app/data/simulations
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import os,sys,time; p='/tmp/echosim-simulation-heartbeat'; sys.exit(0 if os.path.exists(p) and time.time()-os.path.getmtime(p) < 15 else 1)"
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+
 volumes:
   echosim-pgdata:
   echosim-documents:
+  echosim-simulations:

@@ -391,6 +391,8 @@ class PostgresMigrationTests(unittest.IsolatedAsyncioTestCase):
                 "0010_author_recommendation",
                 "0011_agent_environment_preparation",
                 "0012_environment_profile_topics",
+                "0013_dual_platform_runs",
+                "0014_simulation_budget_and_cleanup",
             ],
         )
         self.assertEqual(rerun, [])
@@ -469,6 +471,8 @@ class PostgresMigrationTests(unittest.IsolatedAsyncioTestCase):
                 "0010_author_recommendation",
                 "0011_agent_environment_preparation",
                 "0012_environment_profile_topics",
+                "0013_dual_platform_runs",
+                "0014_simulation_budget_and_cleanup",
             ],
         )
         self.assertEqual(rerun, [])
@@ -734,3 +738,51 @@ class PostgresMigrationTests(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SimulationMigrationTests(unittest.TestCase):
+    def test_0013_extends_kinds_and_adds_run_tables(self) -> None:
+        migrations = discover_migrations(Path("app/migrations"))
+        versions = [m.version for m in migrations]
+        self.assertIn("0013_dual_platform_runs", versions)
+        self.assertLess(
+            versions.index("0012_environment_profile_topics"),
+            versions.index("0013_dual_platform_runs"),
+        )
+        migration = next(
+            m for m in migrations if m.version == "0013_dual_platform_runs"
+        )
+        joined = "\n".join(
+            split_sql_statements(migration.path.read_text(encoding="utf-8"))
+        )
+        self.assertIn("'simulation.run'", joined)
+        for table in (
+            "simulations",
+            "simulation_platforms",
+            "simulation_rounds",
+            "simulation_actions",
+        ):
+            self.assertIn(f"CREATE TABLE {table}", joined)
+        self.assertIn("simulations_engine_mode_check", joined)
+        self.assertIn("simulation_platforms_mapping_check", joined)
+        self.assertIn("simulation_actions_record_unique", joined)
+        self.assertIn("environment_preparations_project_id_unique", joined)
+
+    def test_0014_adds_budget_and_cleanup_columns(self) -> None:
+        migrations = discover_migrations(Path("app/migrations"))
+        versions = [m.version for m in migrations]
+        self.assertLess(
+            versions.index("0013_dual_platform_runs"),
+            versions.index("0014_simulation_budget_and_cleanup"),
+        )
+        migration = next(
+            m
+            for m in migrations
+            if m.version == "0014_simulation_budget_and_cleanup"
+        )
+        joined = "\n".join(
+            split_sql_statements(migration.path.read_text(encoding="utf-8"))
+        )
+        self.assertIn("ADD COLUMN reserved_actions integer", joined)
+        self.assertIn("ADD COLUMN cleanup_code text", joined)
+        self.assertIn("simulations_reserved_actions_check", joined)
