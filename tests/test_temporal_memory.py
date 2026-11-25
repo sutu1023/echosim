@@ -7,6 +7,7 @@ import os
 import tempfile
 import unittest
 import uuid
+from dataclasses import replace
 from datetime import datetime, timezone
 from types import SimpleNamespace
 from pathlib import Path
@@ -880,6 +881,202 @@ class TemporalMemoryTests(unittest.IsolatedAsyncioTestCase):
                 db, project_id=self.project_id, run_id=simulation.run_id
             )
         self.assertEqual(refreshed.memory_status, "complete")
+
+    async def test_unconfirmed_memory_is_excluded_from_later_round_plan(self) -> None:
+        simulation = await self._start()
+        claim = await self._claim(simulation)
+        async with self.session_factory() as db:
+            sim = await store.get_simulation(
+                db, project_id=self.project_id, run_id=simulation.run_id
+            )
+            role_id = sim.plan.order[0]
+            role = sim.plan.role(role_id)
+            records = [
+                {
+                    "actionKey": "platform_a:r1:a1",
+                    "actionIndex": 1,
+                    "nativeAction": "create_post",
+                    "actorRoleId": role_id,
+                    "actorName": role.display_name,
+                    "content": "正常前序行动",
+                    "engineRecordId": "post:r1:1",
+                    "engineSequence": 1,
+                    "targetEngineRecordId": None,
+                },
+                {
+                    "actionKey": "platform_a:r1:a2",
+                    "actionIndex": 2,
+                    "nativeAction": "create_post",
+                    "actorRoleId": role_id,
+                    "actorName": role.display_name,
+                    "content": "待确认前序行动",
+                    "engineRecordId": "post:r1:2",
+                    "engineSequence": 2,
+                    "targetEngineRecordId": None,
+                },
+            ]
+            await store.write_round(
+                db,
+                simulation=sim,
+                platform_key="platform_a",
+                round_index=1,
+                simulated_at=sim.simulated_start,
+                records=records,
+                event_seq=1,
+            )
+            await db.commit()
+            entries = (
+                await db.execute(
+                    text(
+                        "SELECT e.id, e.action_id FROM simulation_memory_entries e "
+                        "WHERE e.simulation_id = :s AND e.platform_key = 'platform_a' "
+                        "ORDER BY e.action_seq"
+                    ),
+                    {"s": simulation.id},
+                )
+            ).fetchall()
+            self.assertEqual(len(entries), 2)
+            unconfirmed_id = entries[1].id
+            normal_id = entries[0].id
+            await db.execute(
+                text(
+                    "UPDATE simulation_memory_episodes SET state = 'unconfirmed', "
+                    "write_outcome = 'unconfirmed' WHERE simulation_id = :s "
+                    "AND memory_id = :m"
+                ),
+                {"s": simulation.id, "m": unconfirmed_id},
+            )
+            await db.execute(
+                text(
+                    "UPDATE simulation_memory_episodes SET state = 'planned', "
+                    "write_outcome = 'not_attempted' WHERE simulation_id = :s "
+                    "AND memory_id = :m"
+                ),
+                {"s": simulation.id, "m": normal_id},
+            )
+            await memory.record_reads(
+                db,
+                simulation_id=simulation.id,
+                action_id=entries[0].action_id,
+                platform_key="platform_a",
+                round_index=1,
+                refs=[{"memoryId": str(normal_id)}],
+            )
+            await db.commit()
+            prior_reads = (
+                await db.execute(
+                    text(
+                        "SELECT action_id, memory_id FROM simulation_action_memory_reads "
+                        "WHERE simulation_id = :s AND action_id = :a ORDER BY memory_id"
+                    ),
+                    {"s": simulation.id, "a": entries[0].action_id},
+                )
+            ).fetchall()
+            actions, _ = await simulation_worker._round_plan(
+                db,
+                simulation=sim,
+                platform_key="platform_a",
+                round_index=3,
+                actions_per_round=6,
+            )
+            plan_row = (
+                await db.execute(
+                    text(
+                        "SELECT request_payload FROM simulation_round_plans WHERE "
+                        "simulation_id = :s AND platform_key = 'platform_a' "
+                        "AND round_index = 3"
+                    ),
+                    {"s": simulation.id},
+                )
+            ).scalar_one()
+            await db.commit()
+            after_plan_reads = (
+                await db.execute(
+                    text(
+                        "SELECT action_id, memory_id FROM simulation_action_memory_reads "
+                        "WHERE simulation_id = :s AND action_id = :a ORDER BY memory_id"
+                    ),
+                    {"s": simulation.id, "a": entries[0].action_id},
+                )
+            ).fetchall()
+        self.assertEqual(
+            [(row.action_id, row.memory_id) for row in prior_reads],
+            [(row.action_id, row.memory_id) for row in after_plan_reads],
+        )
+        refs = plan_row.get("memoryRefs") or []
+        ref_ids = {str(item["memoryId"]) for item in refs}
+        self.assertNotIn(str(unconfirmed_id), ref_ids)
+        self.assertIn(str(normal_id), ref_ids)
+        # 实际引擎请求文件也必须排除待确认记忆。
+        runtime_dir = self.data_dir / str(simulation.id) / "platform_a"
+        runtime_dir.mkdir(parents=True, exist_ok=True)
+        await simulation_worker._run_child(
+            runtime_dir=runtime_dir,
+            platform_key="platform_a",
+            mode="double",
+            round_index=3,
+            actions=[
+                replace(
+                    action,
+                    target_action_key=None,
+                    target_engine_record_id=None,
+                )
+                for action in actions
+            ],
+            fault="none",
+            timeout_seconds=0.01,
+            keep_request=True,
+        )
+        request = json.loads(
+            (runtime_dir / "round-3-request.json").read_text(encoding="utf-8")
+        )
+        request_ids = {
+            str(ref["memoryId"])
+            for action in request.get("actions") or []
+            for ref in action.get("memoryRefs") or []
+        }
+        self.assertNotIn(str(unconfirmed_id), request_ids)
+        self.assertIn(str(normal_id), request_ids)
+        # 记账后的行动读取记录保持同一结论。
+        book_records = [
+            {
+                "actionKey": action.action_key,
+                "nativeAction": action.native_action,
+                "actorRoleId": action.actor_role_id,
+                "actorName": action.actor_name,
+                "content": action.content,
+                "engineRecordId": f"post:r3:{action.action_index}",
+                "engineSequence": action.action_index,
+                "targetEngineRecordId": action.target_engine_record_id,
+            }
+            for action in actions
+        ]
+        outcome = await simulation_worker._book_round(
+            claim,
+            session_factory=self.session_factory,
+            lease_seconds=120.0,
+            simulation=sim,
+            platform_key="platform_a",
+            round_index=3,
+            records=book_records,
+            planned_actions=actions,
+        )
+        self.assertEqual(outcome, "ok")
+        async with self.session_factory() as db:
+            round3_reads = (
+                await db.execute(
+                    text(
+                        "SELECT r.memory_id FROM simulation_action_memory_reads r "
+                        "JOIN simulation_actions a ON a.id = r.action_id WHERE "
+                        "a.simulation_id = :s AND a.platform_key = 'platform_a' "
+                        "AND a.round_index = 3"
+                    ),
+                    {"s": simulation.id},
+                )
+            ).fetchall()
+        read_ids = {str(row.memory_id) for row in round3_reads}
+        self.assertNotIn(str(unconfirmed_id), read_ids)
+        self.assertIn(str(normal_id), read_ids)
 
     async def test_round_not_available_before_platform_advances(self) -> None:
         simulation = await self._start()

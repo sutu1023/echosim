@@ -403,6 +403,8 @@ async def plan_refs(
                 "LEFT JOIN simulation_memory_episodes p ON p.simulation_id = e.simulation_id "
                 "AND p.memory_id = e.id WHERE e.simulation_id = :simulation_id "
                 "AND e.platform_key = :platform_key AND e.round_index < :round_index "
+                "AND COALESCE(p.state, 'planned') <> 'unconfirmed' "
+                "AND COALESCE(p.write_outcome, 'not_attempted') <> 'unconfirmed' "
                 "ORDER BY e.round_index, e.action_seq"
             ),
             {
