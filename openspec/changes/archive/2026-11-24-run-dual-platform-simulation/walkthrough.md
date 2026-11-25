@@ -1,9 +1,11 @@
-# 第三阶段浏览器走查清单（待签收）
+# 第三阶段浏览器走查清单（作者人工验收通过）
 
-- 状态：**待签收（未签收）**。清单已准备，作者尚未在浏览器中执行与签字。
-- 被测 SHA：填写签收时的 `git rev-parse HEAD`
+- 状态：**作者人工验收通过（2026-11-25）**。
+- 被测 SHA：`d15c2289453f5eb037fe6f60fb55cfc5d2cc49bd`
 - 环境：`make up`（或 `make up SIMULATION=1` 用于真实本地 OASIS）
-- 证据目录：`docs/acceptance/`（签收后才写入；本清单不是验收记录）
+- 验收记录：`docs/acceptance/2026-11-25-d15c228.md`
+- 机器报告：同 SHA 的 `final-default-1/2.json`、`final-change09-1/2.json`、`final-live-worker.json`
+- CI：https://github.com/sutu1023/echosim/actions/runs/45476257491
 
 | # | 检查项 | 操作 | 期望可观察结果 | 记录 |
 | --- | --- | --- | --- | --- |
@@ -18,7 +20,8 @@
 
 ## 签收
 
-- 验收人：________
-- 日期：________
-- 结论：☐ 通过 ☐ 不通过（附原因）
-- 关联证据：`runtime/verify/last-run.json`、`runtime/simulation-live/report.json`、截图路径
+- 验收人：项目作者
+- 日期：2026-11-25
+- 结论：☑ 通过
+- 关联证据：`docs/acceptance/2026-11-25-d15c228.md`、同 SHA 的干净克隆验收报告与 CI 产物
+- 说明：运行列表按钮在 B 启动时的一次采样仍显示“排队中”（主面板与 API 已为运行中），不影响选中项与停止请求指向 B；已记录为观察项而不是阻塞项。
