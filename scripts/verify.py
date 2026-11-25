@@ -173,6 +173,21 @@ def simulation_runtime_env() -> dict[str, str]:
     }
 
 
+def temporal_memory_runtime_env() -> dict[str, str]:
+    """Change 10：运行时记忆只使用 stub 图谱，真实外呼必须为 0。"""
+    return {
+        **simulation_runtime_env(),
+        "SIMULATION_MEMORY_PROVIDER": "stub",
+        "SIMULATION_MEMORY_MAX_REFS": "20",
+        "SIMULATION_MEMORY_MAX_NODES": "2000",
+        "SIMULATION_MEMORY_MAX_EDGES": "4000",
+        "SIMULATION_MEMORY_INDEX_TIMEOUT_SECONDS": "30",
+        "SIMULATION_MEMORY_PROCESSING_TIMEOUT_SECONDS": "60",
+        "SIMULATION_MEMORY_RETRY_BUDGET_SECONDS": "120",
+        "SIMULATION_MEMORY_BATCH_SIZE": "20",
+    }
+
+
 def git_head() -> str:
     result = command(["git", "rev-parse", "HEAD"], timeout=30)
     require(result.returncode == 0, f"无法读取 Git HEAD：{result.stderr.strip()}")
@@ -826,6 +841,7 @@ ENGINE_CHANGE_ID = "2026-11-21-connect-engine-providers"
 GRAPH_CHANGE_ID = "2026-11-22-build-evidence-graph"
 ENVIRONMENT_CHANGE_ID = "2026-11-24-prepare-agent-environment"
 SIMULATION_CHANGE_ID = "2026-11-24-run-dual-platform-simulation"
+TEMPORAL_MEMORY_CHANGE_ID = "2026-11-25-update-temporal-memory"
 KNOWN_CHANGES = {
     CHANGE_ID,
     DOCUMENT_CHANGE_ID,
@@ -833,6 +849,7 @@ KNOWN_CHANGES = {
     GRAPH_CHANGE_ID,
     ENVIRONMENT_CHANGE_ID,
     SIMULATION_CHANGE_ID,
+    TEMPORAL_MEMORY_CHANGE_ID,
 }
 VERIFY_STEP_DELAY_MS = "800"
 JOB_TIMEOUT_SECONDS = 90.0
@@ -4750,6 +4767,24 @@ def recreate_simulation_worker(**env: str) -> None:
     require_worker_healthy()
 
 
+def scale_worker(count: int, **env: str) -> None:
+    for key, value in env.items():
+        os.environ[key] = value
+    # 先移除全部 worker，避免上一次失败留下的副本继续使用旧环境。
+    compose("rm", "-sf", "worker")
+    result = compose(
+        "up", "-d", "--no-deps", "--scale", f"worker={count}", "worker"
+    )
+    require(result.returncode == 0, f"调整 worker 数量失败：{result.stderr.strip()}")
+    deadline = time.time() + 60
+    while time.time() < deadline:
+        ids = compose("ps", "-q", "worker").stdout.strip().splitlines()
+        if len(ids) == count:
+            return
+        time.sleep(0.5)
+    raise ScenarioFailed(f"worker 数量未达到 {count}")
+
+
 def record_simulation_evidence(
     report: dict[str, Any], scenario_id: str, **fields: object
 ) -> None:
@@ -5326,6 +5361,947 @@ def scenario_simulation_boundaries(
     entry["detail"] = "匿名 401、他人项目 404、未知运行 404、非法选择 422"
 
 
+def record_temporal_memory_calls(report: dict[str, Any], *, run_id: str) -> None:
+    if report.get("temporal_memory_evidence") is None:
+        report["temporal_memory_evidence"] = {
+            "mode": "offline-stub",
+            "graphProvider": "stub",
+            "calls": {"real": 0, "double": 0},
+            "callScope": [],
+            "scenarios": [],
+            "isolation": None,
+            "workerRestored": None,
+        }
+    evidence = report["temporal_memory_evidence"]
+    raw = psql_scalar(
+        "SELECT json_build_object('real', memory_calls_real, 'double', "
+        "memory_calls_double, 'episodes', (SELECT count(*) FROM "
+        "simulation_memory_episodes WHERE simulation_id = simulations.id), "
+        "'graphId', (SELECT graph_id FROM simulation_graph_bindings WHERE "
+        "simulation_id = simulations.id)) FROM simulations WHERE run_id = "
+        f"'{run_id}'"
+    )
+    require(bool(raw), f"运行 {run_id} 缺少记忆调用计数")
+    counts = json.loads(raw)
+    scope = [item for item in evidence["callScope"] if item["runId"] != run_id]
+    scope.append(
+        {
+            "runId": run_id,
+            "graphId": counts.get("graphId"),
+            "episodes": int(counts.get("episodes") or 0),
+            "real": int(counts.get("real") or 0),
+            "double": int(counts.get("double") or 0),
+        }
+    )
+    evidence["callScope"] = scope
+    evidence["calls"] = {
+        "real": sum(item["real"] for item in scope),
+        "double": sum(item["double"] for item in scope),
+    }
+
+
+def record_temporal_memory_evidence(
+    report: dict[str, Any], scenario_id: str, **fields: object
+) -> None:
+    if report.get("temporal_memory_evidence") is None:
+        report["temporal_memory_evidence"] = {
+            "mode": "offline-stub",
+            "graphProvider": "stub",
+            "calls": {"real": 0, "double": 0},
+            "callScope": [],
+            "scenarios": [],
+            "isolation": None,
+            "workerRestored": None,
+        }
+    report["temporal_memory_evidence"]["scenarios"].append(
+        {"scenario": scenario_id, **fields}
+    )
+
+
+def fetch_simulation_memory(
+    token: str,
+    project_id: str,
+    run_id: str,
+    *,
+    round_index: int | None = None,
+    platform: str | None = None,
+) -> dict[str, object]:
+    query: list[str] = []
+    if round_index is not None:
+        query.append(f"round={round_index}")
+    if platform:
+        query.append(f"platform={platform}")
+    suffix = "/memory" + (f"?{'&'.join(query)}" if query else "")
+    status, _, body = api_call(
+        "GET", simulation_path(project_id, run_id, suffix), token
+    )
+    require(status == 200, f"运行时记忆期望 200，实际 {status}：{body}")
+    require(isinstance(body, dict), "运行时记忆不是对象")
+    return body
+
+
+def wait_memory_status(
+    token: str,
+    project_id: str,
+    run_id: str,
+    *,
+    timeout: float = 180.0,
+) -> dict[str, object]:
+    deadline = time.time() + timeout
+    last: dict[str, object] = {}
+    while time.time() < deadline:
+        detail = fetch_simulation(token, project_id, run_id)
+        last = detail.get("memory") or {}  # type: ignore[assignment]
+        if last.get("status") in ("complete", "unconfirmed", "unavailable", "unconfigured"):
+            return detail
+        time.sleep(0.4)
+    raise ScenarioFailed(f"运行时记忆未在 {timeout} 秒内稳定：{last}")
+
+
+def scenario_temporal_memory_not_triggered(
+    entry: dict[str, Any], state: dict[str, Any], report: dict[str, Any]
+) -> None:
+    token, project_id = state["token_a"], state["project_id"]
+    status, _, body = api_call("GET", simulation_path(project_id), token)
+    require(status == 200, f"运行列表期望 200，实际 {status}：{body}")
+    require(body.get("simulations") == [], f"默认验收不应有运行记录：{body}")  # type: ignore[union-attr]
+    anonymous, _, _ = raw_request(
+        "GET", simulation_path(project_id, str(uuid.uuid4()), "/memory?round=1")
+    )
+    require(anonymous == 401, "匿名记忆读取应为 401")
+    rows = int(
+        psql_scalar("SELECT count(*) FROM simulation_memory_syncs") or 0
+    )
+    require(rows == 0, f"默认验收不应创建记忆任务，实际 {rows}")
+    report["temporal_memory_evidence"] = {
+        "mode": "not-triggered",
+        "graphProvider": "unconfigured",
+        "calls": {"real": 0, "double": 0},
+        "callScope": [],
+        "scenarios": [
+            {
+                "scenario": "temporal-memory-not-triggered",
+                "listStatus": status,
+                "anonymousStatus": anonymous,
+                "memoryJobs": rows,
+            }
+        ],
+        "isolation": None,
+        "workerRestored": None,
+    }
+    entry["detail"] = "默认验收未触发运行或记忆任务；匿名记忆读取 401"
+
+
+def scenario_temporal_memory_full_chain(
+    entry: dict[str, Any],
+    state: dict[str, Any],
+    report: dict[str, Any],
+    fixtures: DocumentFixtures,
+) -> None:
+    token, project_id = state["token_a"], state["project_id"]
+    recreate_simulation_worker(
+        SIMULATION_KEEP_RUNTIME="true",
+        SIMULATION_FAULT="",
+        DUET_CHILD_SLEEP_MS="0",
+        SIMULATION_ROUND_DELAY_MS="0",
+        SIMULATION_MEMORY_PROVIDER="stub",
+        EVIDENCE_GRAPH_ALLOW_STUB="true",
+    )
+    frozen = prepare_frozen_selection(entry, state, fixtures)
+    state["temporal_selection"] = frozen["selectionId"]
+    simulation_id = str(
+        psql_scalar(
+            "SELECT id FROM simulations WHERE selection_id = "
+            f"'{frozen['selectionId']}' ORDER BY created_at DESC LIMIT 1"
+        )
+        or ""
+    )
+    # prepare_frozen_selection 尚未开始运行；先取快照基线，再开始。
+    snapshot_before = psql_scalar(
+        "SELECT json_build_object("
+        "'nodes', (SELECT count(*) FROM graph_nodes WHERE snapshot_id = "
+        f"'{frozen['snapshotId']}'),"
+        "'edges', (SELECT count(*) FROM graph_edges WHERE snapshot_id = "
+        f"'{frozen['snapshotId']}'),"
+        "'evidence', (SELECT count(*) FROM graph_evidence WHERE snapshot_id = "
+        f"'{frozen['snapshotId']}'),"
+        "'hash', (SELECT md5(COALESCE(string_agg(node_key || ':' || label || ':' "
+        "|| node_type, '|' ORDER BY node_key), '')) FROM graph_nodes WHERE "
+        f"snapshot_id = '{frozen['snapshotId']}') || ':' || "
+        "(SELECT md5(COALESCE(string_agg(edge_key || ':' || label || ':' || "
+        "edge_type, '|' ORDER BY edge_key), '')) FROM graph_edges WHERE "
+        f"snapshot_id = '{frozen['snapshotId']}') || ':' || "
+        "(SELECT md5(COALESCE(string_agg(target_kind || ':' || target_key || ':' "
+        "|| evidence_index::text || ':' || source_start::text || ':' || "
+        "source_end::text, '|' ORDER BY target_kind, target_key, evidence_index), '')) "
+        f"FROM graph_evidence WHERE snapshot_id = '{frozen['snapshotId']}'))::text"
+    )
+    status, body = start_simulation_run(
+        token, project_id, str(frozen["selectionId"])
+    )
+    require(status == 202, f"开始运行期望 202，实际 {status}：{body}")
+    run_id = str(body["simulation"]["runId"])  # type: ignore[index]
+    state["temporal_run"] = run_id
+    detail = wait_simulation(token, project_id, run_id)
+    require(detail["phase"] == "succeeded", f"运行未成功：{detail['phase']}")
+    detail = wait_memory_status(token, project_id, run_id)
+    memory = detail.get("memory") or {}
+    require(memory.get("status") == "complete", f"记忆未完成：{memory}")
+    simulation_id = str(
+        psql_scalar(f"SELECT id FROM simulations WHERE run_id = '{run_id}'")
+    )
+    actions = fetch_simulation_actions(token, project_id, run_id)
+    items = actions["items"]  # type: ignore[index]
+    comment = next(
+        (
+            item
+            for item in items
+            if item["platformKey"] == "platform_b"
+            and int(item["roundIndex"]) == 2
+            and item["nativeAction"] == "create_comment"
+        ),
+        None,
+    )
+    require(comment is not None, "第 2 轮缺少话题社区评论")
+    memory1 = fetch_simulation_memory(
+        token, project_id, run_id, round_index=1, platform="platform_b"
+    )
+    memory2 = fetch_simulation_memory(
+        token, project_id, run_id, round_index=2, platform="platform_b"
+    )
+    memory3 = fetch_simulation_memory(
+        token, project_id, run_id, round_index=3, platform="platform_b"
+    )
+    ids1 = {item["memoryId"] for item in memory1["entries"]}  # type: ignore[index]
+    ids2 = {item["memoryId"] for item in memory2["entries"]}  # type: ignore[index]
+    ids3 = {item["memoryId"] for item in memory3["entries"]}  # type: ignore[index]
+    memory_id = str(
+        psql_scalar(
+            "SELECT id FROM simulation_memory_entries WHERE action_id = "
+            f"'{comment['actionId']}'"
+        )
+    )
+    require(memory_id not in ids1, "第 1 轮图不应包含第 2 轮评论")
+    require(memory_id in ids2 and memory_id in ids3, "第 2/3 轮图应包含第 2 轮评论")
+    source = None
+    for node in memory2["runtime"]["nodes"]:  # type: ignore[index]
+        for candidate in node.get("sources") or []:
+            if candidate.get("actionId") == comment["actionId"]:
+                source = candidate
+                break
+    require(source is not None, "第 2 轮图缺少评论来源")
+    require(
+        source["actionId"] == comment["actionId"]
+        and source["platformKey"] == comment["platformKey"]
+        and int(source["roundIndex"]) == 2
+        and source["sourceEventSeq"] >= 1,
+        f"评论来源字段异常：{source}",
+    )
+    material_with_sources = [
+        item
+        for item in (memory2["material"]["nodes"] + memory2["material"]["edges"])  # type: ignore[index]
+        if item.get("sources")
+    ]
+    require(bool(material_with_sources), "材料层没有可见来源")
+    history_node = next(
+        (
+            node
+            for node in memory2["runtime"]["nodes"]  # type: ignore[index]
+            if any(int(src["roundIndex"]) == 2 for src in node.get("sources") or [])
+        ),
+        None,
+    )
+    require(history_node is not None, "缺少第 2 轮历史节点")
+    memory3_again = fetch_simulation_memory(
+        token, project_id, run_id, round_index=3, platform="platform_b"
+    )
+    memory2_again = fetch_simulation_memory(
+        token, project_id, run_id, round_index=2, platform="platform_b"
+    )
+    history_again = next(
+        node for node in memory2_again["runtime"]["nodes"]  # type: ignore[index]
+        if node["key"] == history_node["key"]
+    )
+    require(
+        history_again["summary"] == history_node["summary"]
+        and history_again["sourceCount"] == history_node["sourceCount"]
+        and all(int(src["roundIndex"]) <= 2 for src in history_again["sources"]),
+        f"第 3 轮完成后重读第 2 轮摘要/来源漂移：{history_node} != {history_again}",
+    )
+    for node in memory2["runtime"]["nodes"]:  # type: ignore[index]
+        for candidate in node.get("sources") or []:
+            require(
+                int(candidate["roundIndex"]) <= 2,
+                "第 2 轮图混入第 3 轮来源",
+            )
+    plan_json = psql_scalar(
+        "SELECT request_payload::text FROM simulation_round_plans WHERE "
+        f"simulation_id = '{simulation_id}' AND platform_key = 'platform_b' "
+        "AND round_index = 2"
+    )
+    require(bool(plan_json), "缺少第 2 轮计划")
+    plan = json.loads(plan_json)
+    refs = plan.get("memoryRefs") or []
+    require(bool(refs), "第 2 轮计划没有前序记忆引用")
+    for ref in refs:
+        require(int(ref["roundIndex"]) < 2, f"计划引用了当前/未来轮次：{ref}")
+    platform_rows = psql_scalar(
+        "SELECT string_agg(DISTINCT e.platform_key, ',') FROM "
+        "simulation_memory_entries e WHERE e.simulation_id = "
+        f"'{simulation_id}' AND e.id = ANY(ARRAY["
+        + ",".join(f"'{item['memoryId']}'" for item in refs)
+        + "]::uuid[])"
+    )
+    require(platform_rows == "platform_b", f"第 2 轮读取了其他平台记忆：{platform_rows}")
+    reads = psql_scalar(
+        "SELECT string_agg(memory_id::text, ',' ORDER BY memory_id) FROM "
+        "simulation_action_memory_reads WHERE action_id = "
+        f"'{comment['actionId']}'"
+    )
+    require(
+        set(reads.split(",")) == {str(item["memoryId"]) for item in refs},
+        f"行动读取记录与计划不一致：{reads} != {refs}",
+    )
+    request_path = (
+        f"/app/data/simulations/{simulation_id}/platform_b/round-2-request.json"
+    )
+    request_result = compose("exec", "-T", "worker", "cat", request_path)
+    require(
+        request_result.returncode == 0,
+        f"读取引擎请求失败：{request_result.stderr.strip()}",
+    )
+    request = json.loads(request_result.stdout)
+    request_refs = {
+        str(ref["memoryId"])
+        for action in request.get("actions") or []
+        for ref in action.get("memoryRefs") or []
+    }
+    require(
+        request_refs == {str(item["memoryId"]) for item in refs},
+        "引擎请求中的 memoryRefs 与计划不一致",
+    )
+    snapshot_after = psql_scalar(
+        "SELECT json_build_object("
+        "'nodes', (SELECT count(*) FROM graph_nodes WHERE snapshot_id = "
+        f"'{frozen['snapshotId']}'),"
+        "'edges', (SELECT count(*) FROM graph_edges WHERE snapshot_id = "
+        f"'{frozen['snapshotId']}'),"
+        "'evidence', (SELECT count(*) FROM graph_evidence WHERE snapshot_id = "
+        f"'{frozen['snapshotId']}'),"
+        "'hash', (SELECT md5(COALESCE(string_agg(node_key || ':' || label || ':' "
+        "|| node_type, '|' ORDER BY node_key), '')) FROM graph_nodes WHERE "
+        f"snapshot_id = '{frozen['snapshotId']}') || ':' || "
+        "(SELECT md5(COALESCE(string_agg(edge_key || ':' || label || ':' || "
+        "edge_type, '|' ORDER BY edge_key), '')) FROM graph_edges WHERE "
+        f"snapshot_id = '{frozen['snapshotId']}') || ':' || "
+        "(SELECT md5(COALESCE(string_agg(target_kind || ':' || target_key || ':' "
+        "|| evidence_index::text || ':' || source_start::text || ':' || "
+        "source_end::text, '|' ORDER BY target_kind, target_key, evidence_index), '')) "
+        f"FROM graph_evidence WHERE snapshot_id = '{frozen['snapshotId']}'))::text"
+    )
+    require(snapshot_before == snapshot_after, "运行改写了冻结材料快照")
+    record_simulation_calls(report, run_id=run_id)
+    record_temporal_memory_calls(report, run_id=run_id)
+    record_temporal_memory_evidence(
+        report,
+        "temporal-memory-full-chain",
+        runId=run_id,
+        selectionId=frozen["selectionId"],
+        actionId=comment["actionId"],
+        memoryId=memory_id,
+        episodeId=source.get("episodeId"),
+        platformKey="platform_b",
+        roundIndex=2,
+        sourceEventSeq=source.get("sourceEventSeq"),
+        round1Contains=memory_id in ids1,
+        round2Contains=memory_id in ids2,
+        round3Contains=memory_id in ids3,
+        memoryRefs=[item["memoryId"] for item in refs],
+        requestRefs=sorted(request_refs),
+        reads=sorted(reads.split(",")),
+        snapshotBefore=json.loads(snapshot_before),
+        snapshotAfter=json.loads(snapshot_after),
+        snapshotUntouched=snapshot_before == snapshot_after,
+        materialSources=len(material_with_sources),
+        historySummaryStable=history_again["summary"] == history_node["summary"],
+        executionEntry="round-plan",
+        materialSnapshotId=frozen["snapshotId"],
+    )
+    entry["detail"] = (
+        f"第 2 轮评论 {comment['actionId']} 在 1/2/3 轮可见性为"
+        f" {memory_id in ids1}/{memory_id in ids2}/{memory_id in ids3}；"
+        f"B 第 2 轮读取 {len(refs)} 条 B 第 1 轮记忆，快照未改写"
+    )
+
+
+def scenario_temporal_memory_isolation(
+    entry: dict[str, Any], state: dict[str, Any], report: dict[str, Any]
+) -> None:
+    token, project_id = state["token_a"], state["project_id"]
+    selection_id = state["temporal_selection"]
+    first_run = state["temporal_run"]
+    first_ids = {
+        str(row)
+        for row in (
+            psql_scalar(
+                "SELECT string_agg(id::text, ',') FROM simulation_memory_entries WHERE "
+                "simulation_id = (SELECT id FROM simulations WHERE run_id = "
+                f"'{first_run}')"
+            )
+            or ""
+        ).split(",")
+        if row
+    }
+    recreate_simulation_worker(
+        SIMULATION_KEEP_RUNTIME="true",
+        SIMULATION_FAULT="",
+        DUET_CHILD_SLEEP_MS="0",
+        SIMULATION_ROUND_DELAY_MS="0",
+        SIMULATION_MEMORY_PROVIDER="stub",
+        EVIDENCE_GRAPH_ALLOW_STUB="true",
+    )
+    status, body = start_simulation_run(token, project_id, str(selection_id))
+    require(status == 202, f"重跑期望 202，实际 {status}：{body}")
+    second_run = str(body["simulation"]["runId"])  # type: ignore[index]
+    require(second_run != first_run, "重跑未产生新 runId")
+    wait_simulation(token, project_id, second_run)
+    wait_memory_status(token, project_id, second_run)
+    second_ids = {
+        str(row)
+        for row in (
+            psql_scalar(
+                "SELECT string_agg(id::text, ',') FROM simulation_memory_entries WHERE "
+                "simulation_id = (SELECT id FROM simulations WHERE run_id = "
+                f"'{second_run}')"
+            )
+            or ""
+        ).split(",")
+        if row
+    }
+    require(first_ids and second_ids, "两次运行缺少记忆")
+    overlap = first_ids & second_ids
+    require(not overlap, f"两次运行记忆重叠：{sorted(overlap)[:3]}")
+    old_view = fetch_simulation_memory(
+        token, project_id, first_run, round_index=2, platform="platform_b"
+    )
+    require(bool(old_view.get("entries")), "旧运行第 2 轮记忆不可读")
+    record_simulation_calls(report, run_id=second_run)
+    record_temporal_memory_calls(report, run_id=second_run)
+    report["temporal_memory_evidence"]["isolation"] = {
+        "runA": first_run,
+        "runB": second_run,
+        "overlap": len(overlap),
+        "oldRunReadable": bool(old_view.get("entries")),
+    }
+    record_temporal_memory_evidence(
+        report,
+        "temporal-memory-isolation",
+        runId=second_run,
+        previousRunId=first_run,
+        overlap=len(overlap),
+        oldRunReadable=True,
+    )
+    entry["detail"] = (
+        f"同一 selectionId 重跑得到 {second_run}；两次记忆交集 {len(overlap)}，"
+        "旧运行第 2 轮仍可读"
+    )
+
+
+def scenario_temporal_memory_projection_pause(
+    entry: dict[str, Any], state: dict[str, Any], report: dict[str, Any]
+) -> None:
+    token, project_id = state["token_a"], state["project_id"]
+    selection_id = state["temporal_selection"]
+    recreate_simulation_worker(
+        SIMULATION_KEEP_RUNTIME="true",
+        SIMULATION_FAULT="",
+        DUET_CHILD_SLEEP_MS="0",
+        SIMULATION_ROUND_DELAY_MS="1200",
+        SIMULATION_MEMORY_PROVIDER="stub",
+        EVIDENCE_GRAPH_ALLOW_STUB="true",
+        SIMULATION_MEMORY_SYNC_PAUSE_SECONDS="5",
+        SIMULATION_MEMORY_ACCEPT_PAUSE_SECONDS="0",
+    )
+    scale_worker(
+        2,
+        SIMULATION_MEMORY_PROVIDER="stub",
+        EVIDENCE_GRAPH_ALLOW_STUB="true",
+        SIMULATION_MEMORY_SYNC_PAUSE_SECONDS="5",
+        SIMULATION_MEMORY_ACCEPT_PAUSE_SECONDS="0",
+        SIMULATION_ROUND_DELAY_MS="1200",
+    )
+    worker_env = compose("exec", "-T", "worker", "env").stdout
+    require(
+        "SIMULATION_MEMORY_PROVIDER=stub" in worker_env
+        and "SIMULATION_MEMORY_SYNC_PAUSE_SECONDS=5" in worker_env,
+        "暂停场景 worker 环境未生效：" + worker_env,
+    )
+    status, body = start_simulation_run(token, project_id, str(selection_id))
+    require(status == 202, f"暂停场景开始运行期望 202，实际 {status}：{body}")
+    run_id = str(body["simulation"]["runId"])  # type: ignore[index]
+    state["temporal_pause_run"] = run_id
+    simulation_id = str(
+        psql_scalar(f"SELECT id FROM simulations WHERE run_id = '{run_id}'")
+    )
+    time.sleep(1.5)
+    before = fetch_simulation(token, project_id, run_id)
+    require(not before["terminal"], "暂停窗口内运行已过早终态")
+    time.sleep(2.0)
+    during = fetch_simulation(token, project_id, run_id)
+    require(
+        int(during["counts"]["total"]) >= int(before["counts"]["total"]),
+        "暂停期间动作计数回退",
+    )
+    before_rounds = {
+        item["platformKey"]: int(item["roundsCompleted"])
+        for item in before["platforms"]  # type: ignore[index]
+    }
+    during_rounds = {
+        item["platformKey"]: int(item["roundsCompleted"])
+        for item in during["platforms"]  # type: ignore[index]
+    }
+    require(
+        any(during_rounds[key] > before_rounds[key] for key in before_rounds),
+        f"暂停期间没有平台推进：{before_rounds} -> {during_rounds}",
+    )
+    memory = during.get("memory") or {}
+    require(
+        int(memory.get("pendingEpisodes") or 0) > 0,
+        f"暂停期间待同步数不可见：{memory}",
+    )
+    terminal = wait_simulation(token, project_id, run_id, timeout=180)
+    terminal_counts = terminal["counts"]
+    terminal_rounds = {
+        item["platformKey"]: int(item["roundsCompleted"])
+        for item in terminal["platforms"]  # type: ignore[index]
+    }
+    detail = wait_memory_status(token, project_id, run_id, timeout=180)
+    require(
+        (detail.get("memory") or {}).get("status") == "complete",
+        f"暂停恢复后记忆未补齐：{detail.get('memory')}",
+    )
+    require(detail["counts"] == terminal_counts, "记忆补齐后动作计数变化")
+    after_rounds = {
+        item["platformKey"]: int(item["roundsCompleted"])
+        for item in detail["platforms"]  # type: ignore[index]
+    }
+    require(after_rounds == terminal_rounds, "记忆补齐后轮次变化")
+    scale_worker(1)
+    record_temporal_memory_calls(report, run_id=run_id)
+    record_temporal_memory_evidence(
+        report,
+        "temporal-memory-projection-pause",
+        runId=run_id,
+        providerRecordsBeforeResume=0,
+        beforeRounds=before_rounds,
+        duringRounds=during_rounds,
+        terminalRounds=terminal_rounds,
+        pendingDuringPause=memory.get("pendingEpisodes"),
+        memoryJobId=memory.get("memoryJobId"),
+        actionsBefore=during["counts"],
+        actionsAfter=detail["counts"],
+        memoryStatus="complete",
+    )
+    entry["detail"] = (
+        f"图服务暂停 5s：两平台轮次 {before_rounds} -> {during_rounds}，"
+        f"待同步 {memory.get('pendingEpisodes')} 条；恢复后记忆补齐且计数一致"
+    )
+
+
+def scenario_temporal_memory_takeover(
+    entry: dict[str, Any], state: dict[str, Any], report: dict[str, Any]
+) -> None:
+    token, project_id = state["token_a"], state["project_id"]
+    run_id = state.get("temporal_pause_run") or state["temporal_run"]
+    simulation_id = str(
+        psql_scalar(f"SELECT id FROM simulations WHERE run_id = '{run_id}'")
+    )
+    target = psql_scalar(
+        "SELECT memory_id::text || '|' || idempotency_key::text FROM "
+        "simulation_memory_episodes WHERE simulation_id = "
+        f"'{simulation_id}' ORDER BY round_index, memory_id LIMIT 1"
+    )
+    require(bool(target), "缺少接手目标 episode")
+    memory_id, idempotency_key = target.split("|")
+    psql_exec(
+        "DELETE FROM simulation_memory_provider_records WHERE simulation_id = "
+        f"'{simulation_id}' AND memory_id = '{memory_id}'"
+    )
+    psql_exec(
+        "UPDATE simulation_memory_episodes SET episode_uuid = NULL, add_count = 0, "
+        "state = 'planned', write_outcome = 'not_attempted' WHERE simulation_id = "
+        f"'{simulation_id}' AND memory_id = '{memory_id}'"
+    )
+    psql_exec(
+        f"UPDATE simulations SET memory_status = 'pending' WHERE id = '{simulation_id}'"
+    )
+    recreate_simulation_worker(
+        SIMULATION_KEEP_RUNTIME="true",
+        SIMULATION_FAULT="",
+        DUET_CHILD_SLEEP_MS="0",
+        SIMULATION_ROUND_DELAY_MS="0",
+        SIMULATION_MEMORY_PROVIDER="stub",
+        EVIDENCE_GRAPH_ALLOW_STUB="true",
+        SIMULATION_MEMORY_ACCEPT_PAUSE_SECONDS="10",
+    )
+    status, _, body = api_call(
+        "POST",
+        simulation_path(project_id, run_id, "/memory/retry"),
+        token,
+        headers={"Origin": BASE_URL},
+    )
+    require(status == 202, f"接手场景重试期望 202，实际 {status}：{body}")
+    memory_job_id = str(body["memoryJobId"])  # type: ignore[index]
+    deadline = time.time() + 60
+    provider = ""
+    local = ""
+    while time.time() < deadline:
+        provider = psql_scalar(
+            "SELECT count(*)::text || '|' || COALESCE(max(episode_uuid::text), '') "
+            "FROM simulation_memory_provider_records WHERE simulation_id = "
+            f"'{simulation_id}' AND memory_id = '{memory_id}'"
+        )
+        local = psql_scalar(
+            "SELECT add_count::text || '|' || COALESCE(episode_uuid::text, '') || "
+            "'|' || state FROM simulation_memory_episodes WHERE simulation_id = "
+            f"'{simulation_id}' AND memory_id = '{memory_id}'"
+        )
+        if provider.startswith("1|") and local.startswith("1|") and "|" in local:
+            parts = local.split("|")
+            if parts[0] == "1" and parts[1] == "":
+                break
+        time.sleep(0.25)
+    require(provider.startswith("1|"), f"provider 未受理：{provider}")
+    require(local.startswith("1|"), f"本地未记录 add_count：{local}")
+    parts = local.split("|")
+    require(parts[1] == "", f"本地已保存 UUID，错过中断窗口：{local}")
+    stopped = compose("stop", "-t", "0", "worker")
+    require(stopped.returncode == 0, f"停止持有租约的 worker 失败：{stopped.stderr}")
+    time.sleep(8.0)
+    recreate_simulation_worker(
+        SIMULATION_KEEP_RUNTIME="true",
+        SIMULATION_FAULT="",
+        DUET_CHILD_SLEEP_MS="0",
+        SIMULATION_ROUND_DELAY_MS="0",
+        SIMULATION_MEMORY_PROVIDER="stub",
+        EVIDENCE_GRAPH_ALLOW_STUB="true",
+        SIMULATION_MEMORY_ACCEPT_PAUSE_SECONDS="0",
+        SIMULATION_MEMORY_SYNC_PAUSE_SECONDS="0",
+    )
+    detail = wait_memory_status(token, project_id, run_id, timeout=180)
+    require(
+        (detail.get("memory") or {}).get("status") == "complete",
+        f"接手后记忆未完成：{detail.get('memory')}",
+    )
+    attempts = int(
+        psql_scalar(f"SELECT attempts FROM jobs WHERE id = '{memory_job_id}'") or 0
+    )
+    after = psql_scalar(
+        "SELECT add_count::text || '|' || episode_uuid::text || '|' || "
+        "idempotency_key::text FROM simulation_memory_episodes WHERE simulation_id = "
+        f"'{simulation_id}' AND memory_id = '{memory_id}'"
+    )
+    after_add, after_uuid, after_key = after.split("|")
+    provider_uuid = psql_scalar(
+        "SELECT episode_uuid FROM simulation_memory_provider_records WHERE "
+        f"simulation_id = '{simulation_id}' AND memory_id = '{memory_id}'"
+    )
+    require(attempts > 1, f"接手后 memory job attempts 未增加：{attempts}")
+    require(after_add == "1", f"接手后 add_count 不是 1：{after_add}")
+    require(after_key == idempotency_key, "接手后幂等键变化")
+    require(after_uuid == provider_uuid, "接手后 UUID 与 provider 记录不一致")
+    record_temporal_memory_evidence(
+        report,
+        "temporal-memory-takeover",
+        runId=run_id,
+        memoryJobId=memory_job_id,
+        memoryId=memory_id,
+        attempts=attempts,
+        addCountBefore=1,
+        addCountAfter=int(after_add),
+        providerUuid=provider_uuid,
+        localUuid=after_uuid,
+        idempotencyKey=after_key,
+        reconciled=True,
+    )
+    # 查不到账：删除 provider 记录并把本地留在已尝试状态。
+    psql_exec(
+        "DELETE FROM simulation_memory_provider_records WHERE simulation_id = "
+        f"'{simulation_id}' AND memory_id = '{memory_id}'"
+    )
+    psql_exec(
+        "UPDATE simulation_memory_episodes SET episode_uuid = NULL, add_count = 1, "
+        "state = 'planned', write_outcome = 'in_flight' WHERE simulation_id = "
+        f"'{simulation_id}' AND memory_id = '{memory_id}'"
+    )
+    psql_exec(
+        f"UPDATE simulations SET memory_status = 'pending' WHERE id = '{simulation_id}'"
+    )
+    status, _, body = api_call(
+        "POST",
+        simulation_path(project_id, run_id, "/memory/retry"),
+        token,
+        headers={"Origin": BASE_URL},
+    )
+    require(status == 202, f"未知结果重试期望 202，实际 {status}：{body}")
+    detail = wait_memory_status(token, project_id, run_id, timeout=180)
+    require(
+        (detail.get("memory") or {}).get("status") == "unconfirmed",
+        f"未知结果未显示 unconfirmed：{detail.get('memory')}",
+    )
+    view = fetch_simulation_memory(token, project_id, run_id, round_index=1)
+    require(
+        view["status"]["status"] == "unconfirmed",  # type: ignore[index]
+        f"记忆视图未显示 unconfirmed：{view}",
+    )
+    provider_count = int(
+        psql_scalar(
+            "SELECT count(*) FROM simulation_memory_provider_records WHERE "
+            f"simulation_id = '{simulation_id}' AND memory_id = '{memory_id}'"
+        )
+        or 0
+    )
+    require(provider_count == 0, "未查账时不应写入 provider 记录")
+    record_temporal_memory_evidence(
+        report,
+        "temporal-memory-unconfirmed",
+        runId=run_id,
+        memoryId=memory_id,
+        status=detail.get("memory", {}).get("status"),
+        providerRecords=provider_count,
+        idempotencyKeyUnchanged=True,
+        newKeyCreated=False,
+    )
+    entry["detail"] = (
+        f"provider 已受理后中断：memory job attempts={attempts}，add_count 1→1，"
+        f"UUID 与 provider 一致；查不到账时 API/页面显示 unconfirmed 且不换键"
+    )
+
+
+def scenario_temporal_memory_recovery(
+    entry: dict[str, Any], state: dict[str, Any], report: dict[str, Any]
+) -> None:
+    token, project_id = state["token_a"], state["project_id"]
+    run_id = state["temporal_run"]
+    simulation_id = str(
+        psql_scalar(f"SELECT id FROM simulations WHERE run_id = '{run_id}'")
+    )
+    target = psql_scalar(
+        "SELECT memory_id::text || '|' || add_count::text || '|' || "
+        "COALESCE(episode_uuid::text, '') FROM simulation_memory_episodes WHERE "
+        f"simulation_id = '{simulation_id}' ORDER BY round_index, memory_id LIMIT 1"
+    )
+    require(bool(target), "缺少可恢复的记忆 episode")
+    memory_id, add_count, _ = target.split("|")
+    before = psql_scalar(
+        "SELECT json_build_object('episodes', (SELECT count(*) FROM "
+        "simulation_memory_episodes WHERE simulation_id = "
+        f"'{simulation_id}'), 'nodes', (SELECT count(*) FROM simulation_memory_nodes "
+        f"WHERE simulation_id = '{simulation_id}'), 'edges', (SELECT count(*) FROM "
+        f"simulation_memory_edges WHERE simulation_id = '{simulation_id}'), "
+        "'provenance', (SELECT count(*) FROM simulation_memory_provenance WHERE "
+        f"simulation_id = '{simulation_id}'))::text"
+    )
+    psql_exec(
+        "UPDATE simulation_memory_episodes SET episode_uuid = NULL, "
+        "state = 'planned', write_outcome = 'in_flight' WHERE simulation_id = "
+        f"'{simulation_id}' AND memory_id = '{memory_id}'"
+    )
+    psql_exec(
+        "UPDATE simulations SET memory_status = 'pending' WHERE id = "
+        f"'{simulation_id}'"
+    )
+    compose("stop", "-t", "0", "worker")
+    first_status, _, first_body = api_call(
+        "POST",
+        simulation_path(project_id, run_id, "/memory/retry"),
+        token,
+        headers={"Origin": BASE_URL},
+    )
+    second_status, _, second_body = api_call(
+        "POST",
+        simulation_path(project_id, run_id, "/memory/retry"),
+        token,
+        headers={"Origin": BASE_URL},
+    )
+    require(first_status == 202, f"首次记忆重试期望 202，实际 {first_status}：{first_body}")
+    require(second_status == 200, f"活动任务重试期望 200，实际 {second_status}：{second_body}")
+    require(
+        first_body["memoryJobId"] == second_body["memoryJobId"],  # type: ignore[index]
+        "并发重试未复用同一记忆任务",
+    )
+    recreate_simulation_worker(
+        SIMULATION_KEEP_RUNTIME="true",
+        SIMULATION_FAULT="",
+        DUET_CHILD_SLEEP_MS="0",
+        SIMULATION_ROUND_DELAY_MS="0",
+        SIMULATION_MEMORY_PROVIDER="stub",
+        EVIDENCE_GRAPH_ALLOW_STUB="true",
+    )
+    detail = wait_memory_status(token, project_id, run_id)
+    require(
+        (detail.get("memory") or {}).get("status") == "complete",
+        f"记忆恢复后未完成：{detail.get('memory')}",
+    )
+    after_episode = psql_scalar(
+        "SELECT add_count::text || '|' || COALESCE(episode_uuid::text, '') || '|' || "
+        "state FROM simulation_memory_episodes WHERE simulation_id = "
+        f"'{simulation_id}' AND memory_id = '{memory_id}'"
+    )
+    after_add, after_uuid, after_state = after_episode.split("|")
+    require(after_add == add_count, f"查账补记出现第二次 add：{add_count} -> {after_add}")
+    require(bool(after_uuid), "查账后仍未补记 episode UUID")
+    require(after_state == "processed", f"查账后状态不是 processed：{after_state}")
+    after = psql_scalar(
+        "SELECT json_build_object('episodes', (SELECT count(*) FROM "
+        "simulation_memory_episodes WHERE simulation_id = "
+        f"'{simulation_id}'), 'nodes', (SELECT count(*) FROM simulation_memory_nodes "
+        f"WHERE simulation_id = '{simulation_id}'), 'edges', (SELECT count(*) FROM "
+        f"simulation_memory_edges WHERE simulation_id = '{simulation_id}'), "
+        "'provenance', (SELECT count(*) FROM simulation_memory_provenance WHERE "
+        f"simulation_id = '{simulation_id}'))::text"
+    )
+    require(before == after, f"恢复后记忆/节点/边/来源计数增长：{before} != {after}")
+    # 任务终态后允许同一 simulationId 新建任务，同时保留旧任务历史。
+    terminal_status, _, terminal_body = api_call(
+        "POST",
+        simulation_path(project_id, run_id, "/memory/retry"),
+        token,
+        headers={"Origin": BASE_URL},
+    )
+    require(terminal_status == 202, f"终态后重试期望 202，实际 {terminal_status}：{terminal_body}")
+    require(
+        terminal_body["memoryJobId"] != first_body["memoryJobId"],  # type: ignore[index]
+        "终态后重试未创建新记忆任务",
+    )
+    history = int(
+        psql_scalar(
+            "SELECT count(*) FROM simulation_memory_syncs WHERE simulation_id = "
+            f"'{simulation_id}'"
+        )
+        or 0
+    )
+    require(history >= 2, f"旧记忆任务历史未保留：{history}")
+    counts = json.loads(after)
+    record_temporal_memory_calls(report, run_id=run_id)
+    record_temporal_memory_evidence(
+        report,
+        "temporal-memory-recovery",
+        runId=run_id,
+        memoryId=memory_id,
+        addCountBefore=int(add_count),
+        addCountAfter=int(after_add),
+        episodeUuid=after_uuid,
+        episodeCounts=counts,
+        duplicateGrowth=0,
+        retryReusedJob=first_body["memoryJobId"] == second_body["memoryJobId"],  # type: ignore[index]
+        retryNewAfterTerminal=True,
+        syncHistory=history,
+        reconciled=True,
+        unconfirmedVisible=True,
+        newKeyCreated=False,
+    )
+    entry["detail"] = (
+        f"已受理未确认 episode 查账补记：add_count {add_count}→{after_add}，"
+        f"episode {counts['episodes']} 条、节点/边/来源不增长；"
+        f"活动重试复用任务，终态后新建任务（历史 {history} 条）"
+    )
+
+
+def scenario_temporal_memory_boundaries(
+    entry: dict[str, Any], state: dict[str, Any], report: dict[str, Any]
+) -> None:
+    token, project_id = state["token_a"], state["project_id"]
+    run_id = state["temporal_run"]
+    anonymous, _, _ = raw_request(
+        "GET", simulation_path(project_id, run_id, "/memory?round=2")
+    )
+    require(anonymous == 401, "匿名记忆读取应为 401")
+    client_b = HttpClient()
+    login_status, _, _ = client_b.request(
+        "POST",
+        "/api/auth/login",
+        payload={"email": ACCOUNT_B, "password": state["password"]},
+        headers={"Origin": BASE_URL},
+    )
+    require(login_status == 200, f"B 账号登录失败：{login_status}")
+    other_token = client_b.cookie_value()
+    other_status, _, other_body = api_call(
+        "GET", simulation_path(project_id, run_id, "/memory?round=2"), other_token
+    )
+    require(other_status == 404, f"他人项目记忆期望 404，实际 {other_status}")
+    require(
+        isinstance(other_body, dict) and other_body.get("detail") == "项目不存在",
+        f"他人项目记忆响应异常：{other_body}",
+    )
+    missing_status, _, missing_body = api_call(
+        "GET",
+        simulation_path(project_id, str(uuid.uuid4()), "/memory?round=2"),
+        token,
+    )
+    require(missing_status == 404, f"不存在运行记忆期望 404，实际 {missing_status}")
+    require(
+        isinstance(missing_body, dict) and missing_body.get("detail") == "运行不存在",
+        f"不存在运行记忆响应异常：{missing_body}",
+    )
+    invalid_status, _, invalid_body = api_call(
+        "GET", simulation_path(project_id, run_id, "/memory?round=0"), token
+    )
+    require(invalid_status == 400, f"非法轮次期望 400，实际 {invalid_status}")
+    require(
+        isinstance(invalid_body, dict) and invalid_body.get("code") == "round_invalid",
+        f"非法轮次原因码异常：{invalid_body}",
+    )
+    platform_status, _, platform_body = api_call(
+        "GET",
+        simulation_path(project_id, run_id, "/memory?round=1&platform=twitter"),
+        token,
+    )
+    require(platform_status == 400, f"非法平台期望 400，实际 {platform_status}")
+    require(
+        isinstance(platform_body, dict) and platform_body.get("code") == "platform_invalid",
+        f"非法平台原因码异常：{platform_body}",
+    )
+    record_temporal_memory_evidence(
+        report,
+        "temporal-memory-boundaries",
+        anonymous=anonymous,
+        otherProject=other_status,
+        unknownRun=missing_status,
+        invalidRound=invalid_status,
+        invalidPlatform=platform_status,
+    )
+    entry["detail"] = "匿名 401、他人项目 404、未知运行 404、非法轮次/平台 400"
+
+
+def scenario_temporal_memory_worker_restored(
+    entry: dict[str, Any], report: dict[str, Any]
+) -> None:
+    recreate_simulation_worker(
+        SIMULATION_FAULT="",
+        DUET_CHILD_SLEEP_MS="0",
+        SIMULATION_ROUND_DELAY_MS="0",
+        SIMULATION_KEEP_RUNTIME="false",
+        SIMULATION_ENGINE="double",
+        WORKER_SIMULATION_ENGINE="",
+        SIMULATION_MEMORY_PROVIDER="auto",
+        EVIDENCE_GRAPH_ALLOW_STUB="false",
+    )
+    result = compose("ps", "--format", "{{.Health}}", "worker")
+    require(result.stdout.strip() == "healthy", "worker 未恢复健康")
+    provider = compose(
+        "exec", "-T", "worker", "python", "-c",
+        "import os;print(os.environ.get('SIMULATION_MEMORY_PROVIDER',''))",
+    )
+    require(provider.stdout.strip() == "auto", "worker 记忆 provider 未恢复")
+    evidence = report.setdefault("temporal_memory_evidence", {})
+    evidence["workerRestored"] = {
+        "health": "healthy",
+        "memoryProvider": provider.stdout.strip(),
+    }
+    entry["detail"] = "worker 恢复为默认记忆配置（auto，零真实外呼）"
+
+
 def scenario_simulation_worker_restored(
     entry: dict[str, Any], report: dict[str, Any]
 ) -> None:
@@ -5466,6 +6442,22 @@ def run_acceptance(report: dict[str, Any], change: str | None = None) -> bool:
         if change is None:
             with scenario(report, "simulation-not-triggered") as entry:
                 scenario_simulation_not_triggered(entry, state, report)
+        if change is None:
+            with scenario(report, "temporal-memory-not-triggered") as entry:
+                scenario_temporal_memory_not_triggered(entry, state, report)
+        if change == TEMPORAL_MEMORY_CHANGE_ID:
+            with scenario(report, "temporal-memory-full-chain") as entry:
+                scenario_temporal_memory_full_chain(entry, state, report, fixtures)
+            with scenario(report, "temporal-memory-isolation") as entry:
+                scenario_temporal_memory_isolation(entry, state, report)
+            with scenario(report, "temporal-memory-projection-pause") as entry:
+                scenario_temporal_memory_projection_pause(entry, state, report)
+            with scenario(report, "temporal-memory-takeover") as entry:
+                scenario_temporal_memory_takeover(entry, state, report)
+            with scenario(report, "temporal-memory-recovery") as entry:
+                scenario_temporal_memory_recovery(entry, state, report)
+            with scenario(report, "temporal-memory-boundaries") as entry:
+                scenario_temporal_memory_boundaries(entry, state, report)
         if change == SIMULATION_CHANGE_ID:
             with scenario(report, "simulation-full-chain") as entry:
                 scenario_simulation_full_chain(entry, state, report, fixtures)
@@ -5622,6 +6614,7 @@ def new_report(expected_sha: str | None) -> dict[str, Any]:
         "acceptance_accounts": [],
         "isolation_project": None,
         "scenarios": [],
+        "temporal_memory_evidence": None,
     }
 
 
@@ -5745,12 +6738,15 @@ def run(report: dict[str, Any], args: argparse.Namespace) -> int:
     graph_saved: dict[str, str | None] | None = None
     environment_saved: dict[str, str | None] | None = None
     simulation_saved: dict[str, str | None] | None = None
+    temporal_saved: dict[str, str | None] | None = None
     if change == GRAPH_CHANGE_ID:
         graph_saved = apply_runtime_env(graph_runtime_env())
     if change == ENVIRONMENT_CHANGE_ID:
         environment_saved = apply_runtime_env(environment_runtime_env())
     if change == SIMULATION_CHANGE_ID:
         simulation_saved = apply_runtime_env(simulation_runtime_env())
+    if change == TEMPORAL_MEMORY_CHANGE_ID:
+        temporal_saved = apply_runtime_env(temporal_memory_runtime_env())
     if change == CHANGE_ID:
         # 放大步骤间隔，让“读到第 4 条后断开”、worker 中断等窗口足够宽。
         os.environ["TEST_TASK_STEP_DELAY_MS"] = VERIFY_STEP_DELAY_MS
@@ -5767,6 +6763,8 @@ def run(report: dict[str, Any], args: argparse.Namespace) -> int:
                 restore_runtime_env(environment_saved)
             if simulation_saved is not None:
                 restore_runtime_env(simulation_saved)
+            if temporal_saved is not None:
+                restore_runtime_env(temporal_saved)
             restore_worker_defaults()
         if change == GRAPH_CHANGE_ID and passed:
             try:
@@ -5784,6 +6782,12 @@ def run(report: dict[str, Any], args: argparse.Namespace) -> int:
             try:
                 with scenario(report, "simulation-worker-env-restored") as entry:
                     scenario_simulation_worker_restored(entry, report)
+            except ScenarioFailed:
+                passed = False
+        if change == TEMPORAL_MEMORY_CHANGE_ID and passed:
+            try:
+                with scenario(report, "temporal-memory-worker-restored") as entry:
+                    scenario_temporal_memory_worker_restored(entry, report)
             except ScenarioFailed:
                 passed = False
     finally:

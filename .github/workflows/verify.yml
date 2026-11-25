@@ -187,6 +187,142 @@ jobs:
         if: always()
         run: make down || true
 
+  verify-change-10:
+    name: verify-change-10
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run Change 10 offline acceptance
+        env:
+          EXPECTED_SHA: ${{ inputs.expected_sha || github.sha }}
+        run: make verify CHANGE=2026-11-25-update-temporal-memory
+
+      - name: Assert Change 10 report
+        if: always()
+        env:
+          EXPECTED_SHA: ${{ inputs.expected_sha || github.sha }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import pathlib
+          import sys
+
+          report_path = pathlib.Path("runtime/verify/last-run.json")
+          if not report_path.is_file():
+              sys.exit("缺少 Change 10 验收报告: %s" % report_path)
+
+          report = json.loads(report_path.read_text(encoding="utf-8"))
+          expected = os.environ["EXPECTED_SHA"]
+          evidence = report.get("temporal_memory_evidence") or {}
+          calls = evidence.get("calls") or {}
+          scenarios = {
+              item.get("scenario"): item for item in evidence.get("scenarios") or []
+          }
+
+          print(f"expected_sha={expected}")
+          print(f"tested_sha={report.get('tested_sha')}")
+          print(f"result={report.get('result')}")
+          print(f"dirty={report.get('dirty')}")
+          print(f"change={report.get('change')}")
+          print(f"mode={evidence.get('mode')}")
+          print(f"graphProvider={evidence.get('graphProvider')}")
+          print(f"calls_real={calls.get('real')}")
+          print(f"calls_double={calls.get('double')}")
+          print(f"isolation={evidence.get('isolation')}")
+
+          if report.get("tested_sha") != expected:
+              sys.exit("报告 SHA 与触发 SHA 不一致")
+          if report.get("result") != "passed":
+              sys.exit("Change 10 验收结果不是 passed")
+          if report.get("dirty") is not False:
+              sys.exit("Change 10 报告标记为脏工作树")
+          if report.get("change") != "2026-11-25-update-temporal-memory":
+              sys.exit("Change 10 报告 change 字段不一致")
+          if evidence.get("mode") != "offline-stub":
+              sys.exit("Change 10 报告不是 offline-stub")
+          if evidence.get("graphProvider") != "stub":
+              sys.exit("Change 10 图谱 provider 不是 stub")
+          if calls.get("real") != 0:
+              sys.exit("Change 10 出现真实外呼")
+          if int(calls.get("double") or 0) <= 0:
+              sys.exit("Change 10 未记录任何替身调用")
+          for required in (
+              "temporal-memory-full-chain",
+              "temporal-memory-isolation",
+              "temporal-memory-projection-pause",
+              "temporal-memory-takeover",
+              "temporal-memory-unconfirmed",
+              "temporal-memory-recovery",
+              "temporal-memory-boundaries",
+          ):
+              if required not in scenarios:
+                  sys.exit(f"缺少 Change 10 场景: {required}")
+          full = scenarios["temporal-memory-full-chain"]
+          if not full.get("snapshotUntouched"):
+              sys.exit("运行改写了冻结材料快照")
+          if full.get("round1Contains") is not False:
+              sys.exit("第 1 轮错误包含第 2 轮评论")
+          if not full.get("round2Contains") or not full.get("round3Contains"):
+              sys.exit("第 2/3 轮未包含第 2 轮评论")
+          if full.get("requestRefs") != full.get("reads"):
+              sys.exit("引擎请求与行动读取记录不一致")
+          if int(full.get("materialSources") or 0) <= 0:
+              sys.exit("材料层没有可见来源")
+          if not full.get("historySummaryStable"):
+              sys.exit("重读第 2 轮摘要发生漂移")
+          pause = scenarios["temporal-memory-projection-pause"]
+          if not pause.get("memoryJobId"):
+              sys.exit("图服务暂停期间缺少可恢复记忆任务")
+          if pause.get("beforeRounds") == pause.get("duringRounds"):
+              sys.exit("图服务暂停期间没有平台推进")
+          if int(pause.get("pendingDuringPause") or 0) <= 0:
+              sys.exit("图服务暂停期间待同步数不可见")
+          takeover = scenarios["temporal-memory-takeover"]
+          if int(takeover.get("attempts") or 0) < 2:
+              sys.exit("接手后 memory job attempts 未增加")
+          if int(takeover.get("addCountAfter") or 0) != 1:
+              sys.exit("接手后 add_count 不是 1")
+          if takeover.get("localUuid") != takeover.get("providerUuid"):
+              sys.exit("接手后 UUID 与 provider 不一致")
+          unconfirmed = scenarios["temporal-memory-unconfirmed"]
+          if unconfirmed.get("status") != "unconfirmed":
+              sys.exit("未知结果未显示 unconfirmed")
+          if int(unconfirmed.get("providerRecords") or 0) != 0:
+              sys.exit("未知结果不应写入 provider 记录")
+          isolation = evidence.get("isolation") or {}
+          if int(isolation.get("overlap") or 0) != 0:
+              sys.exit("重跑运行记忆发生重叠")
+          recovery = scenarios["temporal-memory-recovery"]
+          if int(recovery.get("addCountBefore") or 0) != int(recovery.get("addCountAfter") or 0):
+              sys.exit("恢复过程出现第二次 add")
+          if not recovery.get("reconciled"):
+              sys.exit("恢复未完成查账补记")
+          if not recovery.get("retryReusedJob") or not recovery.get("retryNewAfterTerminal"):
+              sys.exit("记忆任务复用/终态新任务语义不一致")
+          if int(recovery.get("duplicateGrowth") or 0) != 0:
+              sys.exit("重复提交导致记忆增长")
+          if not (evidence.get("workerRestored") or {}).get("memoryProvider") == "auto":
+              sys.exit("Change 10 结束后记忆 provider 未恢复")
+          PY
+
+      - name: Upload Change 10 report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: verify-report-change-10-${{ github.sha }}
+          path: runtime/verify/
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Stop environment
+        if: always()
+        run: make down || true
+
   verify-change-08:
     name: verify-change-08
     runs-on: ubuntu-latest

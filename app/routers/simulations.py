@@ -13,10 +13,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ..db import get_db
 from ..deps import require_user
 from ..engines.duet_config import DuetConfig
-from ..errors import InvalidCursor
+from ..errors import InvalidCursor, SimulationConflict
 from ..schemas import SimulationStartRequest
 from ..services import projects
 from ..services import simulation as simulation_service
+from ..services import simulation_memory as memory_service
 from ..services.sessions import SessionUser
 
 router = APIRouter(
@@ -123,6 +124,67 @@ async def simulation_actions(
         limit=limit,
     )
     return {"runId": str(simulation.run_id), **page}
+
+
+@router.get("/{run_id}/memory")
+async def simulation_memory_view(
+    project_id: str,
+    run_id: str,
+    round: str | None = None,
+    platform: str | None = None,
+    user: SessionUser = Depends(require_user),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, object]:
+    project = await projects.resolve_owned_project(
+        db, actor_id=user.id, project_id=project_id
+    )
+    simulation = await simulation_service.get_simulation(
+        db, project_id=project.id, run_id=run_id
+    )
+    parsed_round: int | None = None
+    if round is not None and round.strip() != "":
+        try:
+            parsed_round = int(round)
+        except (TypeError, ValueError):
+            raise SimulationConflict("round_invalid", "轮次非法") from None
+        if parsed_round < 1:
+            raise SimulationConflict("round_invalid", "轮次非法")
+    view = await memory_service.memory_view(
+        db,
+        simulation=simulation,
+        round_index=parsed_round,
+        platform_key=platform,
+        config=memory_service.MemoryConfig.from_env(),
+    )
+    return view
+
+
+@router.post("/{run_id}/memory/retry")
+async def retry_simulation_memory(
+    project_id: str,
+    run_id: str,
+    user: SessionUser = Depends(require_user),
+    db: AsyncSession = Depends(get_db),
+) -> JSONResponse:
+    project = await projects.resolve_owned_project(
+        db, actor_id=user.id, project_id=project_id
+    )
+    simulation = await simulation_service.get_simulation(
+        db, project_id=project.id, run_id=run_id
+    )
+    job_id, created = await memory_service.retry_memory_sync(
+        db,
+        simulation=simulation,
+        config=memory_service.MemoryConfig.from_env(),
+    )
+    return JSONResponse(
+        {
+            "runId": str(simulation.run_id),
+            "memoryJobId": str(job_id),
+            "created": created,
+        },
+        status_code=202 if created else 200,
+    )
 
 
 @router.post("/{run_id}/stop")

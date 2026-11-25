@@ -25,6 +25,7 @@ from .engines.business_runtime import (
     create_graph_client,
     create_planner,
 )
+from .services import simulation_memory
 from .services import simulation_worker
 from .services import worker as worker_service
 
@@ -148,6 +149,15 @@ async def run(stop_event: asyncio.Event) -> None:
                     lease_seconds=lease_seconds,
                     heartbeat_seconds=heartbeat_seconds,
                     config=duet_config,
+                )
+            elif claim.kind == "simulation.memory":
+                outcome = await simulation_memory.execute_memory_sync(
+                    claim,
+                    session_factory=SessionLocal,
+                    stop_event=stop_event,
+                    lease_seconds=lease_seconds,
+                    heartbeat_seconds=heartbeat_seconds,
+                    config=simulation_memory.MemoryConfig.from_env(),
                 )
             elif claim.kind == "document.ingest":
                 outcome = await worker_service.execute_ingest(

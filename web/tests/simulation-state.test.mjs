@@ -154,3 +154,53 @@ test('计数不一致可被发现，停止请求可标记', () => {
   assert.equal(state.countMismatch(broken), true)
   assert.equal(state.markStopRequested(current).stopRequested, true)
 })
+
+test('记忆视图按 runId、轮次与平台守卫迟到响应', () => {
+  let current = state.createMemoryState()
+  const view = {
+    runId: 'run-1',
+    round: 2,
+    platform: 'platform_b',
+    cutoff: { round: 2, availableMaxRound: 2, platforms: {} },
+    status: { status: 'complete', pendingEpisodes: 0, unconfirmedEpisodes: 0, lastSyncedRound: 2, reason: null, memoryJobId: null },
+    material: { snapshotId: 'snap-1', nodes: [], edges: [] },
+    runtime: { nodes: [], edges: [] },
+    entries: [],
+  }
+  current = state.applyMemoryView(current, view, {
+    runId: 'run-1',
+    round: 2,
+    platform: 'platform_b',
+  })
+  assert.equal(current.memory?.round, 2)
+  const stale = state.applyMemoryView(current, { ...view, round: 3 }, {
+    runId: 'run-1',
+    round: 2,
+    platform: 'platform_b',
+  })
+  assert.equal(stale.memory?.round, 2)
+  const otherRun = state.applyMemoryView(current, { ...view, runId: 'run-2' }, {
+    runId: 'run-1',
+    round: 2,
+    platform: 'platform_b',
+  })
+  assert.equal(otherRun, current)
+  const switched = state.switchMemoryView(current, {
+    runId: 'run-1',
+    round: 3,
+    platform: 'platform_b',
+  })
+  assert.equal(switched.memory, null)
+  assert.equal(switched.loading, true)
+})
+
+test('记忆状态与来源按语言展示', () => {
+  assert.equal(state.memoryStatusLabel('unconfirmed', 'zh'), '写入待确认')
+  assert.equal(state.memoryStatusLabel('unavailable', 'en'), 'Memory unavailable')
+  assert.equal(state.memoryOriginLabel('material', 'zh'), '材料事实')
+  assert.equal(state.memoryOriginLabel('role', 'en'), 'Role speech')
+  assert.equal(
+    state.memorySourceLabel({ facet: 'simulation_result', roundIndex: 2, sourceEventSeq: 6 }, 'zh'),
+    '推演结果 · R2 · #6',
+  )
+})

@@ -68,6 +68,7 @@ export interface SimulationDetail {
   simulatedAt: string
   platforms: SimulationPlatformView[]
   counts: { total: number; byAction: Record<string, number> }
+  memory?: SimulationMemorySummary
   canStop: boolean
   stopRequested: boolean
   cleanup: { code: string } | null
@@ -429,4 +430,194 @@ export function stopLabel(state: SimulationState, lang: string): string {
     return lang === 'en' ? 'Stop requested' : '停止已请求'
   }
   return lang === 'en' ? 'Stop run' : '停止运行'
+}
+
+/** 第三阶段时序记忆：按轮视图、来源与迟到响应守卫。 */
+export type MemoryStatus =
+  | 'unconfigured'
+  | 'pending'
+  | 'syncing'
+  | 'complete'
+  | 'partial'
+  | 'unconfirmed'
+  | 'unavailable'
+
+export interface MemorySource {
+  memoryId: string
+  actionId: string
+  facet: 'role_speech' | 'simulation_result'
+  episodeId: string | null
+  platformKey: string
+  roundIndex: number
+  simulatedAt: string | null
+  sourceEventSeq: number
+  actorRoleId?: string
+  actorRoleName?: string
+  nativeAction?: string
+  targetActionId?: string | null
+  content?: string
+}
+
+export interface MemoryNode {
+  key: string
+  nodeType: string
+  label: string
+  origin: 'material' | 'role' | 'simulation'
+  summary?: string | null
+  sources?: MemorySource[]
+  sourceCount?: number
+  firstRound?: number | null
+  lastRound?: number | null
+}
+
+export interface MemoryEdge {
+  key: string
+  edgeType: string
+  label: string
+  origin: 'material' | 'role' | 'simulation'
+  summary?: string | null
+  sourceKey?: string
+  targetKey?: string
+  sources?: MemorySource[]
+  sourceCount?: number
+  firstRound?: number | null
+  lastRound?: number | null
+}
+
+export interface MemoryEntry {
+  memoryId: string
+  actionId: string
+  platformKey: string
+  roundIndex: number
+  actionSeq: number
+  simulatedAt: string | null
+  sourceEventSeq: number
+  actorRoleId: string
+  actorRoleName: string
+  nativeAction: string
+  speechText: string
+  targetActionId: string | null
+  targetEngineRecordId: string | null
+  episodeId: string | null
+  graphState: string
+  writeOutcome: string
+  facets: string[]
+}
+
+export interface SimulationMemorySummary {
+  status: MemoryStatus
+  pendingEpisodes: number
+  unconfirmedEpisodes: number
+  lastSyncedRound: number
+  reason: string | null
+  memoryJobId: string | null
+}
+
+export interface SimulationMemoryView {
+  runId: string
+  round: number
+  platform: string | null
+  cutoff: {
+    round: number
+    availableMaxRound: number
+    platforms: Record<string, { completed: number }>
+  }
+  status: SimulationMemorySummary
+  material: {
+    snapshotId: string
+    nodes: MemoryNode[]
+    edges: MemoryEdge[]
+  }
+  runtime: {
+    nodes: MemoryNode[]
+    edges: MemoryEdge[]
+  }
+  entries: MemoryEntry[]
+}
+
+export interface MemoryViewState {
+  memory: SimulationMemoryView | null
+  loading: boolean
+  error: string
+}
+
+export function createMemoryState(): MemoryViewState {
+  return { memory: null, loading: false, error: '' }
+}
+
+export function memoryMatches(
+  _state: MemoryViewState,
+  view: SimulationMemoryView,
+  expected: { runId: string | null; round: number | null; platform: string | null },
+): boolean {
+  if (expected.runId && view.runId !== expected.runId) {
+    return false
+  }
+  if (expected.round !== null && view.round !== expected.round) {
+    return false
+  }
+  if (expected.platform !== null && view.platform !== expected.platform) {
+    return false
+  }
+  return true
+}
+
+export function applyMemoryView(
+  state: MemoryViewState,
+  view: SimulationMemoryView,
+  expected: { runId: string | null; round: number | null; platform: string | null },
+): MemoryViewState {
+  if (!memoryMatches(state, view, expected)) {
+    return state
+  }
+  return { memory: view, loading: false, error: '' }
+}
+
+export function switchMemoryView(
+  state: MemoryViewState,
+  expected: { runId: string | null; round: number | null; platform: string | null },
+): MemoryViewState {
+  if (
+    state.memory &&
+    !memoryMatches(state, state.memory, expected)
+  ) {
+    return { memory: null, loading: true, error: '' }
+  }
+  return { ...state, loading: true, error: '' }
+}
+
+export function memoryStatusLabel(status: string, lang: string): string {
+  const labels: Record<string, { zh: string; en: string }> = {
+    unconfigured: { zh: '未配置图谱', en: 'Graph not configured' },
+    pending: { zh: '记忆待同步', en: 'Memory pending' },
+    syncing: { zh: '记忆同步中', en: 'Syncing memory' },
+    complete: { zh: '记忆已完成', en: 'Memory complete' },
+    partial: { zh: '部分记忆可用', en: 'Partial memory' },
+    unconfirmed: { zh: '写入待确认', en: 'Write unconfirmed' },
+    unavailable: { zh: '记忆同步暂不可用', en: 'Memory unavailable' },
+  }
+  const entry = labels[status]
+  return entry ? (lang === 'en' ? entry.en : entry.zh) : status
+}
+
+export function memoryOriginLabel(origin: string, lang: string): string {
+  const labels: Record<string, { zh: string; en: string }> = {
+    material: { zh: '材料事实', en: 'Material fact' },
+    role: { zh: '角色发言', en: 'Role speech' },
+    simulation: { zh: '推演结果', en: 'Simulation result' },
+  }
+  const entry = labels[origin]
+  return entry ? (lang === 'en' ? entry.en : entry.zh) : origin
+}
+
+export function memorySourceLabel(source: MemorySource, lang: string): string {
+  const facet =
+    source.facet === 'role_speech'
+      ? lang === 'en'
+        ? 'role speech'
+        : '角色发言'
+      : lang === 'en'
+        ? 'simulation result'
+        : '推演结果'
+  return `${facet} · R${source.roundIndex} · #${source.sourceEventSeq}`
 }

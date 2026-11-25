@@ -84,6 +84,8 @@ class AnonymousSimulationTests(unittest.TestCase):
             ("GET", BASE, None),
             ("GET", f"{BASE}/{RUN}", None),
             ("GET", f"{BASE}/{RUN}/actions", None),
+            ("GET", f"{BASE}/{RUN}/memory?round=1", None),
+            ("POST", f"{BASE}/{RUN}/memory/retry", None),
             ("POST", f"{BASE}/{RUN}/stop", None),
         ]
         with patch("app.deps.load_session", new=AsyncMock()) as loader:
@@ -109,9 +111,11 @@ class SimulationBoundaryTests(unittest.TestCase):
                 client.get(BASE),
                 client.get(f"{BASE}/{RUN}"),
                 client.get(f"{BASE}/{RUN}/actions"),
+                client.get(f"{BASE}/{RUN}/memory?round=1"),
+                client.post(f"{BASE}/{RUN}/memory/retry"),
                 client.post(f"{BASE}/{RUN}/stop"),
             ]
-        self.assertEqual([item.status_code for item in responses], [404] * 5)
+        self.assertEqual([item.status_code for item in responses], [404] * 7)
         self.assertEqual(
             {item.text for item in responses}, {'{"detail":"项目不存在"}'
             }
@@ -205,3 +209,56 @@ class SimulationBoundaryTests(unittest.TestCase):
         ):
             response = client.get(f"{BASE}/{RUN}/actions?after=-1")
         self.assertEqual(response.status_code, 400)
+
+
+class MemoryRouteTests(unittest.TestCase):
+    def test_memory_view_and_invalid_round(self) -> None:
+        client = build_client()
+        simulation = type("S", (), {"run_id": RUN, "id": uuid.uuid4()})()
+        view = {
+            "runId": str(RUN),
+            "round": 1,
+            "platform": "platform_b",
+            "status": {"status": "complete"},
+            "material": {"snapshotId": "s", "nodes": [], "edges": []},
+            "runtime": {"nodes": [], "edges": []},
+            "entries": [],
+        }
+        with patch(
+            "app.routers.simulations.projects.resolve_owned_project",
+            new=AsyncMock(return_value=PROJECT),
+        ), patch(
+            "app.routers.simulations.simulation_service.get_simulation",
+            new=AsyncMock(return_value=simulation),
+        ), patch(
+            "app.routers.simulations.memory_service.memory_view",
+            new=AsyncMock(return_value=view),
+        ):
+            ok = client.get(f"{BASE}/{RUN}/memory?round=1&platform=platform_b")
+            invalid = client.get(f"{BASE}/{RUN}/memory?round=0")
+        self.assertEqual(ok.status_code, 200)
+        self.assertEqual(ok.json()["round"], 1)
+        self.assertEqual(invalid.status_code, 400)
+        self.assertEqual(invalid.json()["code"], "round_invalid")
+
+    def test_memory_retry_returns_202_then_200(self) -> None:
+        client = build_client()
+        simulation = type("S", (), {"run_id": RUN, "id": uuid.uuid4()})()
+        job_id = uuid.uuid4()
+        with patch(
+            "app.routers.simulations.projects.resolve_owned_project",
+            new=AsyncMock(return_value=PROJECT),
+        ), patch(
+            "app.routers.simulations.simulation_service.get_simulation",
+            new=AsyncMock(return_value=simulation),
+        ), patch(
+            "app.routers.simulations.memory_service.retry_memory_sync",
+            new=AsyncMock(side_effect=[(job_id, True), (job_id, False)]),
+        ):
+            created = client.post(f"{BASE}/{RUN}/memory/retry")
+            reused = client.post(f"{BASE}/{RUN}/memory/retry")
+        self.assertEqual(created.status_code, 202)
+        self.assertTrue(created.json()["created"])
+        self.assertEqual(reused.status_code, 200)
+        self.assertFalse(reused.json()["created"])
+        self.assertEqual(created.json()["memoryJobId"], str(job_id))

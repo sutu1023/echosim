@@ -53,7 +53,8 @@ SIM_COLUMNS = (
     "s.duration_hours, s.engine_mode, s.selection_payload, s.phase, "
     "s.failure_code, s.failed_platforms, s.simulated_start, "
     "s.provider_calls_real, s.provider_calls_double, s.reserved_actions, "
-    "s.cleanup_code, s.created_at, s.updated_at, s.finished_at, "
+    "s.cleanup_code, s.memory_status, s.memory_last_synced_round, "
+    "s.memory_failure_code, s.created_at, s.updated_at, s.finished_at, "
     "j.id AS job_id, j.status AS job_status, j.cancel_requested_at"
 )
 SIM_SOURCE = "FROM simulations s JOIN jobs j ON j.run_id = s.run_id"
@@ -82,6 +83,9 @@ class SimulationRow:
     provider_calls_double: int
     reserved_actions: int
     cleanup_code: str | None
+    memory_status: str
+    memory_last_synced_round: int
+    memory_failure_code: str | None
     created_at: datetime
     updated_at: datetime
     finished_at: datetime | None
@@ -122,6 +126,11 @@ def _as_row(row: object) -> SimulationRow:
         provider_calls_double=int(row.provider_calls_double),  # type: ignore[attr-defined]
         reserved_actions=int(getattr(row, "reserved_actions", 0) or 0),
         cleanup_code=getattr(row, "cleanup_code", None),
+        memory_status=str(getattr(row, "memory_status", "unconfigured") or "unconfigured"),
+        memory_last_synced_round=int(
+            getattr(row, "memory_last_synced_round", 0) or 0
+        ),
+        memory_failure_code=getattr(row, "memory_failure_code", None),
         created_at=row.created_at,  # type: ignore[attr-defined]
         updated_at=row.updated_at,  # type: ignore[attr-defined]
         finished_at=row.finished_at,  # type: ignore[attr-defined]
@@ -552,6 +561,16 @@ async def action_page(
     return {"items": items, "nextAfter": next_after}
 
 
+async def _memory_summary(
+    db: AsyncSession, simulation: SimulationRow
+) -> dict[str, Any]:
+    from . import simulation_memory as memory_store
+
+    return await memory_store.memory_summary(
+        db, simulation_id=simulation.id, status=simulation.memory_status
+    )
+
+
 async def serialize_simulation(
     db: AsyncSession, simulation: SimulationRow, *, action_limit: int = 50
 ) -> dict[str, Any]:
@@ -606,6 +625,7 @@ async def serialize_simulation(
         "actions": await action_page(
             db, simulation_id=simulation.id, limit=action_limit
         ),
+        "memory": await _memory_summary(db, simulation),
         "canStop": not simulation.terminal and simulation.stop_requested_at is None,
         "stopRequested": simulation.stop_requested_at is not None,
         "cleanup": (
@@ -820,6 +840,8 @@ async def write_round(
     simulated_at: datetime,
     records: Sequence[Mapping[str, Any]],
     outcome: str = "committed",
+    event_seq: int | None = None,
+    memory_refs_by_action: Mapping[str, Sequence[Mapping[str, Any]]] | None = None,
 ) -> int | None:
     """写入一轮：轮次记录、动作、平台计数；调用方负责租约、事件与提交。
 
@@ -855,6 +877,13 @@ async def write_round(
         {"simulation_id": simulation.id},
     )
     seq = int(current.scalar_one())
+    source_event_seq = int(event_seq or 0)
+    if source_event_seq <= 0:
+        source_event_seq = await run_events.max_seq(
+            db, run_id=simulation.run_id
+        ) + 1
+    from . import simulation_memory as memory_store
+
     for record in records:
         seq += 1
         target_action_id = None
@@ -874,7 +903,8 @@ async def write_round(
             )
             target_row = target.first()
             target_action_id = target_row.id if target_row is not None else None
-        await db.execute(
+        action_id = uuid.uuid4()
+        action_inserted = await db.execute(
             text(
                 "INSERT INTO simulation_actions (id, simulation_id, "
                 "preparation_id, platform_key, native_platform, round_index, "
@@ -888,10 +918,10 @@ async def write_round(
                 ":engine_sequence, :target_engine_record_id, :target_action_id, "
                 ":target_platform_key, :target_native_action, :target_resolved, "
                 ":simulated_at) ON CONFLICT (simulation_id, platform_key, "
-                "engine_record_id) DO NOTHING"
+                "engine_record_id) DO NOTHING RETURNING id"
             ),
             {
-                "id": uuid.uuid4(),
+                "id": action_id,
                 "simulation_id": simulation.id,
                 "preparation_id": simulation.preparation_id,
                 "platform_key": platform_key,
@@ -914,6 +944,48 @@ async def write_round(
                 "simulated_at": simulated_at,
             },
         )
+        if action_inserted.first() is None:
+            existing = await db.execute(
+                text(
+                    "SELECT id FROM simulation_actions WHERE simulation_id = :simulation_id "
+                    "AND platform_key = :platform_key AND engine_record_id = :engine_record_id"
+                ),
+                {
+                    "simulation_id": simulation.id,
+                    "platform_key": platform_key,
+                    "engine_record_id": record["engineRecordId"],
+                },
+            )
+            action_row = existing.first()
+            if action_row is not None:
+                action_id = action_row.id
+        await memory_store.remember_action(
+            db,
+            simulation_id=simulation.id,
+            action_id=action_id,
+            platform_key=platform_key,
+            round_index=round_index,
+            action_seq=seq,
+            actor_role_id=record["actorRoleId"],
+            actor_display_name=record["actorName"],
+            speech_text=record.get("content") or "",
+            native_action=record["nativeAction"],
+            target_action_id=target_action_id,
+            target_engine_record_id=target_engine_record_id,
+            simulated_at=simulated_at,
+            source_event_seq=source_event_seq,
+            content=record.get("content") or "",
+        )
+        refs = (memory_refs_by_action or {}).get(record.get("actionKey"), ())
+        if refs:
+            await memory_store.record_reads(
+                db,
+                simulation_id=simulation.id,
+                action_id=action_id,
+                platform_key=platform_key,
+                round_index=round_index,
+                refs=refs,
+            )
     counts = await aggregate_counts(db, simulation_id=simulation.id)
     per_platform = counts[2].get(platform_key, {})
     await db.execute(

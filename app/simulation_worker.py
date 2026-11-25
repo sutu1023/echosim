@@ -19,6 +19,7 @@ from pathlib import Path
 from .config import settings
 from .db import SessionLocal, dispose_engine
 from .engines.duet_config import DuetConfig
+from .services import simulation_memory
 from .services import simulation_worker
 from .services import worker as worker_service
 
@@ -66,7 +67,7 @@ async def run(stop_event: asyncio.Event) -> None:
                     db,
                     worker_id=worker_id,
                     lease_seconds=lease_seconds,
-                    run_kinds=("simulation.run",),
+                    run_kinds=("simulation.run", "simulation.memory"),
                     simulation_engine=config.worker_engine,
                 )
         except Exception as exc:  # noqa: BLE001 - 数据库故障时保持进程存活
@@ -79,14 +80,24 @@ async def run(stop_event: asyncio.Event) -> None:
                 pass
             continue
         try:
-            outcome = await simulation_worker.execute_simulation(
-                claim,
-                session_factory=SessionLocal,
-                stop_event=stop_event,
-                lease_seconds=lease_seconds,
-                heartbeat_seconds=heartbeat_seconds,
-                config=config,
-            )
+            if claim.kind == "simulation.memory":
+                outcome = await simulation_memory.execute_memory_sync(
+                    claim,
+                    session_factory=SessionLocal,
+                    stop_event=stop_event,
+                    lease_seconds=lease_seconds,
+                    heartbeat_seconds=heartbeat_seconds,
+                    config=simulation_memory.MemoryConfig.from_env(),
+                )
+            else:
+                outcome = await simulation_worker.execute_simulation(
+                    claim,
+                    session_factory=SessionLocal,
+                    stop_event=stop_event,
+                    lease_seconds=lease_seconds,
+                    heartbeat_seconds=heartbeat_seconds,
+                    config=config,
+                )
             logger.info(
                 "模拟任务结局 job_id=%s run_id=%s attempt=%s outcome=%s",
                 claim.job_id,
