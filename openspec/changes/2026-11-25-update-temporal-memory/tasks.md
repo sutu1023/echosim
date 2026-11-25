@@ -74,7 +74,7 @@
 - [x] 8.5 覆盖边界：匿名 401、他人项目 404、不存在运行 404、非法轮次 400、未到达 409、停库 503 保留 Cookie、跨运行/跨平台来源未解析；验证方式是边界场景与报告字段；验证：边界场景通过；证据：temporal-memory-boundaries passed
 - [x] 8.6 断言零真实外呼与证据模式：`calls.real=0`、`calls.double>0`、`graphProvider=stub`、`callScope` 来自 provider 边界逐运行持久化值；验证方式是伪造计划数不改变计数；验证：零外呼断言；证据：temporal_memory_evidence calls.real=0、double=24
 - [x] 8.7 连续性：同一隔离 Compose 项目连续两次执行 Change 10 验收均通过，无需人工清理残留运行/记忆任务；验证方式是连续两次 `make verify CHANGE=...`；验证：连续两次通过；证据：连续两次 ALLOW_DIRTY=1 make verify CHANGE=2026-11-25-update-temporal-memory 均 passed
-- [ ] 8.8 新增 CI Change 10 独立离线 job：调用同一 `make verify CHANGE=...`，上传独立 artifact，断言 `tested_sha`、`dirty=false`、`result=passed`、`calls.real=0`、三场景齐全、`snapshotUntouched=true`、`overlap=0`、`growth=0`、`reconciled=true`、未知状态可见且未换键；验证方式是 CI 运行与失败演练；验证：CI job 通过
+- [x] 8.8 新增 CI Change 10 独立离线 job：调用同一 `make verify CHANGE=...`，上传独立 artifact，断言 `tested_sha`、`dirty=false`、`result=passed`、`calls.real=0`、三场景齐全、`snapshotUntouched=true`、`overlap=0`、`growth=0`、`reconciled=true`、未知状态可见且未换键；验证方式是 CI 运行与失败演练；验证：CI job 通过；证据：GitHub Actions run 45620470151 的 verify-change-10 job 通过
 
 ## 9. 配置、文档与人工边界
 
