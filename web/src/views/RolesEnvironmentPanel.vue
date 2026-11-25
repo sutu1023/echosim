@@ -82,6 +82,7 @@ const nextLink = computed(() =>
     route.query,
     state.value.buildId,
     state.value.preparationId,
+    state.value.frozenSelection?.selectionId ?? null,
   ),
 )
 const previousLink = computed(() =>

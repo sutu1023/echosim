@@ -128,3 +128,20 @@ class GraphLimitExceeded(Exception):
         self.limit = limit
         self.actual = actual
         self.target = target
+
+
+class SelectionNotFound(Exception):
+    """冻结选择不存在、属于他人或 ID 非法，对外统一 404 `推演选择不存在`。"""
+
+
+class SimulationNotFound(Exception):
+    """运行不存在、属于他人或 ID 非法，对外统一 404 `运行不存在`。"""
+
+
+class SimulationConflict(Exception):
+    """运行状态、选择、引擎模式或游标冲突；`code` 为稳定原因码。"""
+
+    def __init__(self, code: str, message: str = "运行请求与当前状态冲突") -> None:
+        super().__init__(code)
+        self.code = code
+        self.message = message

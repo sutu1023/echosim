@@ -24,7 +24,7 @@ COPY app/ ./app/
 COPY --from=web-build /build/web/dist ./web/dist
 
 RUN useradd --create-home --uid 10001 echosim \
-    && mkdir -p /app/data/documents \
+    && mkdir -p /app/data/documents /app/data/simulations \
     && chown -R echosim:echosim /app
 USER echosim
 
@@ -37,6 +37,31 @@ RUN python -m pip install --no-cache-dir -r requirements-worker-graph.txt \
     && python -m pip check \
     && python -c "import importlib.metadata as m; import zep_cloud; from zep_cloud import Zep; assert m.version('zep-cloud') == '4.1.0'"
 USER echosim
+
+# ---- 阶段 3b：真实本地 OASIS 的模拟 worker（可选，不默认构建） ----
+# 以隔离引擎镜像为基础，复用其中已解析/安装/导入的 camel-oasis 组合；
+# 只额外安装 app 运行时依赖并复制应用代码。构建前需要先有 echosim-engine:dev。
+FROM echosim-engine:dev AS worker-simulation
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PYTHONPATH=/app
+
+WORKDIR /app
+
+COPY app/requirements.txt ./requirements.txt
+RUN python -m pip install --no-cache-dir -r requirements.txt \
+    && python -m pip check
+
+COPY app/ ./app/
+
+RUN useradd --create-home --uid 10001 echosim \
+    && mkdir -p /app/data/simulations \
+    && chown -R echosim:echosim /app
+USER echosim
+
+CMD ["python", "-m", "app.simulation_worker"]
 
 # ---- 阶段 4：HTTP app，不安装业务建图 worker 依赖 ----
 FROM runtime AS app

@@ -114,7 +114,7 @@ echosim_session=<随机令牌>; HttpOnly; Path=/; SameSite=lax
 
 控制台把健康、会话与项目列表分开显示：系统状态只由 `/health` 决定；会话查询 503 时账户显示“暂时无法确认”并保留 Cookie；只有会话明确 401 才按访客处理。健康检查 200 但项目列表读取失败时，系统状态仍为“可用”，按钮进入 `/projects` 由项目页提示读取失败并重试。
 
-工作台外壳与阶段数据分开：真实项目加载成功后，项目名、阶段高亮、工具条与三种布局可正常操作。第一阶段在材料面板旁提供证据图谱面板：选择已就绪材料、输入情景问题、开始建图，页面按“等待索引 → 增量绘图 → 完成”展示服务端已发布快照；点击节点或材料关系可回到 PDF 物理页或文本原文高亮。第二阶段从该 build 的最终快照生成角色与环境：显示“图谱未完成 / 尚未准备 / 准备中（含分批预览）/ 已就绪待确认 / 已确认 / 失败或取消”六态，支持普通开始、失败后的显式重试、轮数保存、带版本确认冻结与进入第三阶段入口。
+工作台外壳与阶段数据分开：真实项目加载成功后，项目名、阶段高亮、工具条与三种布局可正常操作。第一阶段在材料面板旁提供证据图谱面板：选择已就绪材料、输入情景问题、开始建图，页面按“等待索引 → 增量绘图 → 完成”展示服务端已发布快照；点击节点或材料关系可回到 PDF 物理页或文本原文高亮。第二阶段从该 build 的最终快照生成角色与环境：显示“图谱未完成 / 尚未准备 / 准备中（含分批预览）/ 已就绪待确认 / 已确认 / 失败或取消”六态，支持普通开始、失败后的显式重试、轮数保存、带版本确认冻结与进入第三阶段入口。第三阶段从已确认的冻结选择开始双平台运行：显示模拟时钟、信息广场（twitter）与话题社区（reddit）两条行动流、按平台统计、运行日志与引擎模式徽标，支持停止、同选择重跑与旧运行回看；点击评论或转发可跳回同一运行、同一平台的原帖。
 
 所有项目接口先鉴权再判断归属，工作台页面也遵循“身份 → 项目归属 → 阶段合法性”的顺序：
 
@@ -183,6 +183,21 @@ echosim_session=<随机令牌>; HttpOnly; Path=/; SameSite=lax
 | `GRAPH_POLL_INTERVAL_SECONDS` | `3` | 索引期间检索间隔（秒） |
 | `SIMULATION_TIMEOUT_SECONDS` | `60` | 单个 OASIS 平台的动作与读回总时限（秒） |
 | `SMOKE_LIVE_TOTAL_TIMEOUT_SECONDS` | `300` | 整次 `make smoke-live` 总时限（秒） |
+| `SIMULATION_ENGINE` | `double` | 双平台运行引擎：`double` 离线替身 / `oasis` 真实本地 OASIS |
+| `SIMULATION_ALLOW_OASIS` | `false` | 是否允许显式请求真实本地 OASIS 运行 |
+| `SIMULATION_ACTIONS_PER_ROUND` | `6` | 每平台每轮动作上限 |
+| `SIMULATION_ROUND_TIMEOUT_SECONDS` | `120` | 单平台单轮执行预算（秒） |
+| `SIMULATION_ROUND_DELAY_MS` | `0` | 验收用轮次间隔，放大停止窗口 |
+| `SIMULATION_MAX_ACTIONS` | `5000` | 单运行动作上限 |
+| `SIMULATION_FAULT` | 空 | 仅验收：注入 `platform_a:1:after_first_action` 等故障 |
+| `DUET_CHILD_SLEEP_MS` | `0` | 仅验收：放大“引擎已写入、未记账”窗口 |
+| `SIMULATION_KEEP_RUNTIME` | `false` | 仅验收：保留运行目录用于三方计数核对 |
+| `SIMULATION_ENGINE_COMMAND` | 空 | 真实本地 OASIS 的隔离执行命令（`{runtime}`/`{request_name}`） |
+| `SIMULATION_ENGINE_RUNTIME` | `/out` | 引擎命令看到的运行目录 |
+| `SIMULATION_PLATFORM_DELAY_MS` | 空 | 仅验收：`platform_a:700` 让某平台变慢 |
+| `SIMULATION_CLEANUP_FAIL` | 空 | 仅验收：注入清理失败 |
+| `WORKER_RUN_KINDS` | 空（全部） | worker 可领取的 run 类型 |
+| `WORKER_SIMULATION_ENGINE` | 空（取 `SIMULATION_ENGINE`） | worker 领取的模拟引擎模式 |
 
 覆盖端口示例：
 
@@ -352,7 +367,7 @@ EVIDENCE_GRAPH_ALLOW_STUB=true
 5. 页面显示服务端 `autoRounds` 与生效 `rounds`。默认 72 小时、每轮 60 分钟，自动轮数为 72；可切换手动保存 40、3 等值，刷新后从服务端读回。零时长、非法轮数与不能整除分别返回 `duration_invalid`、`rounds_invalid`、`rounds_not_integral`。
 6. 确认按钮携带用户最后读到的 `settingsRevision`。服务端在同一事务内核对版本、重新校验就绪条件、轮数与来源后创建冻结选择；版本不一致返回 `409 settings_conflict` 且不创建冻结记录。相同版本重复确认返回同一 `selectionId`；确认后修改轮数返回 `409 preparation_frozen`。
 7. 轮数表单有未保存修改或非法输入时，确认按钮禁用并说明原因；保存成功后从服务端读回轮数与 `settingsRevision` 才允许确认。
-8. 确认后“进入双平台运行”可用，并把 `build`、`preparation` 与当前 `layout`、`lang` 一起带过去。第三阶段只读取服务端持久化的 `frozenSelection`，显示“准备已确认，运行功能待接入”；直接刷新该地址也读取同一冻结选择。实际双平台运行属于后续变更。
+8. 确认后“进入双平台运行”可用，并把 `build`、`preparation`、`selection` 与当前 `layout`、`lang` 一起带过去。第三阶段只读取服务端持久化的 `frozenSelection`；直接刷新该地址仍读取同一冻结选择与同一 `run`。
 
 ### 角色来源与材料事实
 
@@ -411,6 +426,58 @@ ENVIRONMENT_ALLOW_STUB=true
 ```
 
 画像调用次数在 provider 边界逐准备持久化；默认与 Change 08 验收的 `calls.real` 必须为 0，替身次数大于 0。作者的私有材料只在私有项目中人工走查，私有 PDF、含正文截图、真实画像与模型原始输出留在仓库外，不进入自动化夹具、日志、报告或 CI 产物。
+
+## 双平台运行
+
+运行只从已确认的冻结选择开始：`POST /api/projects/{id}/simulations` 只接受 `selectionId`，问题、角色、轮数（默认 3 或用户保存值）、平台映射、初始话题与首发顺序全部来自 `frozenSelection`，并在开始瞬间复制进运行记录。第三阶段没有冻结选择时只显示“尚未确认角色与环境”与前往第二阶段的入口。
+
+### 平台与动作
+
+| 平台别名 | 原生平台 | 允许的原生动作 | 界面词 |
+| --- | --- | --- | --- |
+| `platform_a` | `twitter` | `create_post` / `repost` / `like_post` | 发帖 / 转发 / 点赞 |
+| `platform_b` | `reddit` | `create_post` / `create_comment` / `like_post` / `dislike_post` | 发主题 / 评论 / 投票赞成 / 投票反对 |
+
+两个平台各自使用独立的运行目录、SQLite 数据库与子进程；动作由引擎真实写入后，worker 从引擎记录读回再落库。发帖与评论校验正文里的运行标记；点赞、反对与转发按原生目标记录标识读回。
+
+### 运行、停止与接手
+
+- 开始返回 `202`；同一 `selectionId` 已有活动运行时返回 `200` 与同一 `runId`，不新增第二组 run/job。终态后再次开始返回 `202` 与新 `runId`，旧运行仍可按 `run` 回看。
+- worker 按 `bind → environment → advance → publish` 四步执行；轮次以 `(simulation_id, platform_key, round_index)` 为游标，每轮与该轮动作、平台计数和事件同事务提交。
+- 模拟时钟从冻结选择中首个首发角色的最早活跃小时起算（整点），角色调度、动作时刻、事件与详情时钟共用同一时钟；运行的真实创建时间只用于审计。
+- 两个平台独立推进：一个平台变慢不会阻塞另一个平台提交下一轮；整次运行共享一个动作上限，调用引擎前先原子预留预算，超出即 `simulation_too_large` 且不调用引擎。
+- 运行记录可随时切换：切换立即解绑旧运行并订阅新运行，停止请求只发给当前运行；旧运行的迟到响应与事件按 `runId` 丢弃。
+- 停止是“请求”而不是终态：第一次停止只记录 `stopRequested`，worker 在下一个轮次边界把已写入引擎的在途动作读回记账后，再在单个事务内写 job `canceled`、运行 `canceled` 与终态事件；完成与取消并发时只有一个终态、一条终态事件。
+- 终态提交后才清理运行目录；清理失败只记录 `cleanup` 原因码，不改变终态、计数与已有动作。
+- worker 中断后由新 worker 接手：能归属的原生行先补记再继续，可证明未执行的动作允许重发，无法确认时以 `action_unconfirmed` 结束并保留证据。运行目录位于持久卷，容器重建不会丢失已写入的原生记录。
+- 单平台失败不阻断另一平台：运行以 `failed` 结束并列出 `failedPlatforms`，另一平台的行动流、计数与日志保持可读。
+
+### 接口
+
+| 方法 | 路径 | 说明 | 成功 | 失败 |
+| --- | --- | --- | --- | --- |
+| POST | `/api/projects/{id}/simulations` | 从 `selectionId` 开始 | `202` 新建 / `200` 复用 | 401 / 404 `项目不存在`/`推演选择不存在` / 409 `selection_missing`/`engine_not_enabled` / 422 `selection_invalid` / 503 |
+| GET | `/api/projects/{id}/simulations?selection=` | 运行列表与当前运行 | `200` | 401 / 404 / 503 |
+| GET | `/api/projects/{id}/simulations/{runId}` | 时钟、平台统计、计数与首屏动作 | `200` | 401 / 404 `运行不存在` / 503 |
+| GET | `/api/projects/{id}/simulations/{runId}/actions` | 按 `actionSeq` 分页读取动作与目标原帖 | `200` | 400 游标 / 404 / 401 / 503 |
+| POST | `/api/projects/{id}/simulations/{runId}/stop` | 停止运行；终态幂等 | `200` | 401 / 404 / 503 |
+
+运行事件复用任务 SSE：`GET /api/projects/{id}/jobs/{jobId}/events`，每平台每轮一条进度事件，终态事件计入连续 `seq`。
+
+### 引擎模式与证据
+
+每次运行记录 `engine=double|oasis`。默认 `make up`、默认 `make verify` 与 CI 使用确定性替身引擎（`double`），不发起真实模型调用，页面显示“离线替身运行”。真实本地 OASIS 由开发者显式执行：
+
+```bash
+make simulate-live   # 需要 ECHOSIM_LIVE_EMAIL / ECHOSIM_LIVE_PASSWORD /
+                     # ECHOSIM_SIMULATION_ENGINE_COMMAND
+```
+
+该命令复用同一条“普通启动 API → worker → 两个平台原生动作 → 同一 runId 的详情与计数”链路，把每轮交给隔离引擎镜像执行，产出 `runtime/simulation-live/report.json`（`mode=live`、`engine=oasis`、`localOasisActions>0`、`externalModelCalls=0`、`dirty`、`tested_sha`）。脚本会断言冻结 6 个角色、两平台各 3 轮且各有原生动作，并逐类比对引擎与服务端计数；缺一个引擎库或计数不一致时以非零退出。真实运行默认只执行原生手动动作，不调用外部模型。
+
+使用专用 worker 时：`make up SIMULATION=1` 会额外启动 `worker-simulation`（`python -m app.simulation_worker`，只领取 `simulation.run` 的 oasis 运行），再执行 `ECHOSIM_LIVE_MODE=worker make simulate-live`。前置条件：栈的建图/画像已配置（离线走查用 stub）、app 允许 `SIMULATION_ALLOW_OASIS=true`、shell 导出与栈一致的 `COMPOSE_PROJECT_NAME`；command 模式下宿主机 Python 需安装 `app/requirements-dev.txt`（worker 由脚本拉起），并传入 `PYTHON=.venv/bin/python`。`make simulation-worker` 构建该镜像，`make simulation-worker-check` 在镜像内跑“解析 → 安装 → 导入 → 最小运行”四阶段并写入 `runtime/simulation-worker/baseline.json`。
+
+可选打包方式：`make up SIMULATION=1`（等价于 `docker compose --profile simulation up -d`）。该镜像以 `echosim-engine:dev` 为基础，复用已在该镜像中验证过的 camel-oasis 组合；默认栈不构建、不启用它。
 
 ## 引擎联通验收
 

@@ -21,6 +21,15 @@ from .engines.business_config import (
     DEFAULT_EVIDENCE_GRAPH_PROCESSING_TIMEOUT_SECONDS,
     DEFAULT_EVIDENCE_GRAPH_QUESTION_MAX_CHARS,
 )
+from .engines.duet_config import (
+    DEFAULT_ACTIONS_PER_ROUND,
+    DEFAULT_MAX_ACTIONS,
+    DEFAULT_ROUND_DELAY_MS,
+    DEFAULT_ROUND_TIMEOUT_SECONDS,
+    DEFAULT_SIMULATION_ALLOW_OASIS,
+    DEFAULT_SIMULATION_DATA_DIR,
+    DEFAULT_SIMULATION_ENGINE,
+)
 from .engines.environment_config import (
     DEFAULT_ENVIRONMENT_ALLOW_STUB,
     DEFAULT_ENVIRONMENT_MODEL_PROVIDER,
@@ -135,6 +144,19 @@ class Settings(BaseSettings):
     graph_index_timeout_seconds: float = DEFAULT_GRAPH_INDEX_TIMEOUT_SECONDS
     graph_poll_interval_seconds: float = DEFAULT_GRAPH_POLL_INTERVAL_SECONDS
     simulation_timeout_seconds: float = DEFAULT_SIMULATION_TIMEOUT_SECONDS
+    simulation_engine: str = DEFAULT_SIMULATION_ENGINE
+    simulation_allow_oasis: bool = DEFAULT_SIMULATION_ALLOW_OASIS
+    simulation_data_dir: Path = Path(DEFAULT_SIMULATION_DATA_DIR)
+    simulation_actions_per_round: int = DEFAULT_ACTIONS_PER_ROUND
+    simulation_round_timeout_seconds: float = DEFAULT_ROUND_TIMEOUT_SECONDS
+    simulation_round_delay_ms: int = DEFAULT_ROUND_DELAY_MS
+    simulation_max_actions: int = DEFAULT_MAX_ACTIONS
+    simulation_fault: str = ""
+    simulation_engine_command: str = ""
+    simulation_engine_runtime: str = "/out"
+    simulation_keep_runtime: bool = False
+    worker_run_kinds: str = ""
+    worker_simulation_engine: str = ""
     smoke_live_total_timeout_seconds: float = DEFAULT_SMOKE_LIVE_TOTAL_TIMEOUT_SECONDS
 
     @field_validator(

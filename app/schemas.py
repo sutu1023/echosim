@@ -131,3 +131,10 @@ class EnvironmentConfirmRequest(BaseModel):
     """确认冻结必须携带用户最后读到的设置版本。"""
 
     settingsRevision: int = Field(ge=1)
+
+
+class SimulationStartRequest(BaseModel):
+    """从已确认的冻结选择开始运行；engineMode 缺省使用部署默认引擎。"""
+
+    selectionId: uuid.UUID
+    engineMode: Literal["double", "oasis"] | None = None

@@ -156,6 +156,23 @@ def environment_runtime_env() -> dict[str, str]:
     }
 
 
+def simulation_runtime_env() -> dict[str, str]:
+    """Change 09：建图、画像与两侧引擎都使用离线实现，真实外呼必须为 0。"""
+    return {
+        **environment_runtime_env(),
+        "SIMULATION_ENGINE": "double",
+        "SIMULATION_ALLOW_OASIS": "true",
+        "SIMULATION_ACTIONS_PER_ROUND": "6",
+        "SIMULATION_ROUND_TIMEOUT_SECONDS": "120",
+        "SIMULATION_ROUND_DELAY_MS": "0",
+        "SIMULATION_MAX_ACTIONS": "5000",
+        "SIMULATION_FAULT": "",
+        "SIMULATION_KEEP_RUNTIME": "false",
+        "DUET_CHILD_SLEEP_MS": "0",
+        "WORKER_SIMULATION_ENGINE": "double",
+    }
+
+
 def git_head() -> str:
     result = command(["git", "rev-parse", "HEAD"], timeout=30)
     require(result.returncode == 0, f"无法读取 Git HEAD：{result.stderr.strip()}")
@@ -808,12 +825,14 @@ DOCUMENT_CHANGE_ID = "2026-11-21-ingest-seed-documents"
 ENGINE_CHANGE_ID = "2026-11-21-connect-engine-providers"
 GRAPH_CHANGE_ID = "2026-11-22-build-evidence-graph"
 ENVIRONMENT_CHANGE_ID = "2026-11-24-prepare-agent-environment"
+SIMULATION_CHANGE_ID = "2026-11-24-run-dual-platform-simulation"
 KNOWN_CHANGES = {
     CHANGE_ID,
     DOCUMENT_CHANGE_ID,
     ENGINE_CHANGE_ID,
     GRAPH_CHANGE_ID,
     ENVIRONMENT_CHANGE_ID,
+    SIMULATION_CHANGE_ID,
 }
 VERIFY_STEP_DELAY_MS = "800"
 JOB_TIMEOUT_SECONDS = 90.0
@@ -4611,6 +4630,734 @@ def scenario_environment_change_material(
     )
 
 
+
+# ---------------------------------------------------------------- 双平台运行
+
+
+SIMULATION_QUESTION = "原创问题：雨天是否调整双平台的接驳班次？"
+SIMULATION_MATERIAL_TEXT = "\n".join(
+    [
+        "EchoSim 原创材料：校园接驳车在雨天把发车间隔调整为十分钟。",
+        "实体：张同学｜个人｜张同学每天乘坐接驳车。",
+        "实体：某校学生群体｜群体｜某校学生群体关注班次。",
+        "实体：某大学｜高校｜某大学位于东门附近。",
+        "实体：某报社｜媒体机构｜某报社报道接驳车调整。",
+        "实体：校友李某｜个人｜校友李某提出建议。",
+        "实体：后勤处｜机构组织｜后勤处负责班车调度。",
+        "关系：张同学｜关注｜调整接驳班次｜张同学关注调整接驳班次。",
+        "关系：某报社｜报道｜某大学｜某报社报道某大学接驳车调整。",
+        "关系：校友李某｜建议｜调整接驳班次｜校友李某建议调整接驳班次。",
+    ]
+)
+ENGINE_COUNTS_SCRIPT = (
+    Path(__file__).resolve().parent / "engine_counts.py"
+).read_text(encoding="utf-8")
+
+
+def simulation_path(project_id: str, run_id: str | None = None, suffix: str = "") -> str:
+    base = f"/api/projects/{project_id}/simulations"
+    if run_id is None:
+        return base
+    return f"{base}/{run_id}{suffix}"
+
+
+def start_simulation_run(
+    token: str,
+    project_id: str,
+    selection_id: str,
+    engine_mode: str | None = None,
+) -> tuple[int, dict[str, object] | None]:
+    payload: dict[str, object] = {"selectionId": selection_id}
+    if engine_mode:
+        payload["engineMode"] = engine_mode
+    status, _, body = api_call(
+        "POST",
+        simulation_path(project_id),
+        token,
+        payload=payload,
+        headers={"Origin": BASE_URL},
+    )
+    return status, body if isinstance(body, dict) else None
+
+
+def fetch_simulation(token: str, project_id: str, run_id: str) -> dict[str, object]:
+    status, _, body = api_call(
+        "GET", simulation_path(project_id, run_id), token
+    )
+    require(status == 200, f"运行详情期望 200，实际 {status}：{body}")
+    require(isinstance(body, dict) and isinstance(body.get("simulation"), dict), "运行详情格式异常")
+    return body["simulation"]  # type: ignore[index]
+
+
+def wait_simulation(
+    token: str, project_id: str, run_id: str, *, timeout: float = 240.0
+) -> dict[str, object]:
+    deadline = time.time() + timeout
+    last: dict[str, object] = {}
+    while time.time() < deadline:
+        last = fetch_simulation(token, project_id, run_id)
+        if last.get("terminal"):
+            return last
+        time.sleep(0.4)
+    raise ScenarioFailed(f"运行未在 {timeout} 秒内进入终态：{last.get('phase')}")
+
+
+def fetch_simulation_actions(
+    token: str, project_id: str, run_id: str
+) -> dict[str, object]:
+    status, _, body = api_call(
+        "GET", simulation_path(project_id, run_id, "/actions?after=0&limit=200"), token
+    )
+    require(status == 200, f"运行动作期望 200，实际 {status}：{body}")
+    require(isinstance(body, dict), "运行动作不是对象")
+    return body
+
+
+def engine_native_counts(simulation_id: str) -> dict[str, dict[str, int]]:
+    result = compose(
+        "exec",
+        "-T",
+        "worker",
+        "python",
+        "-",
+        simulation_id,
+        input_text=ENGINE_COUNTS_SCRIPT,
+    )
+    require(result.returncode == 0, f"读取引擎计数失败：{result.stderr.strip()}")
+    try:
+        payload = json.loads(result.stdout.strip().splitlines()[-1])
+    except (json.JSONDecodeError, IndexError):
+        raise ScenarioFailed(f"引擎计数输出无法解析：{result.stdout[-200:]}")
+    require(isinstance(payload, dict), "引擎计数不是对象")
+    return payload  # type: ignore[return-value]
+
+
+def require_worker_healthy() -> None:
+    for _ in range(60):
+        check = compose("ps", "--format", "{{.Health}}", "worker")
+        if check.stdout.strip() == "healthy":
+            return
+        time.sleep(0.5)
+    raise ScenarioFailed("worker 未恢复到健康状态")
+
+
+def recreate_simulation_worker(**env: str) -> None:
+    """用指定环境强制重建 worker；Change 09 的故障注入需要新容器。"""
+    for key, value in env.items():
+        os.environ[key] = value
+    result = compose("up", "-d", "--no-deps", "--force-recreate", "worker")
+    require(result.returncode == 0, f"重建 worker 失败：{result.stderr.strip()}")
+    require_worker_healthy()
+
+
+def record_simulation_evidence(
+    report: dict[str, Any], scenario_id: str, **fields: object
+) -> None:
+    if report.get("simulation_evidence") is None:
+        report["simulation_evidence"] = {
+            "mode": "offline-double",
+            "engine": "double",
+            "calls": {"real": 0, "double": 0},
+            "callScope": [],
+            "scenarios": [],
+            "workerRestored": None,
+        }
+    report["simulation_evidence"]["scenarios"].append(
+        {"scenario": scenario_id, **fields}
+    )
+
+
+def record_simulation_calls(report: dict[str, Any], *, run_id: str) -> None:
+    """从该 runId 持久化的引擎调用计数生成 callScope 与汇总。"""
+    evidence = report.setdefault(
+        "simulation_evidence",
+        {
+            "mode": "offline-double",
+            "engine": "double",
+            "calls": {"real": 0, "double": 0},
+            "callScope": [],
+            "scenarios": [],
+            "workerRestored": None,
+        },
+    )
+    raw = psql_scalar(
+        "SELECT json_build_object('real', provider_calls_real, "
+        "'double', provider_calls_double, 'engine', engine_mode) "
+        f"FROM simulations WHERE run_id = '{run_id}'"
+    )
+    require(bool(raw), f"运行 {run_id} 缺少持久化的引擎调用计数")
+    try:
+        counts = json.loads(raw)
+    except json.JSONDecodeError:
+        raise ScenarioFailed(f"运行 {run_id} 的调用计数无法解析：{raw}")
+    scope = [item for item in evidence["callScope"] if item["runId"] != run_id]
+    scope.append(
+        {
+            "runId": run_id,
+            "engine": counts["engine"],
+            "real": int(counts["real"]),
+            "double": int(counts["double"]),
+        }
+    )
+    evidence["callScope"] = scope
+    evidence["calls"] = {
+        "real": sum(item["real"] for item in scope),
+        "double": sum(item["double"] for item in scope),
+    }
+
+
+def scenario_simulation_not_triggered(
+    entry: dict[str, Any], state: dict[str, Any], report: dict[str, Any]
+) -> None:
+    token, project_id = state["token_a"], state["project_id"]
+    status, _, body = api_call("GET", simulation_path(project_id), token)
+    require(status == 200, f"运行列表期望 200，实际 {status}：{body}")
+    require(isinstance(body, dict), "运行列表不是对象")
+    require(body.get("simulations") == [], f"默认验收不应有运行记录：{body}")
+
+    missing = str(uuid.uuid4())
+    rejected, rejected_body = start_simulation_run(token, project_id, missing)
+    require(rejected == 404, f"缺少冻结选择期望 404，实际 {rejected}：{rejected_body}")
+    anonymous, _, _ = raw_request("GET", simulation_path(project_id))
+    require(anonymous == 401, "匿名运行列表应为 401")
+    rows = int(
+        psql_scalar(
+            f"SELECT count(*) FROM simulations WHERE project_id = '{project_id}'"
+        )
+        or 0
+    )
+    require(rows == 0, f"未触发时不应创建运行记录，实际 {rows}")
+    report["simulation_evidence"] = {
+        "mode": "not-triggered",
+        "engine": "double",
+        "calls": {"real": 0, "double": 0},
+        "callScope": [],
+        "scenarios": [
+            {
+                "scenario": "simulation-not-triggered",
+                "listStatus": status,
+                "startStatus": rejected,
+                "anonymousStatus": anonymous,
+                "records": rows,
+            }
+        ],
+        "workerRestored": None,
+    }
+    entry["detail"] = (
+        f"未触发运行：列表 200、无选择 404、匿名 401、运行记录 0（real=0）"
+    )
+
+
+def prepare_frozen_selection(
+    entry: dict[str, Any],
+    state: dict[str, Any],
+    fixtures: DocumentFixtures,
+) -> dict[str, object]:
+    token, project_id = state["token_a"], state["project_id"]
+    document = upload_and_wait(
+        state,
+        fixtures,
+        f"simulation-source-{fixtures.suffix}.txt",
+        SIMULATION_MATERIAL_TEXT.encode("utf-8"),
+        "text/plain",
+    )
+    status, build_body = start_graph_build(
+        token, project_id, [str(document["documentId"])], SIMULATION_QUESTION
+    )
+    require(status == 202, f"建图期望 202，实际 {status}：{build_body}")
+    build_id = str(build_body["build"]["buildId"])  # type: ignore[index]
+
+    deadline = time.time() + 180
+    snapshot: dict[str, object] | None = None
+    while time.time() < deadline:
+        build, snapshot = fetch_graph(token, project_id, build_id)
+        if build.get("canContinue"):
+            break
+        if build.get("phase") in ("failed", "canceled"):
+            raise ScenarioFailed(f"建图失败：{build.get('phase')}")
+        time.sleep(0.4)
+    require(snapshot is not None, "建图未产生已发布快照")
+
+    status, prep_body = start_environment_preparation(token, project_id, build_id)
+    require(status == 202, f"准备期望 202，实际 {status}：{prep_body}")
+    preparation_id = str(prep_body["preparation"]["preparationId"])  # type: ignore[index]
+    deadline = time.time() + 180
+    preparation: dict[str, object] = {}
+    while time.time() < deadline:
+        preparation = fetch_preparation(token, project_id, preparation_id)
+        if preparation.get("phase") == "ready":
+            break
+        if preparation.get("phase") in ("failed", "canceled"):
+            raise ScenarioFailed(f"准备失败：{preparation.get('phase')}")
+        time.sleep(0.4)
+    require(preparation.get("phase") == "ready", "准备未就绪")
+    role_count = len(preparation.get("roles") or [])  # type: ignore[arg-type]
+    require(role_count == 6, f"原创材料应准备出 6 个角色，实际 {role_count}")
+
+    revision = int(preparation["settings"]["settingsRevision"])  # type: ignore[index]
+    saved_status, _, saved = api_call(
+        "PATCH",
+        preparation_path(project_id, preparation_id, "/configuration"),
+        token,
+        payload={
+            "settingsRevision": revision,
+            "durationHours": 3,
+            "minutesPerRound": 60,
+            "roundsMode": "manual",
+            "manualRounds": 3,
+        },
+        headers={"Origin": BASE_URL},
+    )
+    require(saved_status == 200, f"保存 3 轮期望 200，实际 {saved_status}：{saved}")
+    revision = int(saved["preparation"]["settings"]["settingsRevision"])  # type: ignore[index]
+    confirm_status, _, confirmed = api_call(
+        "POST",
+        preparation_path(project_id, preparation_id, "/confirm"),
+        token,
+        payload={"settingsRevision": revision},
+        headers={"Origin": BASE_URL},
+    )
+    require(confirm_status == 200, f"确认期望 200，实际 {confirm_status}：{confirmed}")
+    frozen = confirmed["frozenSelection"]  # type: ignore[index]
+    require(frozen["settings"]["rounds"] == 3, "冻结轮数不是 3")
+    require(len(frozen["roles"]) == role_count, "冻结角色数与准备不一致")
+    return {
+        "selectionId": frozen["selectionId"],
+        "preparationId": preparation_id,
+        "buildId": build_id,
+        "snapshotId": frozen["snapshotId"],
+        "roles": role_count,
+        "question": SIMULATION_QUESTION,
+        "documentId": document["documentId"],
+    }
+
+
+def scenario_simulation_full_chain(
+    entry: dict[str, Any],
+    state: dict[str, Any],
+    report: dict[str, Any],
+    fixtures: DocumentFixtures,
+) -> None:
+    token, project_id = state["token_a"], state["project_id"]
+    # 保留运行工作目录，才能逐个平台核对引擎记录与业务计数。
+    recreate_simulation_worker(
+        SIMULATION_KEEP_RUNTIME="true",
+        SIMULATION_FAULT="",
+        DUET_CHILD_SLEEP_MS="0",
+        SIMULATION_ROUND_DELAY_MS="0",
+    )
+    frozen = prepare_frozen_selection(entry, state, fixtures)
+    state["simulation_selection"] = frozen["selectionId"]
+
+    status, body = start_simulation_run(
+        token, project_id, str(frozen["selectionId"])
+    )
+    require(status == 202, f"开始运行期望 202，实际 {status}：{body}")
+    run_id = str(body["simulation"]["runId"])  # type: ignore[index]
+    require(body["simulation"]["engine"] == "double", "默认引擎应为 double")
+    state["simulation_run"] = run_id
+    detail = wait_simulation(token, project_id, run_id)
+    require(detail["phase"] == "succeeded", f"运行未成功：{detail['phase']}")
+    require(detail["engine"] == "double", "运行引擎不是 double")
+    require(detail["terminal"] is True, "运行未进入终态")
+    require(detail["partial"] is False, "成功运行不应是部分结果")
+
+    platforms = {item["platformKey"]: item for item in detail["platforms"]}  # type: ignore[index]
+    require(set(platforms) == {"platform_a", "platform_b"}, "平台集合异常")
+    require(
+        platforms["platform_a"]["nativePlatform"] == "twitter"
+        and platforms["platform_b"]["nativePlatform"] == "reddit",
+        "原生平台映射异常",
+    )
+    for platform_key, allowed in (
+        ("platform_a", {"create_post", "repost", "like_post"}),
+        ("platform_b", {"create_post", "create_comment", "like_post", "dislike_post"}),
+    ):
+        platform = platforms[platform_key]
+        require(platform["roundsCompleted"] == 3, f"{platform_key} 轮次不是 3")
+        require(platform["actionCount"] > 0, f"{platform_key} 没有动作")
+        require(
+            set(platform["byAction"]).issubset(allowed),
+            f"{platform_key} 出现非原生动作：{platform['byAction']}",
+        )
+
+    actions = fetch_simulation_actions(token, project_id, run_id)
+    items = actions["items"]  # type: ignore[index]
+    require(
+        len(items) == detail["counts"]["total"],
+        "动作分页总数与运行计数不一致",
+    )
+    records = [(item["platformKey"], item["engineRecordId"]) for item in items]
+    require(len(records) == len(set(records)), "同一平台内引擎记录标识重复")
+    require(
+        any(item["targetResolved"] and item["target"] for item in items),
+        "缺少可定位的目标原帖",
+    )
+    comment_targets = [
+        item
+        for item in items
+        if item["nativeAction"] in ("create_comment", "repost")
+    ]
+    require(comment_targets, "没有评论或转发动作")
+    for item in comment_targets:
+        require(item["targetPlatformKey"] == item["platformKey"], "目标跨平台")
+        require(
+            item["targetEngineRecordId"] and item["targetActionId"],
+            f"目标原帖未解析：{item['nativeAction']}",
+        )
+
+    simulation_id = str(
+        psql_scalar(
+            f"SELECT id FROM simulations WHERE run_id = '{run_id}'"
+        )
+    )
+    engine_counts = engine_native_counts(simulation_id)
+    for platform_key in ("platform_a", "platform_b"):
+        server_counts = dict(platforms[platform_key]["byAction"])
+        native = {
+            action: count
+            for action, count in engine_counts.get(platform_key, {}).items()
+            if count
+        }
+        require(
+            native == server_counts,
+            f"{platform_key} 引擎记录与服务端计数不一致：{native} != {server_counts}",
+        )
+    events = fetch_job_events(
+        token, project_id, fetch_simulation(token, project_id, run_id)["jobId"]  # type: ignore[index]
+    )
+    seqs = [int(item["seq"]) for item in events["events"]]  # type: ignore[index]
+    require(seqs == list(range(1, len(seqs) + 1)), "运行事件序号不连续")
+    require(len(seqs) >= 10, f"运行事件过少：{len(seqs)}")
+    record_simulation_calls(report, run_id=run_id)
+    record_simulation_evidence(
+        report,
+        "simulation-full-chain",
+        runId=run_id,
+        selectionId=frozen["selectionId"],
+        buildId=frozen["buildId"],
+        snapshotId=frozen["snapshotId"],
+        roles=frozen["roles"],
+        rounds=3,
+        engine="double",
+        platforms={
+            key: {
+                "roundsCompleted": value["roundsCompleted"],
+                "actionCount": value["actionCount"],
+                "byAction": value["byAction"],
+            }
+            for key, value in platforms.items()
+        },
+        engineCounts=engine_counts,
+        targetLinks=[
+            {
+                "actionId": item["actionId"],
+                "platformKey": item["platformKey"],
+                "nativeAction": item["nativeAction"],
+                "targetActionId": item["targetActionId"],
+            }
+            for item in comment_targets
+        ],
+        events=len(seqs),
+    )
+    entry["detail"] = (
+        f"运行 {run_id} 成功：platform_a {platforms['platform_a']['actionCount']} 个动作、"
+        f"platform_b {platforms['platform_b']['actionCount']} 个动作，"
+        f"引擎记录与服务端计数一致，事件 {len(seqs)} 条连续"
+    )
+
+
+def scenario_simulation_stop_and_rerun(
+    entry: dict[str, Any],
+    state: dict[str, Any],
+    report: dict[str, Any],
+) -> None:
+    token, project_id = state["token_a"], state["project_id"]
+    selection_id = state["simulation_selection"]
+    recreate_simulation_worker(SIMULATION_ROUND_DELAY_MS="1200", SIMULATION_FAULT="")
+    status, body = start_simulation_run(token, project_id, str(selection_id))
+    require(status == 202, f"停止场景开始运行期望 202，实际 {status}：{body}")
+    run_id = str(body["simulation"]["runId"])  # type: ignore[index]
+    time.sleep(2.0)
+    stop_status, _, stop_body = api_call(
+        "POST",
+        simulation_path(project_id, run_id, "/stop"),
+        token,
+        headers={"Origin": BASE_URL},
+    )
+    require(stop_status == 200, f"停止期望 200，实际 {stop_status}：{stop_body}")
+    require(stop_body["cancelApplied"] is True, "首次停止应生效")
+    stopped = wait_simulation(token, project_id, run_id, timeout=120)
+    require(stopped["phase"] == "canceled", f"停止后状态不是 canceled：{stopped['phase']}")
+    first_counts = stopped["counts"]
+    time.sleep(1.5)
+    again = fetch_simulation(token, project_id, run_id)
+    require(again["counts"] == first_counts, "终态后计数仍在增长")
+    late_stop = api_call(
+        "POST",
+        simulation_path(project_id, run_id, "/stop"),
+        token,
+        headers={"Origin": BASE_URL},
+    )
+    require(late_stop[0] == 200, "重复停止应为 200")
+    require(late_stop[2]["cancelApplied"] is False, "重复停止不应再次生效")
+
+    recreate_simulation_worker(SIMULATION_ROUND_DELAY_MS="0", SIMULATION_FAULT="")
+    rerun_status, rerun_body = start_simulation_run(
+        token, project_id, str(selection_id)
+    )
+    require(rerun_status == 202, f"重跑期望 202，实际 {rerun_status}：{rerun_body}")
+    new_run = str(rerun_body["simulation"]["runId"])  # type: ignore[index]
+    require(new_run != run_id, "重跑仍返回旧 runId")
+    detail = wait_simulation(token, project_id, new_run)
+    require(detail["phase"] == "succeeded", f"重跑未成功：{detail['phase']}")
+    old = fetch_simulation(token, project_id, run_id)
+    require(old["phase"] == "canceled", "旧运行终态被改写")
+    require(old["counts"] == first_counts, "旧运行计数被改写")
+    record_simulation_calls(report, run_id=run_id)
+    record_simulation_calls(report, run_id=new_run)
+    record_simulation_evidence(
+        report,
+        "simulation-stop-and-rerun",
+        stoppedRunId=run_id,
+        newRunId=new_run,
+        stoppedCounts=first_counts,
+        stable=again["counts"] == first_counts,
+        oldRunReadable=old["phase"] == "canceled",
+    )
+    entry["detail"] = (
+        f"停止后终态 canceled、计数冻结在 {first_counts['total']}；"
+        f"重跑得到新 runId {new_run}，旧运行仍可读"
+    )
+
+
+def scenario_simulation_takeover(
+    entry: dict[str, Any],
+    state: dict[str, Any],
+    report: dict[str, Any],
+) -> None:
+    token, project_id = state["token_a"], state["project_id"]
+    selection_id = state["simulation_selection"]
+    recreate_simulation_worker(
+        SIMULATION_FAULT="platform_a:1:after_first_action",
+        DUET_CHILD_SLEEP_MS="2500",
+        SIMULATION_ROUND_DELAY_MS="0",
+        SIMULATION_KEEP_RUNTIME="true",
+    )
+    status, body = start_simulation_run(token, project_id, str(selection_id))
+    require(status == 202, f"接手场景开始运行期望 202，实际 {status}：{body}")
+    run_id = str(body["simulation"]["runId"])  # type: ignore[index]
+    time.sleep(2.2)
+    killed = compose("stop", "-t", "0", "worker")
+    require(killed.returncode == 0, f"停止 worker 失败：{killed.stderr.strip()}")
+    before = fetch_simulation(token, project_id, run_id)
+    require(not before["terminal"], "中断时应仍为运行中")
+    time.sleep(2.5)
+    recreate_simulation_worker(
+        SIMULATION_FAULT="",
+        DUET_CHILD_SLEEP_MS="0",
+        SIMULATION_ROUND_DELAY_MS="0",
+        SIMULATION_KEEP_RUNTIME="true",
+    )
+    detail = wait_simulation(token, project_id, run_id, timeout=240)
+    require(detail["phase"] == "succeeded", f"接手后未完成：{detail['phase']}")
+    attempts = int(
+        psql_scalar(f"SELECT attempts FROM jobs WHERE run_id = '{run_id}'") or 0
+    )
+    require(attempts > 1, f"接手后 attempts 应大于 1，实际 {attempts}")
+    actions = fetch_simulation_actions(token, project_id, run_id)
+    items = actions["items"]  # type: ignore[index]
+    records = [(item["platformKey"], item["engineRecordId"]) for item in items]
+    require(len(records) == len(set(records)), "接手后同一平台出现重复引擎记录")
+    simulation_id = str(
+        psql_scalar(f"SELECT id FROM simulations WHERE run_id = '{run_id}'")
+    )
+    engine_counts = engine_native_counts(simulation_id)
+    platforms = {item["platformKey"]: item for item in detail["platforms"]}  # type: ignore[index]
+    for platform_key in ("platform_a", "platform_b"):
+        native = {
+            action: count
+            for action, count in engine_counts.get(platform_key, {}).items()
+            if count
+        }
+        require(
+            native == dict(platforms[platform_key]["byAction"]),
+            f"接手后 {platform_key} 引擎与服务端计数不一致",
+        )
+    reconcile = int(
+        psql_scalar(
+            "SELECT count(*) FROM simulation_rounds WHERE simulation_id = "
+            f"'{simulation_id}'"
+        )
+        or 0
+    )
+    require(reconcile == 6, f"接手后轮次记录应为 6，实际 {reconcile}")
+    record_simulation_calls(report, run_id=run_id)
+    record_simulation_evidence(
+        report,
+        "simulation-takeover",
+        runId=run_id,
+        attempts=attempts,
+        beforeKill={
+            "rounds": [
+                {"platformKey": p["platformKey"], "roundsCompleted": p["roundsCompleted"]}
+                for p in before["platforms"]
+            ],
+            "counts": before["counts"],
+        },
+        after={
+            "phase": detail["phase"],
+            "counts": detail["counts"],
+            "engineCounts": engine_counts,
+            "rounds": reconcile,
+        },
+    )
+    entry["detail"] = (
+        f"帖子已落库、轮次标记未写入时中断：attempts={attempts}，"
+        f"接手后 {detail['counts']['total']} 个动作与引擎记录一致，轮次 6 条"
+    )
+
+
+def scenario_simulation_partial_failure(
+    entry: dict[str, Any],
+    state: dict[str, Any],
+    report: dict[str, Any],
+) -> None:
+    token, project_id = state["token_a"], state["project_id"]
+    selection_id = state["simulation_selection"]
+    recreate_simulation_worker(
+        SIMULATION_FAULT="platform_a:1:strip_marker",
+        DUET_CHILD_SLEEP_MS="0",
+        SIMULATION_ROUND_DELAY_MS="0",
+        SIMULATION_KEEP_RUNTIME="false",
+    )
+    status, body = start_simulation_run(token, project_id, str(selection_id))
+    require(status == 202, f"失败场景开始运行期望 202，实际 {status}：{body}")
+    run_id = str(body["simulation"]["runId"])  # type: ignore[index]
+    detail = wait_simulation(token, project_id, run_id, timeout=180)
+    require(detail["phase"] == "failed", f"不可确认时应失败：{detail['phase']}")
+    require(detail["partial"] is True, "单平台失败应标记部分结果")
+    require(
+        detail["failedPlatforms"] == ["platform_a"],
+        f"失败平台异常：{detail['failedPlatforms']}",
+    )
+    require(
+        detail["failure"]["code"] == "action_unconfirmed",
+        f"失败原因码异常：{detail['failure']}",
+    )
+    platforms = {item["platformKey"]: item for item in detail["platforms"]}  # type: ignore[index]
+    require(platforms["platform_a"]["status"] == "failed", "平台 A 未标记失败")
+    require(platforms["platform_b"]["status"] == "succeeded", "平台 B 未完成")
+    require(platforms["platform_b"]["roundsCompleted"] == 3, "平台 B 轮次不足")
+    require(platforms["platform_b"]["actionCount"] > 0, "平台 B 没有保留动作")
+    record_simulation_calls(report, run_id=run_id)
+    record_simulation_evidence(
+        report,
+        "simulation-partial-failure",
+        runId=run_id,
+        failedPlatforms=detail["failedPlatforms"],
+        failure=detail["failure"],
+        survivingPlatform={
+            "platformKey": "platform_b",
+            "roundsCompleted": platforms["platform_b"]["roundsCompleted"],
+            "actionCount": platforms["platform_b"]["actionCount"],
+            "byAction": platforms["platform_b"]["byAction"],
+        },
+    )
+    entry["detail"] = (
+        f"平台 A 不可确认（action_unconfirmed），平台 B 保留 "
+        f"{platforms['platform_b']['actionCount']} 个动作与 3 轮"
+    )
+
+
+def scenario_simulation_boundaries(
+    entry: dict[str, Any],
+    state: dict[str, Any],
+    report: dict[str, Any],
+) -> None:
+    token, project_id = state["token_a"], state["project_id"]
+    run_id = state["simulation_run"]
+    anonymous, _, _ = raw_request("GET", simulation_path(project_id, run_id))
+    require(anonymous == 401, "匿名运行详情应为 401")
+
+    client_b = HttpClient()
+    login_status, _, _ = client_b.request(
+        "POST",
+        "/api/auth/login",
+        payload={"email": ACCOUNT_B, "password": state["password"]},
+        headers={"Origin": BASE_URL},
+    )
+    require(login_status == 200, f"B 账号登录失败：{login_status}")
+    other_token = client_b.cookie_value()
+    require(bool(other_token), "B 登录未设置会话 Cookie")
+    other_status, _, other_body = api_call(
+        "GET", simulation_path(project_id, run_id), other_token
+    )
+    require(other_status == 404, f"他人项目期望 404，实际 {other_status}")
+    require(
+        isinstance(other_body, dict) and other_body.get("detail") == "项目不存在",
+        f"他人项目响应异常：{other_body}",
+    )
+    random_id = str(uuid.uuid4())
+    missing_status, _, missing_body = api_call(
+        "GET", simulation_path(project_id, random_id), token
+    )
+    require(missing_status == 404, f"不存在运行期望 404，实际 {missing_status}")
+    require(
+        isinstance(missing_body, dict) and missing_body.get("detail") == "运行不存在",
+        f"不存在运行响应异常：{missing_body}",
+    )
+    invalid_status, _, _ = api_call(
+        "POST",
+        simulation_path(project_id),
+        token,
+        payload={"selectionId": "not-a-uuid"},
+        headers={"Origin": BASE_URL},
+    )
+    require(invalid_status == 422, f"非法选择期望 422，实际 {invalid_status}")
+    record_simulation_evidence(
+        report,
+        "simulation-boundaries",
+        anonymous=anonymous,
+        otherProject=other_status,
+        unknownRun=missing_status,
+        invalidSelection=invalid_status,
+    )
+    entry["detail"] = "匿名 401、他人项目 404、未知运行 404、非法选择 422"
+
+
+def scenario_simulation_worker_restored(
+    entry: dict[str, Any], report: dict[str, Any]
+) -> None:
+    # 显式重建为默认配置：失败或取消的运行不能把故障注入留在 worker 里。
+    recreate_simulation_worker(
+        SIMULATION_FAULT="",
+        DUET_CHILD_SLEEP_MS="0",
+        SIMULATION_ROUND_DELAY_MS="0",
+        SIMULATION_KEEP_RUNTIME="false",
+        SIMULATION_ENGINE="double",
+        WORKER_SIMULATION_ENGINE="",
+    )
+    result = compose("ps", "--format", "{{.Health}}", "worker")
+    require(result.stdout.strip() == "healthy", "worker 未恢复健康")
+    engine = compose(
+        "exec", "-T", "worker", "python", "-c",
+        "import os;print(os.environ.get('SIMULATION_ENGINE',''))",
+    )
+    require(engine.stdout.strip() == "double", "worker 引擎模式未恢复")
+    evidence = report.setdefault("simulation_evidence", {})
+    fault = compose(
+        "exec", "-T", "worker", "python", "-c",
+        "import os;print(os.environ.get('SIMULATION_FAULT',''))",
+    )
+    evidence["workerRestored"] = {
+        "health": "healthy",
+        "engine": engine.stdout.strip(),
+        "fault": fault.stdout.strip(),
+    }
+    entry["detail"] = "worker 恢复为默认替身引擎，运行故障注入已清除"
+
+
 def run_acceptance(report: dict[str, Any], change: str | None = None) -> bool:
     state: dict[str, Any] = {}
     fixtures = DocumentFixtures()
@@ -4716,6 +5463,20 @@ def run_acceptance(report: dict[str, Any], change: str | None = None) -> bool:
         if change is None:
             with scenario(report, "environment-not-triggered") as entry:
                 scenario_environment_not_triggered(entry, state, report)
+        if change is None:
+            with scenario(report, "simulation-not-triggered") as entry:
+                scenario_simulation_not_triggered(entry, state, report)
+        if change == SIMULATION_CHANGE_ID:
+            with scenario(report, "simulation-full-chain") as entry:
+                scenario_simulation_full_chain(entry, state, report, fixtures)
+            with scenario(report, "simulation-stop-and-rerun") as entry:
+                scenario_simulation_stop_and_rerun(entry, state, report)
+            with scenario(report, "simulation-takeover") as entry:
+                scenario_simulation_takeover(entry, state, report)
+            with scenario(report, "simulation-partial-failure") as entry:
+                scenario_simulation_partial_failure(entry, state, report)
+            with scenario(report, "simulation-boundaries") as entry:
+                scenario_simulation_boundaries(entry, state, report)
         if change == ENVIRONMENT_CHANGE_ID:
             with scenario(report, "environment-full-chain") as entry:
                 scenario_environment_full_chain(entry, state, report, fixtures)
@@ -4983,10 +5744,13 @@ def run(report: dict[str, Any], args: argparse.Namespace) -> int:
     isolated_saved = apply_runtime_env(isolated_runtime_env())
     graph_saved: dict[str, str | None] | None = None
     environment_saved: dict[str, str | None] | None = None
+    simulation_saved: dict[str, str | None] | None = None
     if change == GRAPH_CHANGE_ID:
         graph_saved = apply_runtime_env(graph_runtime_env())
     if change == ENVIRONMENT_CHANGE_ID:
         environment_saved = apply_runtime_env(environment_runtime_env())
+    if change == SIMULATION_CHANGE_ID:
+        simulation_saved = apply_runtime_env(simulation_runtime_env())
     if change == CHANGE_ID:
         # 放大步骤间隔，让“读到第 4 条后断开”、worker 中断等窗口足够宽。
         os.environ["TEST_TASK_STEP_DELAY_MS"] = VERIFY_STEP_DELAY_MS
@@ -5001,6 +5765,8 @@ def run(report: dict[str, Any], args: argparse.Namespace) -> int:
                 restore_runtime_env(graph_saved)
             if environment_saved is not None:
                 restore_runtime_env(environment_saved)
+            if simulation_saved is not None:
+                restore_runtime_env(simulation_saved)
             restore_worker_defaults()
         if change == GRAPH_CHANGE_ID and passed:
             try:
@@ -5012,6 +5778,12 @@ def run(report: dict[str, Any], args: argparse.Namespace) -> int:
             try:
                 with scenario(report, "environment-worker-env-restored") as entry:
                     scenario_environment_worker_restored(entry, report)
+            except ScenarioFailed:
+                passed = False
+        if change == SIMULATION_CHANGE_ID and passed:
+            try:
+                with scenario(report, "simulation-worker-env-restored") as entry:
+                    scenario_simulation_worker_restored(entry, report)
             except ScenarioFailed:
                 passed = False
     finally:

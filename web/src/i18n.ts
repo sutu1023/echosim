@@ -171,6 +171,50 @@ export interface WorkbenchMessages {
     frozenRoles: string
     errorCodes: Record<string, string>
   }
+  simulation: {
+    title: string
+    intro: string
+    loading: string
+    loadFailed: string
+    retry: string
+    serviceUnavailable: string
+    missingSelection: string
+    missingSelectionBody: string
+    goPrepare: string
+    start: string
+    starting: string
+    started: string
+    notStarted: string
+    startHint: string
+    clock: string
+    engine: string
+    phase: string
+    question: string
+    selectionSummary: string
+    roles: string
+    platformMap: string
+    rounds: string
+    actions: string
+    actionStream: string
+    emptyActions: string
+    logs: string
+    emptyLogs: string
+    runs: string
+    currentRun: string
+    stop: string
+    stopping: string
+    stopped: string
+    originalPost: string
+    closeTarget: string
+    targetUnresolved: string
+    role: string
+    round: string
+    partialResult: string
+    failedPlatform: string
+    countMismatch: string
+    noRuns: string
+    errorCodes: Record<string, string>
+  }
   materials: {
     title: string
     intro: string
@@ -520,6 +564,66 @@ const messages: Record<Lang, WorkbenchMessages> = {
         role_source_missing: '角色缺少材料来源，未发布。',
         role_source_mismatch: '角色来源与快照不一致，未发布。',
         preparation_failed: '准备执行失败，请稍后重试。',
+      },
+    },
+    simulation: {
+      title: '双平台运行',
+      intro: '从已确认的冻结选择启动运行，观察两个平台的模拟时钟、行动流与按平台统计。',
+      loading: '正在读取运行状态…',
+      loadFailed: '运行状态读取失败，请重试。',
+      retry: '重试',
+      serviceUnavailable: '服务暂时不可用，登录状态已保留。',
+      missingSelection: '尚未确认角色与环境',
+      missingSelectionBody: '第三阶段需要一份已确认的冻结选择；请先在第二阶段完成确认。',
+      goPrepare: '前往准备角色与环境',
+      start: '开始运行',
+      starting: '正在开始…',
+      started: '运行已开始。',
+      notStarted: '暂无运行记录',
+      startHint: '开始后由 worker 在两个本地平台推进，动作从引擎记录读回。',
+      clock: '模拟时钟',
+      engine: '引擎',
+      phase: '状态',
+      question: '推演问题',
+      selectionSummary: '冻结选择',
+      roles: '角色',
+      platformMap: '平台',
+      rounds: '轮次',
+      actions: '动作',
+      actionStream: '行动流',
+      emptyActions: '还没有从引擎读回的动作。',
+      logs: '运行日志',
+      emptyLogs: '暂无运行日志。',
+      runs: '运行记录',
+      currentRun: '当前运行',
+      stop: '停止运行',
+      stopping: '停止已请求',
+      stopped: '已停止',
+      originalPost: '原帖',
+      closeTarget: '收起原帖',
+      targetUnresolved: '目标未在本运行中定位',
+      role: '角色',
+      round: '轮次',
+      partialResult: '部分结果：仅一个平台完成',
+      failedPlatform: '该平台失败',
+      countMismatch: '页面计数与服务端记录不一致，已按服务端刷新。',
+      noRuns: '该冻结选择还没有运行记录。',
+      errorCodes: {
+        selection_missing: '缺少已确认的冻结选择。',
+        selection_invalid: '冻结选择数据不完整，无法开始运行。',
+        engine_not_enabled: '真实本地 OASIS 运行未启用。',
+        engine_unavailable: '本地 OASIS 引擎不可用，未创建替身动作。',
+        action_unconfirmed: '引擎已产生副作用但无法确认，已保留证据并停止该平台。',
+        platform_a_setup: '信息广场环境准备失败。',
+        platform_b_setup: '话题社区环境准备失败。',
+        platform_a_action: '信息广场动作执行失败。',
+        platform_b_action: '话题社区动作执行失败。',
+        platform_a_record: '信息广场引擎记录无法核对。',
+        platform_b_record: '话题社区引擎记录无法核对。',
+        simulation_timeout: '单轮执行超出预算。',
+        simulation_too_large: '动作数量超过上限。',
+        simulation_failed: '运行执行失败。',
+        canceled: '运行已停止。',
       },
     },
     materials: {
@@ -909,6 +1013,66 @@ const messages: Record<Lang, WorkbenchMessages> = {
         role_source_missing: 'A role had no material source and was not published.',
         role_source_mismatch: 'A role source did not match the snapshot; nothing was published.',
         preparation_failed: 'Preparation failed. Retry later.',
+      },
+    },
+    simulation: {
+      title: 'Dual-platform run',
+      intro: 'Start a run from the confirmed frozen selection and watch both platforms, the simulated clock and per-platform counts.',
+      loading: 'Loading the run…',
+      loadFailed: 'Could not load the run. Retry to continue.',
+      retry: 'Retry',
+      serviceUnavailable: 'The service is temporarily unavailable; your session is kept.',
+      missingSelection: 'Roles and environment are not confirmed yet',
+      missingSelectionBody: 'Stage three needs a confirmed frozen selection. Confirm it in stage two first.',
+      goPrepare: 'Go to roles and environment',
+      start: 'Start run',
+      starting: 'Starting…',
+      started: 'The run has started.',
+      notStarted: 'No runs yet',
+      startHint: 'A worker advances both local platforms and reads actions back from engine records.',
+      clock: 'Simulated clock',
+      engine: 'Engine',
+      phase: 'Status',
+      question: 'Question',
+      selectionSummary: 'Frozen selection',
+      roles: 'Roles',
+      platformMap: 'Platforms',
+      rounds: 'Rounds',
+      actions: 'Actions',
+      actionStream: 'Action stream',
+      emptyActions: 'No actions have been read back from the engine yet.',
+      logs: 'Run log',
+      emptyLogs: 'No run events yet.',
+      runs: 'Runs',
+      currentRun: 'Current run',
+      stop: 'Stop run',
+      stopping: 'Stop requested',
+      stopped: 'Stopped',
+      originalPost: 'Original post',
+      closeTarget: 'Hide original post',
+      targetUnresolved: 'Target not found in this run',
+      role: 'Role',
+      round: 'Round',
+      partialResult: 'Partial result: only one platform finished',
+      failedPlatform: 'This platform failed',
+      countMismatch: 'Page counts disagreed with the server; refreshed from the server.',
+      noRuns: 'This frozen selection has no runs yet.',
+      errorCodes: {
+        selection_missing: 'The confirmed frozen selection is missing.',
+        selection_invalid: 'The frozen selection is incomplete; the run cannot start.',
+        engine_not_enabled: 'Local OASIS runs are not enabled.',
+        engine_unavailable: 'The local OASIS engine is unavailable; no double actions were created.',
+        action_unconfirmed: 'The engine wrote a side effect that cannot be confirmed; evidence kept and the platform stopped.',
+        platform_a_setup: 'Info Plaza environment setup failed.',
+        platform_b_setup: 'Topic Community environment setup failed.',
+        platform_a_action: 'Info Plaza action failed.',
+        platform_b_action: 'Topic Community action failed.',
+        platform_a_record: 'Info Plaza engine record could not be verified.',
+        platform_b_record: 'Topic Community engine record could not be verified.',
+        simulation_timeout: 'A round exceeded its budget.',
+        simulation_too_large: 'Action count exceeded the limit.',
+        simulation_failed: 'The run failed.',
+        canceled: 'The run was stopped.',
       },
     },
     materials: {

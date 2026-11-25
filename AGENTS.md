@@ -26,11 +26,13 @@
 | `app/engines/` | 引擎契约、模型/图谱/双平台适配器、离线契约检查与依赖基线 |
 | `app/routers/` | HTTP 路由，只做参数校验、依赖注入与异常映射 |
 | `app/worker.py` | 独立 worker 进程入口（无 HTTP 端口，只从数据库领取任务） |
+| `app/simulation_worker.py` | 只领取 `simulation.run` 的模拟 worker 入口（真实 OASIS 打包用） |
 | `app/lease_probe.py` | 验收专用租约/终态竞态探针，仅由 `make verify CHANGE=…` 调用 |
 | `web/` | Vue 前端源码与构建配置；`web/dist` 为构建产物（不提交） |
 | `tests/` | Python 单元测试（`unittest`） |
 | `scripts/verify.py` | 可重复验收脚本，仅用 Python 标准库 |
 | `scripts/smoke_live.py` | 真实联调的宿主预检、脏工作树拒绝与报告路径 |
+| `scripts/simulate_live.py` | 真实本地 OASIS 双平台运行的显式入口与证据报告 |
 | `Dockerfile.engine` | 隔离引擎镜像；只复制引擎代码与依赖，不暴露端口 |
 | `app/requirements-engines.txt` | 引擎候选依赖，只安装到隔离引擎镜像 |
 | `docs/acceptance/` | 人工验收记录与模板（自动化流程禁止写入） |
@@ -46,6 +48,7 @@ make down     # 停止并移除容器与网络，保留数据卷
 make reset    # 破坏性：连同数据卷一起移除
 make verify   # 执行可重复验收，写入 runtime/verify/last-run.json
 make smoke-live  # 由开发者显式执行真实模型/图谱/双平台联通验收
+make simulate-live  # 由开发者显式执行真实本地 OASIS 双平台运行
 make migrate  # 在运行中的 app 容器内应用未执行的迁移
 make user EMAIL=a@example.com  # 从标准输入读取密码，创建/更新账户
 ```
@@ -139,6 +142,27 @@ make user EMAIL=a@example.com  # 从标准输入读取密码，创建/更新账�
 - 准备任务不得进入测试任务面板、副作用计数或测试日志；事件只携带准备/快照/批次/角色标识、计数与原因码，不携带角色正文、材料正文、引文或来源地址。
 - 默认启动、默认 `make verify` 与 CI 不得触发画像真实外呼；离线验收显式使用 stub，报告从准备记录的 provider 边界读取 `calls.real`/`calls.double`。每次实际 provider 尝试在边界立即计数并持久化，超时、非法输出与批次提交前失去租约不得漏记，成功批次不得重复计数。分批画像的 `initialTopics` 必须并入最终配置与冻结选择并保留来源性质。私有材料与私有样本只留在仓库外，不得进入夹具、日志、截图或报告。
 
+## 双平台运行
+
+- 运行只能从 Change 08 已确认的 `frozenSelection` 开始：开始接口只接受 `selectionId`，问题、角色、轮数、平台映射、初始话题与首发顺序全部取自冻结数据，并在开始时复制进运行记录；不得从当前 build、最新图谱或前端状态重新拼装。
+- 同一 `selectionId` 的活动运行最多一个（操作键 `dual-platform-run:v1:<selectionId>`）：重复点击返回 200 与同一 `runId`，终态后再次开始返回 202 与新 `runId`，旧运行必须仍可按 `runId` 回看。
+- 平台映射固定为 `platform_a/twitter` 与 `platform_b/reddit`。信息广场支持发帖、转发、点赞；话题社区支持发主题、评论、投票赞成、投票反对（原生 `like_post`/`dislike_post`）。Change 06 的连通性探针动作与判定保持不变。
+- 引擎只由独立 worker 执行，浏览器与 `app` 不调用引擎。两个平台各自使用独立子进程、运行目录与 SQLite；运行目录必须位于跨 worker 重建仍存在的持久卷，镜像必须预先创建并授权该目录。
+- 每条业务动作必须从引擎记录读回后才落库；动作调用返回值不构成证据。发帖与评论校验正文运行标记，点赞、反对与转发按原生目标记录标识读回。目标只能解析到同一运行、同一平台。
+- 运行创建时持久化 `engine_mode`；领取与接手必须同时匹配 run 类型与 `engine_mode`，未被任何 worker 声明的运行保持 `queued`，不得标记为失败。
+- 轮次以 `(simulation_id, platform_key, round_index)` 为游标，与该轮动作、平台计数和事件同事务提交；`run_steps` 与 `jobs.next_step` 仍是步骤层权威。轮数不得超过冻结值，模拟时钟由服务端按轮次派生。
+- 推演时钟的起点必须是冻结选择中首个首发角色的最早活跃小时（整点），并同时用于角色调度、动作时刻、事件与运行详情；真实创建时间只用于审计，不得混入推演时钟。
+- 第三阶段切换运行时必须立即解绑旧运行、清空旧动作与日志并订阅新运行；停止请求只发给当前 `runId`，旧运行的迟到响应与事件必须按 `runId` 丢弃；动作名必须按平台显示（信息广场：发帖/转发/点赞；话题社区：发主题/评论/投票赞成/投票反对）。
+- 两个平台必须独立推进：慢平台不得阻塞另一平台提交下一轮；整次运行共享一个动作上限，调用引擎前必须原子预留预算，超出即 `simulation_too_large` 且不调用引擎。
+- 停止是请求而不是终态：API 只写 `cancel_requested_at`，worker 在下一个轮次边界把已写入引擎的在途动作读回记账后，再在单事务内写 job `canceled`、运行 `canceled` 与终态事件；完成与取消并发时只有一个赢家、一条终态事件；终态后迟到结果不得写入，计数不得再增长。
+- 终态提交后才允许清理运行目录；清理失败只记录 `cleanup` 原因码，不得改写终态、计数或已有动作。
+- 接手必须区分“未开始（可证明未执行，允许重发）”“已执行可补记（先补记再继续）”“不可确认（保留证据并以 `action_unconfirmed` 结束，不得重发）”。旧子进程未退出时不得并发写同一平台库。
+- 单平台失败不得阻断另一平台：运行以 `failed` 结束并列出 `failedPlatforms`，另一平台的轮次、动作与计数保持可读，页面不得显示为完成或空运行。
+- 计数以 `simulation_actions` 聚合为权威，平台行上的计数只是同事务冗余；刷新、SSE 重连与接手后页面计数必须等于服务端记录，并可与引擎原生记录逐平台核对。
+- 默认 `make up`、默认 `make verify` 与 CI 只使用替身引擎且零真实模型外呼。真实本地 OASIS 只由开发者显式执行 `make simulate-live`，默认只执行原生手动动作，报告必须分别记录本地 OASIS 动作数与外部模型调用数，且不得把离线替身结果写成真实证据。
+- `worker-simulation` 镜像以 `echosim-engine:dev` 为基础复用已验证的引擎依赖，只额外安装 app 运行时依赖；其四阶段基线必须可由 `make simulation-worker-check` 重跑，结果写入 `runtime/simulation-worker/baseline.json`。默认 `make up` 不构建、不启用该镜像；启用入口统一为 `make up SIMULATION=1`。
+- 运行接口复用项目鉴权与归属：匿名 401 且不访问运行数据，他人项目与不存在项目统一 404 `项目不存在`，他人/不存在运行 404 `运行不存在`，停库 503 且不清除 Cookie。
+
 ## 引擎接入与真实联调
 
 - `.env.example` 的 `replace-with-*`、`*.example.invalid` 与全零 UUID 必须按“未配置”处理；`make smoke-live` 不得自动复制 `.env`，避免占位值触发外部调用。
@@ -202,6 +226,9 @@ make user EMAIL=a@example.com  # 从标准输入读取密码，创建/更新账�
 - `make verify CHANGE=2026-11-21-ingest-seed-documents` 必须在默认场景之上追加：三页 PDF 的总页数、空白页零分块、第 3 页 `pageNo` 与 `#page=3` 来源、原件哈希与页对象结构；PDF 页眉页脚与打印路径清理；文本换行/空白归一、合法路径保留、emoji 偏移与 GB18030 原件/原文；20 MiB 边界、空文件、无文字层与页数上限；重复上传只留一套；匿名 401 与他人 404；worker 停止时取消排队任务；慢解析续租与中断接手。
 - `make verify CHANGE=2026-11-21-track-background-jobs` 必须在同一 SHA 上追加：真实 SSE 两段序号（1–4 与 5–10）、`Last-Event-ID` 优先、终态重连立即结束、并发开始只新增一对 job/run、worker 中断接手、真实 PostgreSQL 锁等待跨过期点与旧令牌拒绝回归、取消（含 `canceled seq=4`）、受控失败与取消/完成竞态。未注册的 `CHANGE` 必须以退出码 2 结束。
 - `make verify CHANGE=2026-11-22-build-evidence-graph` 必须在同一 SHA 上追加：原创材料开始/重复/未就绪/六份/空问题/匿名/他人边界；真实 worker 的阶段序列、增量部分快照与最终快照、PDF 第 3 页与文本 UTF-16 来源；绑定响应丢失、未提交、接手；失败原因码与超限不发布；发布/取消竞态；第二次建图隔离；日志/报告脱敏与 worker provider 恢复。未注册的 `CHANGE` 必须以退出码 2 结束。
+- `make verify CHANGE=2026-11-24-run-dual-platform-simulation` 的 `simulation_evidence.callScope` 必须来自每个 `runId` 持久化的引擎调用计数（不是按场景加一），`calls` 为这些记录的汇总；CI 必须新增独立的 Change 09 离线 job 与 artifact，并断言 `calls.real=0`、`callScope` 全部为 0、五个核心场景齐全、接手 `attempts>1`、部分失败 `failedPlatforms=["platform_a"]` 与故障注入已清除。
+- `make verify CHANGE=2026-11-24-run-dual-platform-simulation` 必须在同一 SHA 上追加：原创材料准备的 6 个角色与冻结 3 轮、双平台三轮原生动作与引擎记录/服务端/页面三方计数、目标原帖定位、停止后终态计数冻结、同选择重跑新 `runId` 与旧运行可读、帖子已落库而轮次标记未写入时的接手（`attempts>1`）、`action_unconfirmed` 单平台失败与另一平台部分结果、匿名/他人/未知运行/非法选择边界、`engine=double` 与 `calls.real=0`；未注册的 `CHANGE` 必须以退出码 2 结束。
+- `make simulate-live` 是真实本地 OASIS 双平台运行的唯一显式入口：复用普通启动 API 与 worker，通过 `SIMULATION_ENGINE_COMMAND` 在隔离引擎镜像内执行原生动作，产物写入 `runtime/simulation-live/report.json`（`mode=live`、`engine=oasis`、`localOasisActions>0`、`externalModelCalls=0`）；默认验收、CI 与 `make up` 不得触发。
 - `make verify CHANGE=2026-11-24-prepare-agent-environment` 必须在同一 SHA 上追加：原创材料建图后的开始/重复/五步/ready/72 轮；中文快照角色筛选与事件/待核实说法/平台三个反例；材料提及/背景/表达/关联/模拟设定分层与旧 `claimNature` 未知；文本 UTF-16 与 PDF 第 3 页来源；72→40→3 读回、旧版本确认冲突且冻结记录为 0、重读确认与幂等；两批预览、停止 worker 后接手 `attempts>1` 且批次复用；无角色、模型不可用、普通开始 409 与显式重试 202；匿名/他人/不存在资源与停库 503；换材料后角色变化且旧冻结选择保持旧 `snapshotId`；`environment_evidence.calls.real=0`、`calls.double>0` 与 worker provider 恢复。未注册的 `CHANGE` 必须以退出码 2 结束。
 - `make verify` 必须使用独立的 Compose 项目、回环端口与数据卷，不得停止或改写本地 8080 工作台。`VERIFY_COMPOSE_PROJECT` 只允许 `echosim-verify` 或其安全后缀项目；启动前必须校验项目名并获取独占锁，清理只作用于本项目且检查退出码，误指开发栈必须在任何停止、删卷或重建命令前以退出码 2 拒绝。Change 07 与 Change 08 默认使用离线 stub provider，不读取真实模型/Zep 凭据。`graph_evidence.calls.real` 与 `environment_evidence.calls.real` 必须为 0、`calls.double` 必须大于 0；计数必须来自 provider 调用边界的逐 build/逐准备持久化值，并在 `callScope` 中列出覆盖的 buildId，不得用计划数、节点数、角色数或快照大小推算。
 - 报告必须在 `job_evidence` 中记录 `jobId`、`runId`、两段序号、接手前后 `attempts`、副作用计数与旧令牌结果；在 `document_evidence` 中记录材料标识、解析任务标识、页数、分块数、第 3 页页码与来源、原件哈希、重复上传与取消/接手结果；页面提示、布局、语言、断线时序与 PDF 浏览器实际落页仍只写入 `docs/acceptance/`。

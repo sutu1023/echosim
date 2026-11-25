@@ -17,6 +17,7 @@ from pathlib import Path
 from .config import settings
 from .db import SessionLocal, dispose_engine
 from .engines.business_config import BusinessGraphConfig
+from .engines.duet_config import DuetConfig
 from .engines.environment_config import EnvironmentConfig
 from .engines.environment_model import create_profiler
 from .engines.business_runtime import (
@@ -24,6 +25,7 @@ from .engines.business_runtime import (
     create_graph_client,
     create_planner,
 )
+from .services import simulation_worker
 from .services import worker as worker_service
 
 logger = logging.getLogger("echosim.worker")
@@ -55,6 +57,7 @@ async def run(stop_event: asyncio.Event) -> None:
     heartbeat_seconds = settings.job_heartbeat_seconds
     poll_seconds = settings.worker_poll_interval_seconds
     step_delay = settings.test_task_step_delay_ms / 1000
+    duet_config = DuetConfig.from_env()
     logger.info(
         "worker 启动 worker=%s lease=%.1fs heartbeat=%.1fs poll=%.2fs delay=%.2fs",
         worker_id,
@@ -69,7 +72,11 @@ async def run(stop_event: asyncio.Event) -> None:
         try:
             async with SessionLocal() as db:
                 claim = await worker_service.claim_next(
-                    db, worker_id=worker_id, lease_seconds=lease_seconds
+                    db,
+                    worker_id=worker_id,
+                    lease_seconds=lease_seconds,
+                    run_kinds=duet_config.run_kinds,
+                    simulation_engine=duet_config.worker_engine,
                 )
         except Exception as exc:  # noqa: BLE001 - 数据库故障时保持进程存活并重试
             logger.warning("领取任务异常，稍后重试: %s", type(exc).__name__)
@@ -132,6 +139,15 @@ async def run(stop_event: asyncio.Event) -> None:
                     profiler_factory=lambda metrics=None: create_profiler(
                         environment_config, metrics=metrics
                     ),
+                )
+            elif claim.kind == "simulation.run":
+                outcome = await simulation_worker.execute_simulation(
+                    claim,
+                    session_factory=SessionLocal,
+                    stop_event=stop_event,
+                    lease_seconds=lease_seconds,
+                    heartbeat_seconds=heartbeat_seconds,
+                    config=duet_config,
                 )
             elif claim.kind == "document.ingest":
                 outcome = await worker_service.execute_ingest(

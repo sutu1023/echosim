@@ -88,8 +88,15 @@ export function nextStageUrl(
   query: QueryLike,
   buildId: string | null,
   preparationId: string | null,
+  selectionId: string | null = null,
 ): string {
   const params = environmentQuery(query, buildId, preparationId)
+  if (selectionId) {
+    params.selection = selectionId
+  } else {
+    delete params.selection
+  }
+  delete params.run
   return `/projects/${encodeURIComponent(projectId)}/workbench/dual-platform-run?${new URLSearchParams(params).toString()}`
 }
 

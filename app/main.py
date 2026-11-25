@@ -29,7 +29,10 @@ from .errors import (
     InvalidSnapshotRevision,
     JobNotFound,
     ProjectNotFound,
+    SelectionNotFound,
     ServiceUnavailable,
+    SimulationConflict,
+    SimulationNotFound,
     Unauthenticated,
 )
 from .health import router as health_router
@@ -41,6 +44,7 @@ from .routers.evidence_graph import router as evidence_graph_router
 from .routers.history import router as history_router
 from .routers.jobs import router as jobs_router
 from .routers.projects import router as projects_router
+from .routers.simulations import router as simulations_router
 from .static import register_static_routes
 
 REQUEST_ID_HEADER = "X-Request-ID"
@@ -101,6 +105,27 @@ def create_app(web_dist_dir: Path | None = None) -> FastAPI:
     @app.exception_handler(JobNotFound)
     async def handle_job_not_found(_: Request, __: JobNotFound) -> JSONResponse:
         return JSONResponse({"detail": "任务不存在"}, status_code=404)
+
+    @app.exception_handler(SelectionNotFound)
+    async def handle_selection_not_found(
+        _: Request, __: SelectionNotFound
+    ) -> JSONResponse:
+        return JSONResponse({"detail": "推演选择不存在"}, status_code=404)
+
+    @app.exception_handler(SimulationNotFound)
+    async def handle_simulation_not_found(
+        _: Request, __: SimulationNotFound
+    ) -> JSONResponse:
+        return JSONResponse({"detail": "运行不存在"}, status_code=404)
+
+    @app.exception_handler(SimulationConflict)
+    async def handle_simulation_conflict(
+        _: Request, exc: SimulationConflict
+    ) -> JSONResponse:
+        status = 422 if exc.code == "selection_invalid" else 409
+        return JSONResponse(
+            {"detail": exc.message, "code": exc.code}, status_code=status
+        )
 
     @app.exception_handler(DocumentNotFound)
     async def handle_document_not_found(
@@ -211,6 +236,7 @@ def create_app(web_dist_dir: Path | None = None) -> FastAPI:
     app.include_router(documents_router)
     app.include_router(evidence_graph_router)
     app.include_router(environment_router)
+    app.include_router(simulations_router)
     app.include_router(history_router)
     app.include_router(health_router)
     register_static_routes(app, web_dist_dir or settings.web_dist_dir)
