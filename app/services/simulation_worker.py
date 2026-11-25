@@ -32,6 +32,7 @@ from ..engines.duet_engine import native_counts, round_records
 from ..errors import LeaseLost
 from . import run_events
 from . import simulation as simulation_store
+from . import simulation_memory as memory_store
 from . import worker as worker_service
 
 logger = logging.getLogger(__name__)
@@ -270,7 +271,25 @@ async def _round_plan(
     platform_key: str,
     round_index: int,
     actions_per_round: int,
-) -> list[Any]:
+) -> tuple[list[Any], list[dict[str, Any]]]:
+    existing = await memory_store.load_plan(
+        db,
+        simulation_id=simulation.id,
+        platform_key=platform_key,
+        round_index=round_index,
+    )
+    if existing is not None:
+        actions = memory_store.actions_from_plan(existing)
+        return actions, list(existing.get("memoryRefs") or [])
+    memory_config = memory_store.MemoryConfig.from_env()
+    refs, material_refs = await memory_store.plan_refs(
+        db,
+        simulation_id=simulation.id,
+        snapshot_id=simulation.snapshot_id,
+        platform_key=platform_key,
+        round_index=round_index,
+        limit=memory_config.max_refs,
+    )
     posts = await simulation_store.recent_posts(
         db, simulation_id=simulation.id, platform_key=platform_key
     )
@@ -283,13 +302,31 @@ async def _round_plan(
         )
         for item in posts
     ]
-    return plan_round(
+    actions = plan_round(
         simulation.plan,
         platform_key=platform_key,
         round_index=round_index,
         run_marker=str(simulation.run_id),
         known_posts=known,
         actions_per_round=actions_per_round,
+        memory_refs=refs,
+        material_refs=material_refs,
+    )
+    payload = {
+        "memoryCutoffRound": round_index - 1,
+        "memoryRefs": refs,
+        "materialRefs": material_refs,
+        "actions": memory_store.plan_actions_payload(actions),
+    }
+    stored = await memory_store.save_plan(
+        db,
+        simulation_id=simulation.id,
+        platform_key=platform_key,
+        round_index=round_index,
+        payload=payload,
+    )
+    return memory_store.actions_from_plan(stored), list(
+        stored.get("memoryRefs") or refs
     )
 
 
@@ -304,6 +341,7 @@ async def _run_child(
     timeout_seconds: float,
     engine_command: str = "",
     engine_runtime: str = "/out",
+    keep_request: bool = False,
 ) -> tuple[int, str]:
     request = {
         "mode": mode,
@@ -323,6 +361,8 @@ async def _run_child(
                 "marker": action.marker,
                 "targetActionKey": action.target_action_key,
                 "targetEngineRecordId": action.target_engine_record_id,
+                "memoryRefs": list(action.memory_refs),
+                "materialRefs": list(action.material_refs),
             }
             for action in actions
         ],
@@ -359,7 +399,8 @@ async def _run_child(
         await process.wait()
         return -9, ""
     finally:
-        request_path.unlink(missing_ok=True)
+        if not keep_request:
+            request_path.unlink(missing_ok=True)
     if process.returncode != 0:
         logger.warning(
             "引擎子进程失败 platform=%s round=%s code=%s stdout=%s stderr=%s",
@@ -381,6 +422,7 @@ async def _book_round(
     platform_key: str,
     round_index: int,
     records: Sequence[Mapping[str, Any]],
+    planned_actions: Sequence[Any] = (),
     round_outcome: str = "committed",
 ) -> str:
     simulated_at = simulation.simulated_start + timedelta(
@@ -406,6 +448,12 @@ async def _book_round(
         if phase_row is None or str(phase_row.phase) in simulation_store.TERMINAL_PHASES:
             await db.rollback()
             return "terminal"
+        seq = await run_events.max_seq(db, run_id=claim.run_id) + 1
+        refs_by_action = {
+            action.action_key: list(action.memory_refs)
+            for action in planned_actions
+            if getattr(action, "memory_refs", None)
+        }
         written = await simulation_store.write_round(
             db,
             simulation=simulation,
@@ -414,6 +462,8 @@ async def _book_round(
             simulated_at=simulated_at,
             records=records,
             outcome=round_outcome,
+            event_seq=seq,
+            memory_refs_by_action=refs_by_action,
         )
         if written is None:
             await db.rollback()
@@ -427,7 +477,6 @@ async def _book_round(
             {"id": simulation.id, "platform_key": platform_key},
         )
         platform_row = platform.first()
-        seq = await run_events.max_seq(db, run_id=claim.run_id) + 1
         await run_events.append_event(
             db,
             run_id=claim.run_id,
@@ -516,6 +565,7 @@ async def _run_round_actions(
                 config.engine_command if simulation.engine_mode == "oasis" else ""
             ),
             engine_runtime=config.engine_runtime,
+            keep_request=config.keep_runtime,
         )
         await _count_calls(
             session_factory,
@@ -587,7 +637,7 @@ async def _advance_platform(
             await asyncio.sleep(pause / 1000)
         round_index = completed + 1
         async with session_factory() as db:
-            actions = await _round_plan(
+            actions, memory_refs = await _round_plan(
                 db,
                 simulation=simulation,
                 platform_key=platform_key,
@@ -635,12 +685,17 @@ async def _advance_platform(
                 platform_key=platform_key,
                 round_index=round_index,
                 records=records,
+                planned_actions=actions,
                 round_outcome="unconfirmed" if failure else "committed",
             )
             if outcome in ("lost", "terminal"):
                 return outcome
             if outcome == "ok":
                 completed = round_index
+                # 记忆投影由可恢复的 simulation.memory 任务推进，不阻塞下一轮。
+                await _ensure_memory_sync_job(
+                    session_factory, simulation_id=simulation.id
+                )
             else:
                 async with session_factory() as db:
                     completed = await rounds_so_far(
@@ -668,6 +723,58 @@ async def _advance_platform(
             stop_signal.set()
             return "canceled"
     return "ok"
+
+
+async def _project_memory_round(
+    session_factory: worker_service.SessionFactory,
+    *,
+    simulation: simulation_store.SimulationRow,
+    platform_key: str,
+    round_index: int,
+) -> None:
+    """尽力增量投影；图服务慢或中断不阻断另一平台与下一轮。"""
+    memory_config = memory_store.MemoryConfig.from_env()
+    if not memory_config.enabled:
+        return
+    try:
+        async with session_factory() as db:
+            await memory_store.ensure_binding(
+                db, simulation_id=simulation.id, config=memory_config
+            )
+            await memory_store.project_round(
+                db,
+                simulation_id=simulation.id,
+                platform_key=platform_key,
+                round_index=round_index,
+                config=memory_config,
+            )
+            await db.commit()
+    except Exception as exc:  # noqa: BLE001 - 记忆失败不影响动作终态
+        logger.warning(
+            "记忆投影暂不可用 simulation=%s platform=%s code=%s",
+            simulation.id,
+            platform_key,
+            type(exc).__name__,
+        )
+        code = getattr(exc, "code", "memory_unavailable")
+        status = "unconfirmed" if code == "write_unconfirmed" else "unavailable"
+        try:
+            async with session_factory() as db:
+                await db.execute(
+                    text(
+                        "UPDATE simulations SET memory_status = :status, "
+                        "memory_failure_code = :code, updated_at = clock_timestamp() "
+                        "WHERE id = :simulation_id"
+                    ),
+                    {
+                        "status": status,
+                        "code": code,
+                        "simulation_id": simulation.id,
+                    },
+                )
+                await db.commit()
+        except Exception:  # noqa: BLE001
+            return
 
 
 async def _fail_platform(
@@ -973,6 +1080,7 @@ async def _finish_run(
             return final
         await worker_service._finish(db, claim, 4, status=status, reason=reason)
         await db.commit()
+    await _ensure_memory_sync_job(session_factory, simulation_id=simulation.id)
     cleanup_code = await _cleanup_runtime(config, simulation.id, failures)
     if cleanup_code:
         async with session_factory() as db:
@@ -981,6 +1089,35 @@ async def _finish_run(
             )
             await db.commit()
     return status
+
+
+async def _ensure_memory_sync_job(
+    session_factory: worker_service.SessionFactory, *, simulation_id: uuid.UUID
+) -> None:
+    memory_config = memory_store.MemoryConfig.from_env()
+    if not memory_config.enabled:
+        return
+    try:
+        async with session_factory() as db:
+            simulation = await simulation_store.get_simulation_for_run(
+                db,
+                run_id=(
+                    await db.execute(
+                        text("SELECT run_id FROM simulations WHERE id = :id"),
+                        {"id": simulation_id},
+                    )
+                ).scalar_one(),
+            )
+            await memory_store.maybe_create_sync_job(
+                db, simulation=simulation, config=memory_config
+            )
+            await db.commit()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "记忆同步任务创建失败 simulation=%s code=%s",
+            simulation_id,
+            type(exc).__name__,
+        )
 
 
 async def _publish(

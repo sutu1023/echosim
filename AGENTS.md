@@ -163,6 +163,17 @@ make user EMAIL=a@example.com  # 从标准输入读取密码，创建/更新账�
 - `worker-simulation` 镜像以 `echosim-engine:dev` 为基础复用已验证的引擎依赖，只额外安装 app 运行时依赖；其四阶段基线必须可由 `make simulation-worker-check` 重跑，结果写入 `runtime/simulation-worker/baseline.json`。默认 `make up` 不构建、不启用该镜像；启用入口统一为 `make up SIMULATION=1`。
 - 运行接口复用项目鉴权与归属：匿名 401 且不访问运行数据，他人项目与不存在项目统一 404 `项目不存在`，他人/不存在运行 404 `运行不存在`，停库 503 且不清除 Cookie。
 
+## 时序记忆与图谱更新
+
+- 运行时记忆图谱 MUST 按 `simulationId` 独立绑定；同一冻结选择重跑得到新的运行图谱与 episode 命名空间，旧运行可读。运行图 MUST NOT 复用项目证据图谱、旧 build 图谱或验收专用图谱。
+- 每条已确认行动 MUST 在同一记账事务写入一条 `simulation_memory_entries` 与一条 episode 计划，保存实际 `actionId`、该轮实际提交的 `run_events.seq`、`roundIndex`、`simulatedAt` 与 `memoryId`。同一轮多条行动共享事件序号，但各自可回链；重复读回复用原行动与幂等键。
+- 按轮图 MUST 以 `round_index <= R` 截断；角色开始第 R 轮前 MUST 只读取同一运行、同一平台、`round_index < R` 的记忆与冻结材料事实。读取标识 MUST 写入轮次计划/引擎请求与 `simulation_action_memory_reads`，查询 API 有结果不能替代执行入口证据。
+- 只有 `processed` 的 episode 才能贡献运行图节点/边；材料事实、角色发言与推演结果 MUST 分别保留来源。运行图 MUST NOT 写入或改写 `graph_snapshots`/`graph_nodes`/`graph_edges`/`graph_evidence`。
+- 图服务慢或不可达 MUST NOT 阻断另一平台或下一轮行动；`advance` 只创建/复用可恢复的 `simulation.memory` 任务，MUST NOT 同步等待投影。记忆状态 MUST 区分 `pending`、`syncing`、`complete`、`partial`、`unconfirmed`、`unavailable`、`unconfigured`，且 MUST NOT 改写运行终态、动作、轮次或计数。
+- episode 写入前 MUST 持久化 `in_flight` 与 `attempts`；响应丢失/中断后 MUST 先按 `simulationId`、`actionId`、`memoryId`、幂等键与内容哈希查账，命中只补记 UUID，MUST NOT 换键重写；预算耗尽保留 `write_unconfirmed` 可见状态，不贡献节点/边，也不进入角色读取。离线 provider MUST 独立保留已受理记录，使“provider 已受理、本地未保存 UUID”的接手可核对原 UUID，而不是把本地行当成 provider 事实。
+- `simulation.memory` 任务 MUST 固定 `bind`、`sync`、`publish` 三步，复用现有租约、步骤事务与终态唯一性；活动任务并发重试 MUST 返回同一任务，终态后允许同一 `simulationId` 新建任务并保留历史。记忆任务 MUST NOT 创建或修改行动、轮次、平台计数或运行终态。
+- 默认启动、默认 `make verify` 与 CI MUST 零真实模型/Zep 外呼；Change 10 专属验收使用 stub 图谱与替身引擎，真实 Zep 只由开发者显式配置并单独记录证据。私有 25 页报告只留在仓库外作人工样例。
+
 ## 引擎接入与真实联调
 
 - `.env.example` 的 `replace-with-*`、`*.example.invalid` 与全零 UUID 必须按“未配置”处理；`make smoke-live` 不得自动复制 `.env`，避免占位值触发外部调用。

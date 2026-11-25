@@ -122,7 +122,14 @@ def create_app(web_dist_dir: Path | None = None) -> FastAPI:
     async def handle_simulation_conflict(
         _: Request, exc: SimulationConflict
     ) -> JSONResponse:
-        status = 422 if exc.code == "selection_invalid" else 409
+        if exc.code in {"round_invalid", "platform_invalid"}:
+            status = 400
+        elif exc.code in {"selection_invalid", "memory_unconfigured"}:
+            status = 422
+        elif exc.code == "round_not_available":
+            status = 409
+        else:
+            status = 409
         return JSONResponse(
             {"detail": exc.message, "code": exc.code}, status_code=status
         )

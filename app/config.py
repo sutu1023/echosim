@@ -155,6 +155,17 @@ class Settings(BaseSettings):
     simulation_engine_command: str = ""
     simulation_engine_runtime: str = "/out"
     simulation_keep_runtime: bool = False
+    simulation_memory_provider: str = "auto"
+    simulation_memory_max_refs: int = 20
+    simulation_memory_max_nodes: int = 2000
+    simulation_memory_max_edges: int = 4000
+    simulation_memory_index_timeout_seconds: float = 30.0
+    simulation_memory_processing_timeout_seconds: float = 60.0
+    simulation_memory_retry_budget_seconds: float = 120.0
+    simulation_memory_batch_size: int = 20
+    simulation_memory_accept_pause_seconds: float = 0.0
+    simulation_memory_sync_pause_seconds: float = 0.0
+    simulation_memory_fault: str = ""
     worker_run_kinds: str = ""
     worker_simulation_engine: str = ""
     smoke_live_total_timeout_seconds: float = DEFAULT_SMOKE_LIVE_TOTAL_TIMEOUT_SECONDS

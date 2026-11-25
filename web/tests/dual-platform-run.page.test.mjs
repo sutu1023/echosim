@@ -159,11 +159,144 @@ function simulation(overrides = {}) {
     ],
     counts: { total: 4, byAction: { create_post: 2, repost: 1, create_comment: 1 } },
     actions: { items: ACTIONS, nextAfter: 2 },
+    memory: {
+      status: 'complete',
+      pendingEpisodes: 0,
+      unconfirmedEpisodes: 0,
+      lastSyncedRound: 2,
+      reason: null,
+      memoryJobId: null,
+    },
     canStop: true,
     createdAt: '2026-11-24T13:00:00Z',
     updatedAt: '2026-11-24T15:00:00Z',
     finishedAt: null,
     ...overrides,
+  }
+}
+
+function memoryView(round = 2, status = 'complete') {
+  const source = {
+    memoryId: 'memory-2',
+    actionId: 'action-2',
+    facet: 'simulation_result',
+    episodeId: 'episode-2',
+    platformKey: 'platform_b',
+    roundIndex: 2,
+    simulatedAt: '2026-11-24T14:00:00Z',
+    sourceEventSeq: 6,
+    actorRoleId: 'role-2',
+    actorRoleName: '校友李某',
+    nativeAction: 'create_comment',
+    content: '回应主题：建议增加备用车。',
+  }
+  return {
+    runId: RUN,
+    round,
+    platform: 'platform_b',
+    cutoff: {
+      round,
+      availableMaxRound: 2,
+      platforms: { platform_a: { completed: 2 }, platform_b: { completed: 1 } },
+    },
+    status: {
+      status,
+      pendingEpisodes: status === 'complete' ? 0 : 1,
+      unconfirmedEpisodes: status === 'unconfirmed' ? 1 : 0,
+      lastSyncedRound: round,
+      reason: status === 'unavailable' ? 'memory_unavailable' : null,
+      memoryJobId: 'memory-job-1',
+    },
+    material: {
+      snapshotId: SNAPSHOT,
+      nodes: [{
+        key: 'material-1',
+        nodeType: 'entity',
+        label: '接驳车',
+        origin: 'material',
+        summary: '材料事实',
+        sources: [{
+          memoryId: 'material-source-1',
+          actionId: 'material-source-1',
+          facet: 'simulation_result',
+          episodeId: null,
+          platformKey: 'platform_b',
+          roundIndex: 1,
+          simulatedAt: null,
+          sourceEventSeq: 1,
+          documentName: '原创接驳车小材料.txt',
+          pageNo: 3,
+          paragraphStart: null,
+          sourceStart: 0,
+          sourceEnd: 5,
+          quote: '接驳车',
+          locator: { kind: 'pdf', pageNo: 3, url: '/api/projects/project-1/documents/doc-1/file#page=3' },
+        }],
+        sourceCount: 1,
+        firstRound: 1,
+        lastRound: 1,
+      }],
+      edges: [],
+    },
+    runtime: {
+      nodes: round >= 2 && status === 'complete'
+        ? [{
+            key: 'role:校友李某',
+            nodeType: 'role',
+            label: `校友李某 R${round}`,
+            origin: 'role',
+            summary: `R${round} 校友李某`,
+            sources: [source],
+            sourceCount: 1,
+            firstRound: 2,
+            lastRound: 2,
+          }]
+        : [],
+      edges: round >= 2 && status === 'complete'
+        ? [{
+            key: 'edge-1',
+            edgeType: 'ACTS_ON_CREATE_COMMENT',
+            label: 'create_comment',
+            origin: 'simulation',
+            summary: '校友李某 在 reddit 执行 create_comment',
+            sourceKey: 'role:校友李某',
+            targetKey: 'platform:reddit',
+            sources: [source],
+            sourceCount: 1,
+            firstRound: 2,
+            lastRound: 2,
+          }]
+        : [],
+    },
+    entries: round >= 2
+      ? [{
+          memoryId: 'memory-2',
+          actionId: 'action-2',
+          platformKey: 'platform_b',
+          roundIndex: 2,
+          actionSeq: 2,
+          simulatedAt: '2026-11-24T14:00:00Z',
+          sourceEventSeq: 6,
+          actorRoleId: 'role-2',
+          actorRoleName: '校友李某',
+          nativeAction: 'create_comment',
+          speechText: '回应主题：建议增加备用车。',
+          targetActionId: 'action-1',
+          targetEngineRecordId: 'post:1',
+          episodeId: 'episode-2',
+          graphState: 'processed',
+          writeOutcome: 'accepted',
+          facets: ['role_speech', 'simulation_result'],
+          memoryReads: [{
+            memoryId: 'memory-1',
+            roundIndex: 1,
+            episodeId: 'episode-1',
+            actorRoleName: '张同学',
+            speechText: '第 1 轮原始发言',
+            nativeAction: 'create_post',
+          }],
+        }]
+      : [],
   }
 }
 
@@ -190,6 +323,14 @@ function defaultHandler(overrides = {}) {
   return (url, call) => {
     if (url.endsWith(`/preparations/${PREP}`)) {
       return jsonResponse({ preparation: preparation() })
+    }
+    if (url.includes('/memory')) {
+      if (url.includes('/memory/retry')) {
+        return jsonResponse({ runId: RUN, memoryJobId: 'memory-job-1', created: false }, 200)
+      }
+      const roundMatch = url.match(/[?&]round=(\d+)/)
+      const round = roundMatch ? Number(roundMatch[1]) : 2
+      return jsonResponse(memoryView(round, overrides.memoryStatus || 'complete'))
     }
     if (url.includes('/actions')) {
       const runId = url.split('/simulations/')[1].split('/')[0]
@@ -374,6 +515,14 @@ test('开始 B、停止 B 后点回 A，无需刷新即恢复 A 的计数与行�
     if (url.endsWith(`/preparations/${PREP}`)) {
       return jsonResponse({ preparation: preparation() })
     }
+    if (url.includes('/memory')) {
+      if (url.includes('/memory/retry')) {
+        return jsonResponse({ runId: RUN, memoryJobId: 'memory-job-1', created: false }, 200)
+      }
+      const roundMatch = url.match(/[?&]round=(\d+)/)
+      const round = roundMatch ? Number(roundMatch[1]) : 2
+      return jsonResponse(memoryView(round, overrides.memoryStatus || 'complete'))
+    }
     if (url.includes('/actions')) {
       const runId = url.split('/simulations/')[1].split('/')[0]
       return jsonResponse({
@@ -465,5 +614,217 @@ test('开始 B、停止 B 后点回 A，无需刷新即恢复 A 的计数与行�
   assert.match(wrapper.text(), /A 运行的帖子/)
   assert.match(wrapper.text(), /3 动作/)
   assert.doesNotMatch(wrapper.text(), /B 运行的帖子/)
+  wrapper.unmount()
+})
+
+
+test('第三阶段按轮显示运行时记忆并可回到原行动', async () => {
+  const { wrapper } = await mount(defaultHandler())
+  assert.match(wrapper.text(), /运行时序记忆/)
+  assert.match(wrapper.text(), /材料事实/)
+  assert.match(wrapper.text(), /角色发言/)
+  assert.match(wrapper.text(), /推演结果/)
+  const sourceButton = wrapper
+    .findAll('button[data-action="memory-source"]')
+    .find((item) => item.text().includes('R2'))
+  assert.ok(sourceButton, '应存在第 2 轮来源')
+  await sourceButton.trigger('click')
+  await flush(2)
+  const source = wrapper.find('[data-field="memory-source"]')
+  assert.ok(source.exists())
+  assert.match(source.text(), /校友李某/)
+  assert.match(source.text(), /action-2/)
+  assert.match(source.text(), /#6/)
+  const actionRow = wrapper.find('.action-row[data-action-id="action-2"]')
+  assert.ok(actionRow.exists())
+  assert.match(actionRow.classes().join(' '), /action-row-active/)
+  assert.match(wrapper.find('[data-field="memory-target"]').text(), /张同学/)
+  assert.match(wrapper.find('[data-field="memory-reads"]').text(), /第 1 轮原始发言/)
+  assert.ok(wrapper.find('[data-view="memory-canvas"]').exists())
+  assert.ok(wrapper.find('[data-field="memory-material"]').exists())
+  assert.ok(wrapper.find('[data-action="open-material-source"]').exists())
+  wrapper.unmount()
+})
+
+test('切回第 1 轮或切到平台 A 会收起第 2 轮平台 B 详情并清除高亮', async () => {
+  const { wrapper } = await mount(defaultHandler())
+  const sourceButton = wrapper
+    .findAll('button[data-action="memory-source"]')
+    .find((item) => item.text().includes('R2'))
+  await sourceButton.trigger('click')
+  await flush(2)
+  assert.ok(wrapper.find('[data-field="memory-source"]').exists())
+  assert.match(wrapper.find('.action-row[data-action-id="action-2"]').classes().join(' '), /action-row-active/)
+  await wrapper.find('[data-action="memory-round"]').setValue('1')
+  await flush(5)
+  assert.equal(wrapper.find('[data-field="memory-source"]').exists(), false)
+  assert.doesNotMatch(wrapper.find('.action-row[data-action-id="action-2"]').classes().join(' '), /action-row-active/)
+  await wrapper.find('[data-action="memory-round"]').setValue('2')
+  await flush(5)
+  await wrapper
+    .findAll('button[data-action="memory-source"]')
+    .find((item) => item.text().includes('R2'))
+    .trigger('click')
+  await flush(2)
+  await wrapper.find('[data-action="memory-platform"]').setValue('platform_a')
+  await flush(5)
+  assert.equal(wrapper.find('[data-field="memory-source"]').exists(), false)
+  assert.doesNotMatch(wrapper.find('.action-row[data-action-id="action-2"]').classes().join(' '), /action-row-active/)
+  wrapper.unmount()
+})
+
+test('第 1 轮图不显示第 2 轮来源，第 2 轮图显示', async () => {
+  const handler = (url, call) => {
+    if (url.includes('/memory')) {
+      const roundMatch = url.match(/[?&]round=(\d+)/)
+      const round = roundMatch ? Number(roundMatch[1]) : 2
+      return jsonResponse(memoryView(round))
+    }
+    return defaultHandler()(url, call)
+  }
+  const { wrapper, calls, router } = await mount(handler, `/projects/${PROJECT}/workbench/dual-platform-run?layout=split&lang=zh&build=${BUILD}&preparation=${PREP}&selection=${SELECTION}&run=${RUN}&round=1`)
+  await flush(10)
+  assert.match(wrapper.text(), /这一轮还没有可显示的记忆/)
+  await wrapper.find('[data-action="memory-round"]').setValue('2')
+  await flush(10)
+  assert.match(wrapper.text(), /校友李某/)
+  assert.ok(
+    calls.some(
+      (call) =>
+        call.url.includes('/memory') &&
+        call.url.includes('round=2'),
+    ),
+  )
+  assert.equal(router.currentRoute.value.query.layout, 'split')
+  assert.equal(router.currentRoute.value.query.lang, 'zh')
+  wrapper.unmount()
+})
+
+test('第 3 轮先返回时，第 2 轮迟到响应不得覆盖当前轮次', async () => {
+  let releaseRound2
+  const round2 = new Promise((resolve) => {
+    releaseRound2 = resolve
+  })
+  const detailAllRounds = simulation({
+    platforms: [
+      { platformKey: 'platform_a', nativePlatform: 'twitter', status: 'running', roundsCompleted: 3, roundsTotal: 3, actionCount: 3, byAction: { create_post: 2, repost: 1 }, failure: null, simulatedAt: '2026-11-24T16:00:00Z' },
+      { platformKey: 'platform_b', nativePlatform: 'reddit', status: 'running', roundsCompleted: 3, roundsTotal: 3, actionCount: 1, byAction: { create_comment: 1 }, failure: null, simulatedAt: '2026-11-24T16:00:00Z' },
+    ],
+  })
+  const handler = (url, call) => {
+    if (url.includes('/memory')) {
+      const roundMatch = url.match(/[?&]round=(\d+)/)
+      const round = roundMatch ? Number(roundMatch[1]) : 1
+      if (round === 2) {
+        return round2.then(() => jsonResponse(memoryView(2)))
+      }
+      return jsonResponse(memoryView(round))
+    }
+    if (url.includes('/actions')) {
+      return jsonResponse({ runId: RUN, items: ACTIONS, nextAfter: 2 })
+    }
+    if (url.endsWith(`/simulations/${RUN}/stop`)) {
+      return jsonResponse({ cancelApplied: false, simulation: detailAllRounds })
+    }
+    if (url.match(/\/simulations\/[^/?]+$/)) {
+      return jsonResponse({ simulation: detailAllRounds })
+    }
+    if (url.includes('/simulations?')) {
+      return jsonResponse({
+        simulations: [{ runId: RUN, selectionId: SELECTION, engine: 'double', phase: 'running', rounds: 3, terminal: false, failedPlatforms: [], createdAt: '', finishedAt: null }],
+        simulation: detailAllRounds,
+      })
+    }
+    return defaultHandler()(url, call)
+  }
+  const { wrapper } = await mount(handler, `/projects/${PROJECT}/workbench/dual-platform-run?layout=split&lang=zh&build=${BUILD}&preparation=${PREP}&selection=${SELECTION}&run=${RUN}&round=1`)
+  await flush(10)
+  await wrapper.find('[data-action="memory-round"]').setValue('2')
+  await flush(2)
+  await wrapper.find('[data-action="memory-round"]').setValue('3')
+  await flush(10)
+  assert.match(wrapper.text(), /校友李某 R3/)
+  releaseRound2()
+  await flush(10)
+  assert.match(wrapper.text(), /校友李某 R3/)
+  assert.doesNotMatch(wrapper.text(), /校友李某 R2/)
+  wrapper.unmount()
+})
+
+test('推演结束后保持打开的页面自动更新记忆完成与节点', async () => {
+  let memoryCalls = 0
+  const terminal = simulation({ phase: 'succeeded', terminal: true, canStop: false })
+  const handler = (url, call) => {
+    if (url.includes('/memory')) {
+      memoryCalls += 1
+      return jsonResponse(memoryView(2, memoryCalls === 1 ? 'pending' : 'complete'))
+    }
+    if (url.includes('/actions')) {
+      return jsonResponse({ runId: RUN, items: ACTIONS, nextAfter: 2 })
+    }
+    if (url.match(/\/simulations\/[^/?]+$/)) {
+      return jsonResponse({ simulation: terminal })
+    }
+    if (url.includes('/simulations?')) {
+      return jsonResponse({
+        simulations: [{ runId: RUN, selectionId: SELECTION, engine: 'double', phase: 'succeeded', rounds: 3, terminal: true, failedPlatforms: [], createdAt: '', finishedAt: null }],
+        simulation: terminal,
+      })
+    }
+    return defaultHandler()(url, call)
+  }
+  const { wrapper } = await mount(handler, `/projects/${PROJECT}/workbench/dual-platform-run?layout=split&lang=zh&build=${BUILD}&preparation=${PREP}&selection=${SELECTION}&run=${RUN}&round=2`)
+  await flush(10)
+  assert.match(wrapper.text(), /记忆待同步/)
+  assert.doesNotMatch(wrapper.text(), /校友李某 R2/)
+  await new Promise((resolve) => setTimeout(resolve, 850))
+  await flush(10)
+  assert.match(wrapper.text(), /记忆已完成/)
+  assert.match(wrapper.text(), /校友李某 R2/)
+  assert.equal(wrapper.find('[data-action="memory-round"]').element.value, '2')
+  wrapper.unmount()
+})
+
+test('推演结束后的待确认状态也会自动显示', async () => {
+  let memoryCalls = 0
+  const terminal = simulation({ phase: 'succeeded', terminal: true, canStop: false })
+  const handler = (url, call) => {
+    if (url.includes('/memory')) {
+      memoryCalls += 1
+      return jsonResponse(memoryView(2, memoryCalls === 1 ? 'pending' : 'unconfirmed'))
+    }
+    if (url.includes('/actions')) {
+      return jsonResponse({ runId: RUN, items: ACTIONS, nextAfter: 2 })
+    }
+    if (url.match(/\/simulations\/[^/?]+$/)) {
+      return jsonResponse({ simulation: terminal })
+    }
+    if (url.includes('/simulations?')) {
+      return jsonResponse({
+        simulations: [{ runId: RUN, selectionId: SELECTION, engine: 'double', phase: 'succeeded', rounds: 3, terminal: true, failedPlatforms: [], createdAt: '', finishedAt: null }],
+        simulation: terminal,
+      })
+    }
+    return defaultHandler()(url, call)
+  }
+  const { wrapper } = await mount(handler, `/projects/${PROJECT}/workbench/dual-platform-run?layout=split&lang=zh&build=${BUILD}&preparation=${PREP}&selection=${SELECTION}&run=${RUN}&round=2`)
+  await flush(10)
+  assert.match(wrapper.text(), /记忆待同步/)
+  await new Promise((resolve) => setTimeout(resolve, 850))
+  await flush(10)
+  assert.match(wrapper.text(), /写入待确认/)
+  wrapper.unmount()
+})
+
+test('记忆同步不可用时显示重试入口且不隐藏动作流', async () => {
+  const { wrapper, calls } = await mount(
+    defaultHandler({ memoryStatus: 'unavailable' }),
+  )
+  assert.match(wrapper.text(), /记忆同步暂不可用/)
+  const retry = wrapper.find('[data-action="memory-retry"]')
+  assert.ok(retry.exists())
+  await retry.trigger('click')
+  await flush(6)
+  assert.ok(calls.some((call) => call.url.includes('/memory/retry')))
   wrapper.unmount()
 })

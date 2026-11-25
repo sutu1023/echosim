@@ -393,6 +393,7 @@ class PostgresMigrationTests(unittest.IsolatedAsyncioTestCase):
                 "0012_environment_profile_topics",
                 "0013_dual_platform_runs",
                 "0014_simulation_budget_and_cleanup",
+                "0015_temporal_memory",
             ],
         )
         self.assertEqual(rerun, [])
@@ -473,6 +474,7 @@ class PostgresMigrationTests(unittest.IsolatedAsyncioTestCase):
                 "0012_environment_profile_topics",
                 "0013_dual_platform_runs",
                 "0014_simulation_budget_and_cleanup",
+                "0015_temporal_memory",
             ],
         )
         self.assertEqual(rerun, [])

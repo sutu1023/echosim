@@ -196,6 +196,17 @@ echosim_session=<随机令牌>; HttpOnly; Path=/; SameSite=lax
 | `SIMULATION_ENGINE_RUNTIME` | `/out` | 引擎命令看到的运行目录 |
 | `SIMULATION_PLATFORM_DELAY_MS` | 空 | 仅验收：`platform_a:700` 让某平台变慢 |
 | `SIMULATION_CLEANUP_FAIL` | 空 | 仅验收：注入清理失败 |
+| `SIMULATION_MEMORY_PROVIDER` | `auto` | 运行时记忆 provider：`auto` / `stub` / `zep` / `unconfigured` |
+| `SIMULATION_MEMORY_MAX_REFS` | `20` | 每次行动最多注入的前序记忆条数 |
+| `SIMULATION_MEMORY_MAX_NODES` | `2000` | 单次运行图节点上限 |
+| `SIMULATION_MEMORY_MAX_EDGES` | `4000` | 单次运行图边上限 |
+| `SIMULATION_MEMORY_INDEX_TIMEOUT_SECONDS` | `30` | 记忆 episode 索引确认预算（秒） |
+| `SIMULATION_MEMORY_PROCESSING_TIMEOUT_SECONDS` | `60` | 记忆 episode 处理预算（秒） |
+| `SIMULATION_MEMORY_RETRY_BUDGET_SECONDS` | `120` | 记忆同步任务单次重试预算（秒） |
+| `SIMULATION_MEMORY_BATCH_SIZE` | `20` | 每次记忆同步处理的 episode 批次 |
+| `SIMULATION_MEMORY_ACCEPT_PAUSE_SECONDS` | `0` | 仅验收：provider 已受理后暂停，放大本地未保存 UUID 的窗口 |
+| `SIMULATION_MEMORY_SYNC_PAUSE_SECONDS` | `0` | 仅验收：记忆同步开始时暂停，验证不阻塞推演 |
+| `SIMULATION_MEMORY_FAULT` | 空 | 仅验收：记忆 provider 故障注入 |
 | `WORKER_RUN_KINDS` | 空（全部） | worker 可领取的 run 类型 |
 | `WORKER_SIMULATION_ENGINE` | 空（取 `SIMULATION_ENGINE`） | worker 领取的模拟引擎模式 |
 
@@ -452,6 +463,12 @@ ENVIRONMENT_ALLOW_STUB=true
 - worker 中断后由新 worker 接手：能归属的原生行先补记再继续，可证明未执行的动作允许重发，无法确认时以 `action_unconfirmed` 结束并保留证据。运行目录位于持久卷，容器重建不会丢失已写入的原生记录。
 - 单平台失败不阻断另一平台：运行以 `failed` 结束并列出 `failedPlatforms`，另一平台的行动流、计数与日志保持可读。
 
+### 运行时序记忆
+
+第三阶段在行动流之外提供按轮运行图：`GET /api/projects/{id}/simulations/{runId}/memory?round=R&platform=` 返回“第 R 轮结束后的图”，按 `round_index <= R` 截断；角色开始第 R 轮前只读取同一运行、同一平台、`round_index < R` 的记忆与冻结材料引用。每条已确认行动在记账事务内生成稳定 `memoryId` 与 episode 计划，行动、轮次、模拟时间、原事件序号与 `episodeUuid` 可互相追溯；材料事实、角色发言与推演结果分别保留来源。运行级图谱按 `simulationId` 独立绑定，同一冻结选择重跑不会共享记忆。
+
+每轮记账后只创建/复用可恢复的 `simulation.memory` 任务，不等待投影，因此图服务慢或暂停时下一轮与另一平台仍可推进。图服务暂不可达时动作与本地记忆继续提交，页面显示 `memory_status=unavailable|unconfirmed|pending` 与待同步数；`POST /api/projects/{id}/simulations/{runId}/memory/retry` 会复用活动记忆任务，终态后允许同一 `simulationId` 新建任务并从最早未完成 episode 继续。`episode.add` 响应丢失时先按 `actionId`/`memoryId`/内容哈希查账，命中只补记 UUID，不换键重写。默认配置在无 Zep 且未显式选择 stub 时为 `unconfigured`，不发起外部调用；默认验收与 CI 使用 stub 图谱。
+
 ### 接口
 
 | 方法 | 路径 | 说明 | 成功 | 失败 |
@@ -460,6 +477,8 @@ ENVIRONMENT_ALLOW_STUB=true
 | GET | `/api/projects/{id}/simulations?selection=` | 运行列表与当前运行 | `200` | 401 / 404 / 503 |
 | GET | `/api/projects/{id}/simulations/{runId}` | 时钟、平台统计、计数与首屏动作 | `200` | 401 / 404 `运行不存在` / 503 |
 | GET | `/api/projects/{id}/simulations/{runId}/actions` | 按 `actionSeq` 分页读取动作与目标原帖 | `200` | 400 游标 / 404 / 401 / 503 |
+| GET | `/api/projects/{id}/simulations/{runId}/memory` | 第 R 轮结束后的运行图、来源与记忆状态 | `200` | 400 `round_invalid`/`platform_invalid` / 409 `round_not_available` / 401 / 404 / 503 |
+| POST | `/api/projects/{id}/simulations/{runId}/memory/retry` | 确保记忆同步任务 | `202` 新建 / `200` 复用 | 401 / 404 / 422 `memory_unconfigured` / 503 |
 | POST | `/api/projects/{id}/simulations/{runId}/stop` | 停止运行；终态幂等 | `200` | 401 / 404 / 503 |
 
 运行事件复用任务 SSE：`GET /api/projects/{id}/jobs/{jobId}/events`，每平台每轮一条进度事件，终态事件计入连续 `seq`。
@@ -475,7 +494,7 @@ make simulate-live   # 需要 ECHOSIM_LIVE_EMAIL / ECHOSIM_LIVE_PASSWORD /
 
 该命令复用同一条“普通启动 API → worker → 两个平台原生动作 → 同一 runId 的详情与计数”链路，把每轮交给隔离引擎镜像执行，产出 `runtime/simulation-live/report.json`（`mode=live`、`engine=oasis`、`localOasisActions>0`、`externalModelCalls=0`、`dirty`、`tested_sha`）。脚本会断言冻结 6 个角色、两平台各 3 轮且各有原生动作，并逐类比对引擎与服务端计数；缺一个引擎库或计数不一致时以非零退出。真实运行默认只执行原生手动动作，不调用外部模型。
 
-使用专用 worker 时：`make up SIMULATION=1` 会额外启动 `worker-simulation`（`python -m app.simulation_worker`，只领取 `simulation.run` 的 oasis 运行），再执行 `ECHOSIM_LIVE_MODE=worker make simulate-live`。前置条件：栈的建图/画像已配置（离线走查用 stub）、app 允许 `SIMULATION_ALLOW_OASIS=true`、shell 导出与栈一致的 `COMPOSE_PROJECT_NAME`；command 模式下宿主机 Python 需安装 `app/requirements-dev.txt`（worker 由脚本拉起），并传入 `PYTHON=.venv/bin/python`。`make simulation-worker` 构建该镜像，`make simulation-worker-check` 在镜像内跑“解析 → 安装 → 导入 → 最小运行”四阶段并写入 `runtime/simulation-worker/baseline.json`。
+使用专用 worker 时：`make up SIMULATION=1` 会额外启动 `worker-simulation`（`python -m app.simulation_worker`，领取 `simulation.run` 的 oasis 运行与 `simulation.memory` 记忆同步任务），再执行 `ECHOSIM_LIVE_MODE=worker make simulate-live`。前置条件：栈的建图/画像已配置（离线走查用 stub）、app 允许 `SIMULATION_ALLOW_OASIS=true`、shell 导出与栈一致的 `COMPOSE_PROJECT_NAME`；command 模式下宿主机 Python 需安装 `app/requirements-dev.txt`（worker 由脚本拉起），并传入 `PYTHON=.venv/bin/python`。`make simulation-worker` 构建该镜像，`make simulation-worker-check` 在镜像内跑“解析 → 安装 → 导入 → 最小运行”四阶段并写入 `runtime/simulation-worker/baseline.json`。
 
 可选打包方式：`make up SIMULATION=1`（等价于 `docker compose --profile simulation up -d`）。该镜像以 `echosim-engine:dev` 为基础，复用已在该镜像中验证过的 camel-oasis 组合；默认栈不构建、不启用它。
 

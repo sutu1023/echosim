@@ -132,6 +132,8 @@ class PlannedAction:
     topic: str
     target_action_key: str | None = None
     target_engine_record_id: str | None = None
+    memory_refs: tuple[Mapping[str, Any], ...] = ()
+    material_refs: tuple[Mapping[str, Any], ...] = ()
 
     @property
     def has_content(self) -> bool:
@@ -402,6 +404,8 @@ def plan_round(
     run_marker: str,
     known_posts: Sequence[KnownPost],
     actions_per_round: int = DEFAULT_ACTIONS_PER_ROUND,
+    memory_refs: Sequence[Mapping[str, Any]] = (),
+    material_refs: Sequence[Mapping[str, Any]] = (),
 ) -> list[PlannedAction]:
     """确定性规划一轮动作；替身与真实引擎共用同一份计划。"""
     if platform_key not in PLATFORM_MAPPING:
@@ -439,6 +443,12 @@ def plan_round(
                 native_action = cycle[
                     (role.order_index + round_index + position) % len(cycle)
                 ]
+                # 冻结 3 轮内保证话题社区覆盖评论与投票，便于按轮回看。
+                if platform_key == "platform_b" and posts and position == 0:
+                    if round_index == 2:
+                        native_action = "create_comment"
+                    elif round_index == 3:
+                        native_action = "dislike_post"
                 candidate = posts[
                     (role.order_index + round_index + position) % len(posts)
                 ]
@@ -475,6 +485,8 @@ def plan_round(
             topic=topic,
             target_action_key=target.action_key if target else None,
             target_engine_record_id=target.engine_record_id if target else None,
+            memory_refs=tuple(dict(item) for item in memory_refs),
+            material_refs=tuple(dict(item) for item in material_refs),
         )
         if len(action.content) > CONTENT_MAX_CHARS:
             raise DuetContractError("selection_invalid", "动作正文超出上限")

@@ -213,6 +213,33 @@ export interface WorkbenchMessages {
     failedPlatform: string
     countMismatch: string
     noRuns: string
+    memoryTitle: string
+    memoryIntro: string
+    memoryRound: string
+    memoryPlatform: string
+    memoryAllPlatforms: string
+    memoryStatus: string
+    memoryLegend: string
+    memoryPending: string
+    memoryUnconfirmed: string
+    memoryRetry: string
+    memoryRetrying: string
+    memoryEmpty: string
+    memoryNodes: string
+    memoryEdges: string
+    memorySources: string
+    memoryAction: string
+    memorySourceAction: string
+    memoryUnavailable: string
+    memoryUnconfigured: string
+    memoryCanvas: string
+    memoryMaterial: string
+    memoryOpenSource: string
+    memorySourceFailed: string
+    memoryTarget: string
+    memoryTargetNone: string
+    memoryReads: string
+    memoryReadsEmpty: string
     errorCodes: Record<string, string>
   }
   materials: {
@@ -608,6 +635,33 @@ const messages: Record<Lang, WorkbenchMessages> = {
       failedPlatform: '该平台失败',
       countMismatch: '页面计数与服务端记录不一致，已按服务端刷新。',
       noRuns: '该冻结选择还没有运行记录。',
+      memoryTitle: '运行时序记忆',
+      memoryIntro: '按轮查看运行图；材料事实、角色发言与推演结果分别保留来源。',
+      memoryRound: '查看第几轮结束后的图',
+      memoryPlatform: '平台',
+      memoryAllPlatforms: '两个平台',
+      memoryStatus: '记忆状态',
+      memoryLegend: '来源图例',
+      memoryPending: '待同步',
+      memoryUnconfirmed: '写入待确认（不会换键重写）',
+      memoryRetry: '重试记忆同步',
+      memoryRetrying: '正在重试…',
+      memoryEmpty: '这一轮还没有可显示的记忆。',
+      memoryNodes: '节点',
+      memoryEdges: '关系',
+      memorySources: '来源',
+      memoryAction: '回到原行动',
+      memorySourceAction: '来源行动',
+      memoryUnavailable: '记忆同步暂不可用，动作与本地记忆仍可查看。',
+      memoryUnconfigured: '当前未配置图谱，未发起外部调用。',
+      memoryCanvas: '运行图',
+      memoryMaterial: '材料来源',
+      memoryOpenSource: '打开原文位置',
+      memorySourceFailed: '原文读取失败，请重试。',
+      memoryTarget: '回复了哪条原帖',
+      memoryTargetNone: '这条来源没有可显示的原帖目标。',
+      memoryReads: '执行时读取的前序记忆',
+      memoryReadsEmpty: '执行时没有读取前序行动记忆。',
       errorCodes: {
         selection_missing: '缺少已确认的冻结选择。',
         selection_invalid: '冻结选择数据不完整，无法开始运行。',
@@ -1057,6 +1111,33 @@ const messages: Record<Lang, WorkbenchMessages> = {
       failedPlatform: 'This platform failed',
       countMismatch: 'Page counts disagreed with the server; refreshed from the server.',
       noRuns: 'This frozen selection has no runs yet.',
+      memoryTitle: 'Runtime temporal memory',
+      memoryIntro: 'Browse the run graph by round; material facts, role speech and simulation results keep separate sources.',
+      memoryRound: 'Graph after round',
+      memoryPlatform: 'Platform',
+      memoryAllPlatforms: 'Both platforms',
+      memoryStatus: 'Memory status',
+      memoryLegend: 'Source legend',
+      memoryPending: 'pending',
+      memoryUnconfirmed: 'Write unconfirmed (no new key)',
+      memoryRetry: 'Retry memory sync',
+      memoryRetrying: 'Retrying…',
+      memoryEmpty: 'No memory is available for this round yet.',
+      memoryNodes: 'Nodes',
+      memoryEdges: 'Relations',
+      memorySources: 'Sources',
+      memoryAction: 'Back to original action',
+      memorySourceAction: 'Source action',
+      memoryUnavailable: 'Memory sync is temporarily unavailable; actions and local memory remain visible.',
+      memoryUnconfigured: 'No graph is configured; no external call was made.',
+      memoryCanvas: 'Run graph',
+      memoryMaterial: 'Material sources',
+      memoryOpenSource: 'Open source location',
+      memorySourceFailed: 'Could not read the source. Retry to continue.',
+      memoryTarget: 'Replied to',
+      memoryTargetNone: 'This source has no visible target post.',
+      memoryReads: 'Memories read before acting',
+      memoryReadsEmpty: 'No earlier action memory was read.',
       errorCodes: {
         selection_missing: 'The confirmed frozen selection is missing.',
         selection_invalid: 'The frozen selection is incomplete; the run cannot start.',
