@@ -1482,6 +1482,41 @@ async def memory_view(
     ).fetchall()
     entries = [_entry_view(row) for row in entry_rows]
     entry_by_memory = {item["memoryId"]: item for item in entries}
+    action_ids = [uuid.UUID(item["actionId"]) for item in entries]
+    if action_ids:
+        read_rows = (
+            await db.execute(
+                text(
+                    "SELECT r.action_id, r.memory_id, e.round_index AS source_round, "
+                    "r.episode_uuid, e.actor_display_name, e.speech_text, e.native_action "
+                    "FROM simulation_action_memory_reads r JOIN simulation_memory_entries e "
+                    "ON e.simulation_id = r.simulation_id AND e.id = r.memory_id "
+                    "WHERE r.simulation_id = :simulation_id "
+                    "AND r.action_id = ANY(CAST(:action_ids AS uuid[])) "
+                    "ORDER BY r.action_id, r.round_index, r.memory_id"
+                ),
+                {
+                    "simulation_id": simulation.id,
+                    "action_ids": [str(item) for item in action_ids],
+                },
+            )
+        ).fetchall()
+        reads_by_action: dict[str, list[dict[str, Any]]] = {}
+        for read in read_rows:
+            reads_by_action.setdefault(str(read.action_id), []).append(
+                {
+                    "memoryId": str(read.memory_id),
+                    "roundIndex": int(read.source_round),
+                    "episodeId": str(read.episode_uuid)
+                    if read.episode_uuid
+                    else None,
+                    "actorRoleName": read.actor_display_name,
+                    "speechText": read.speech_text or "",
+                    "nativeAction": read.native_action,
+                }
+            )
+        for entry in entries:
+            entry["memoryReads"] = reads_by_action.get(entry["actionId"], [])
 
     provenance_rows = (
         await db.execute(
@@ -1582,7 +1617,9 @@ async def memory_view(
         for row in edge_rows
         if edge_sources.get(row.edge_key)
     ]
-    material = await _material_layer(db, snapshot_id=simulation.snapshot_id)
+    material = await _material_layer(
+        db, snapshot_id=simulation.snapshot_id, project_id=simulation.project_id
+    )
     status = await memory_summary(
         db, simulation_id=simulation.id, status=simulation.memory_status
     )
@@ -1638,7 +1675,9 @@ def _entry_view(row: Any) -> dict[str, Any]:
     }
 
 
-async def _material_layer(db: AsyncSession, *, snapshot_id: uuid.UUID) -> dict[str, Any]:
+async def _material_layer(
+    db: AsyncSession, *, snapshot_id: uuid.UUID, project_id: uuid.UUID
+) -> dict[str, Any]:
     nodes = (
         await db.execute(
             text(
@@ -1661,20 +1700,41 @@ async def _material_layer(db: AsyncSession, *, snapshot_id: uuid.UUID) -> dict[s
     evidence = (
         await db.execute(
             text(
-                "SELECT target_kind, target_key, evidence_index, document_id, "
-                "chunk_index, page_no, paragraph_start, paragraph_end, source_start, "
-                "source_end, quote FROM graph_evidence WHERE snapshot_id = :snapshot_id "
-                "ORDER BY target_kind, target_key, evidence_index"
+                "SELECT g.target_kind, g.target_key, g.evidence_index, g.document_id, "
+                "g.chunk_index, g.page_no, g.paragraph_start, g.paragraph_end, "
+                "g.source_start, g.source_end, g.quote, d.kind, d.display_name "
+                "FROM graph_evidence g JOIN documents d ON d.id = g.document_id "
+                "WHERE g.snapshot_id = :snapshot_id "
+                "ORDER BY g.target_kind, g.target_key, g.evidence_index"
             ),
             {"snapshot_id": snapshot_id},
         )
     ).fetchall()
     sources: dict[tuple[str, str], list[dict[str, Any]]] = {}
     for row in evidence:
+        document_path = (
+            f"/api/projects/{project_id}/documents/{row.document_id}"
+        )
+        if str(row.kind) == "pdf":
+            page = int(row.page_no or 1)
+            locator = {
+                "kind": "pdf",
+                "pageNo": page,
+                "url": f"{document_path}/file#page={page}",
+            }
+        else:
+            locator = {
+                "kind": "text",
+                "url": f"{document_path}/source",
+                "sourceStart": int(row.source_start),
+                "sourceEnd": int(row.source_end),
+            }
         sources.setdefault((row.target_kind, row.target_key), []).append(
             {
                 "snapshotId": str(snapshot_id),
                 "documentId": str(row.document_id),
+                "documentName": row.display_name,
+                "kind": row.kind,
                 "chunkIndex": int(row.chunk_index),
                 "pageNo": int(row.page_no) if row.page_no is not None else None,
                 "paragraphStart": int(row.paragraph_start)
@@ -1686,6 +1746,7 @@ async def _material_layer(db: AsyncSession, *, snapshot_id: uuid.UUID) -> dict[s
                 "sourceStart": int(row.source_start),
                 "sourceEnd": int(row.source_end),
                 "quote": row.quote,
+                "locator": locator,
             }
         )
     return {

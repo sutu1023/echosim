@@ -455,7 +455,7 @@ onBeforeUnmount(() => {
             <span class="muted">{{ t.stage.statusPending }}</span>
           </section>
 
-          <section v-if="currentStage.id >= 3" class="wb-graph-canvas" :aria-label="t.canvas.title">
+          <section v-if="currentStage.id >= 4" class="wb-graph-canvas" :aria-label="t.canvas.title">
             <div class="graph-grid-lines" aria-hidden="true" />
             <div class="graph-copy">
               <p class="eyebrow">{{ t.canvas.summary }}</p>

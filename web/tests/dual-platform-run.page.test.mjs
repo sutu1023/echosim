@@ -207,9 +207,39 @@ function memoryView(round = 2, status = 'complete') {
       reason: status === 'unavailable' ? 'memory_unavailable' : null,
       memoryJobId: 'memory-job-1',
     },
-    material: { snapshotId: SNAPSHOT, nodes: [], edges: [] },
+    material: {
+      snapshotId: SNAPSHOT,
+      nodes: [{
+        key: 'material-1',
+        nodeType: 'entity',
+        label: '接驳车',
+        origin: 'material',
+        summary: '材料事实',
+        sources: [{
+          memoryId: 'material-source-1',
+          actionId: 'material-source-1',
+          facet: 'simulation_result',
+          episodeId: null,
+          platformKey: 'platform_b',
+          roundIndex: 1,
+          simulatedAt: null,
+          sourceEventSeq: 1,
+          documentName: '原创接驳车小材料.txt',
+          pageNo: 3,
+          paragraphStart: null,
+          sourceStart: 0,
+          sourceEnd: 5,
+          quote: '接驳车',
+          locator: { kind: 'pdf', pageNo: 3, url: '/api/projects/project-1/documents/doc-1/file#page=3' },
+        }],
+        sourceCount: 1,
+        firstRound: 1,
+        lastRound: 1,
+      }],
+      edges: [],
+    },
     runtime: {
-      nodes: round >= 2
+      nodes: round >= 2 && status === 'complete'
         ? [{
             key: 'role:校友李某',
             nodeType: 'role',
@@ -222,7 +252,7 @@ function memoryView(round = 2, status = 'complete') {
             lastRound: 2,
           }]
         : [],
-      edges: round >= 2
+      edges: round >= 2 && status === 'complete'
         ? [{
             key: 'edge-1',
             edgeType: 'ACTS_ON_CREATE_COMMENT',
@@ -257,6 +287,14 @@ function memoryView(round = 2, status = 'complete') {
           graphState: 'processed',
           writeOutcome: 'accepted',
           facets: ['role_speech', 'simulation_result'],
+          memoryReads: [{
+            memoryId: 'memory-1',
+            roundIndex: 1,
+            episodeId: 'episode-1',
+            actorRoleName: '张同学',
+            speechText: '第 1 轮原始发言',
+            nativeAction: 'create_post',
+          }],
         }]
       : [],
   }
@@ -597,9 +635,41 @@ test('第三阶段按轮显示运行时记忆并可回到原行动', async () =>
   assert.match(source.text(), /校友李某/)
   assert.match(source.text(), /action-2/)
   assert.match(source.text(), /#6/)
-  const actionRow = wrapper.find('[data-action-id="action-2"]')
+  const actionRow = wrapper.find('.action-row[data-action-id="action-2"]')
   assert.ok(actionRow.exists())
   assert.match(actionRow.classes().join(' '), /action-row-active/)
+  assert.match(wrapper.find('[data-field="memory-target"]').text(), /张同学/)
+  assert.match(wrapper.find('[data-field="memory-reads"]').text(), /第 1 轮原始发言/)
+  assert.ok(wrapper.find('[data-view="memory-canvas"]').exists())
+  assert.ok(wrapper.find('[data-field="memory-material"]').exists())
+  assert.ok(wrapper.find('[data-action="open-material-source"]').exists())
+  wrapper.unmount()
+})
+
+test('切回第 1 轮或切到平台 A 会收起第 2 轮平台 B 详情并清除高亮', async () => {
+  const { wrapper } = await mount(defaultHandler())
+  const sourceButton = wrapper
+    .findAll('button[data-action="memory-source"]')
+    .find((item) => item.text().includes('R2'))
+  await sourceButton.trigger('click')
+  await flush(2)
+  assert.ok(wrapper.find('[data-field="memory-source"]').exists())
+  assert.match(wrapper.find('.action-row[data-action-id="action-2"]').classes().join(' '), /action-row-active/)
+  await wrapper.find('[data-action="memory-round"]').setValue('1')
+  await flush(5)
+  assert.equal(wrapper.find('[data-field="memory-source"]').exists(), false)
+  assert.doesNotMatch(wrapper.find('.action-row[data-action-id="action-2"]').classes().join(' '), /action-row-active/)
+  await wrapper.find('[data-action="memory-round"]').setValue('2')
+  await flush(5)
+  await wrapper
+    .findAll('button[data-action="memory-source"]')
+    .find((item) => item.text().includes('R2'))
+    .trigger('click')
+  await flush(2)
+  await wrapper.find('[data-action="memory-platform"]').setValue('platform_a')
+  await flush(5)
+  assert.equal(wrapper.find('[data-field="memory-source"]').exists(), false)
+  assert.doesNotMatch(wrapper.find('.action-row[data-action-id="action-2"]').classes().join(' '), /action-row-active/)
   wrapper.unmount()
 })
 
@@ -678,6 +748,71 @@ test('第 3 轮先返回时，第 2 轮迟到响应不得覆盖当前轮次', as
   await flush(10)
   assert.match(wrapper.text(), /校友李某 R3/)
   assert.doesNotMatch(wrapper.text(), /校友李某 R2/)
+  wrapper.unmount()
+})
+
+test('推演结束后保持打开的页面自动更新记忆完成与节点', async () => {
+  let memoryCalls = 0
+  const terminal = simulation({ phase: 'succeeded', terminal: true, canStop: false })
+  const handler = (url, call) => {
+    if (url.includes('/memory')) {
+      memoryCalls += 1
+      return jsonResponse(memoryView(2, memoryCalls === 1 ? 'pending' : 'complete'))
+    }
+    if (url.includes('/actions')) {
+      return jsonResponse({ runId: RUN, items: ACTIONS, nextAfter: 2 })
+    }
+    if (url.match(/\/simulations\/[^/?]+$/)) {
+      return jsonResponse({ simulation: terminal })
+    }
+    if (url.includes('/simulations?')) {
+      return jsonResponse({
+        simulations: [{ runId: RUN, selectionId: SELECTION, engine: 'double', phase: 'succeeded', rounds: 3, terminal: true, failedPlatforms: [], createdAt: '', finishedAt: null }],
+        simulation: terminal,
+      })
+    }
+    return defaultHandler()(url, call)
+  }
+  const { wrapper } = await mount(handler, `/projects/${PROJECT}/workbench/dual-platform-run?layout=split&lang=zh&build=${BUILD}&preparation=${PREP}&selection=${SELECTION}&run=${RUN}&round=2`)
+  await flush(10)
+  assert.match(wrapper.text(), /记忆待同步/)
+  assert.doesNotMatch(wrapper.text(), /校友李某 R2/)
+  await new Promise((resolve) => setTimeout(resolve, 850))
+  await flush(10)
+  assert.match(wrapper.text(), /记忆已完成/)
+  assert.match(wrapper.text(), /校友李某 R2/)
+  assert.equal(wrapper.find('[data-action="memory-round"]').element.value, '2')
+  wrapper.unmount()
+})
+
+test('推演结束后的待确认状态也会自动显示', async () => {
+  let memoryCalls = 0
+  const terminal = simulation({ phase: 'succeeded', terminal: true, canStop: false })
+  const handler = (url, call) => {
+    if (url.includes('/memory')) {
+      memoryCalls += 1
+      return jsonResponse(memoryView(2, memoryCalls === 1 ? 'pending' : 'unconfirmed'))
+    }
+    if (url.includes('/actions')) {
+      return jsonResponse({ runId: RUN, items: ACTIONS, nextAfter: 2 })
+    }
+    if (url.match(/\/simulations\/[^/?]+$/)) {
+      return jsonResponse({ simulation: terminal })
+    }
+    if (url.includes('/simulations?')) {
+      return jsonResponse({
+        simulations: [{ runId: RUN, selectionId: SELECTION, engine: 'double', phase: 'succeeded', rounds: 3, terminal: true, failedPlatforms: [], createdAt: '', finishedAt: null }],
+        simulation: terminal,
+      })
+    }
+    return defaultHandler()(url, call)
+  }
+  const { wrapper } = await mount(handler, `/projects/${PROJECT}/workbench/dual-platform-run?layout=split&lang=zh&build=${BUILD}&preparation=${PREP}&selection=${SELECTION}&run=${RUN}&round=2`)
+  await flush(10)
+  assert.match(wrapper.text(), /记忆待同步/)
+  await new Promise((resolve) => setTimeout(resolve, 850))
+  await flush(10)
+  assert.match(wrapper.text(), /写入待确认/)
   wrapper.unmount()
 })
 

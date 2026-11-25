@@ -267,6 +267,23 @@ class TemporalMemoryTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(comment_memory, {item["memoryId"] for item in view1["entries"]})
         self.assertIn(comment_memory, {item["memoryId"] for item in view2["entries"]})
         self.assertIn(comment_memory, {item["memoryId"] for item in view3["entries"]})
+        comment_entry = next(
+            item for item in view2["entries"] if item["actionId"] == str(comment.id)
+        )
+        self.assertEqual(
+            [item["memoryId"] for item in comment_entry["memoryReads"]],
+            [str(item["memoryId"]) for item in plan["memoryRefs"]],
+        )
+        self.assertTrue(
+            all(int(item["roundIndex"]) < 2 for item in comment_entry["memoryReads"])
+        )
+        material_sources = [
+            source
+            for item in (view2["material"]["nodes"] + view2["material"]["edges"])
+            for source in item.get("sources") or []
+        ]
+        self.assertTrue(material_sources)
+        self.assertTrue(all(source.get("locator", {}).get("url") for source in material_sources))
         # 同节点在第 2、3 轮各有来源时，第 2 轮不能看到第 3 轮来源或计数。
         for node in view2["runtime"]["nodes"]:
             self.assertTrue(all(int(src["roundIndex"]) <= 2 for src in node["sources"]))

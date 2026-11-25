@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { RouterLink, useRoute, useRouter } from 'vue-router'
 import { api, ApiError } from '../api'
 import { messagesFor } from '../i18n'
@@ -61,6 +61,11 @@ const memoryState = ref<MemoryViewState>(createMemoryState())
 const selectedSource = ref<MemorySource | null>(null)
 const selectedMemoryAction = ref<string | null>(null)
 const memoryRetrying = ref(false)
+const materialSourceOpen = ref(false)
+const materialSourceText = ref('')
+const materialSourceError = ref('')
+const materialSourceRef = ref<HTMLElement | null>(null)
+let memoryPollTimer: ReturnType<typeof setTimeout> | null = null
 const expanded = ref<string | null>(null)
 const stream = ref<JobStreamHandle | null>(null)
 const streamStatus = ref<string>('idle')
@@ -116,6 +121,82 @@ const memoryMaxRound = computed(() => {
 const memoryRounds = computed(() =>
   Array.from({ length: memoryMaxRound.value }, (_, index) => index + 1),
 )
+const memoryCanvasNodes = computed(() => {
+  const view = memory.value
+  if (!view) {
+    return []
+  }
+  const material = view.material.nodes.map((node) => ({
+    ...node,
+    canvasKey: `material:${node.key}`,
+    canvasOrigin: 'material' as const,
+  }))
+  const runtime = view.runtime.nodes.map((node) => ({
+    ...node,
+    canvasKey: `runtime:${node.key}`,
+    canvasOrigin: node.origin,
+  }))
+  const nodes = [...material, ...runtime]
+  return nodes.map((node, index) => {
+    const angle = (Math.PI * 2 * index) / Math.max(nodes.length, 1) - Math.PI / 2
+    return {
+      ...node,
+      x: 320 + Math.cos(angle) * 230,
+      y: 180 + Math.sin(angle) * 125,
+    }
+  })
+})
+const memoryCanvasEdges = computed(() => {
+  const view = memory.value
+  if (!view) {
+    return []
+  }
+  const position = new Map(
+    memoryCanvasNodes.value.map((node) => [node.canvasKey, node]),
+  )
+  const edges = [
+    ...view.material.edges.map((edge) => ({
+      ...edge,
+      canvasKey: `material:${edge.key}`,
+      sourceKey: `material:${edge.sourceKey ?? ''}`,
+      targetKey: `material:${edge.targetKey ?? ''}`,
+    })),
+    ...view.runtime.edges.map((edge) => ({
+      ...edge,
+      canvasKey: `runtime:${edge.key}`,
+      sourceKey: `runtime:${edge.sourceKey ?? ''}`,
+      targetKey: `runtime:${edge.targetKey ?? ''}`,
+    })),
+  ]
+  return edges.flatMap((edge) => {
+    const source = position.get(edge.sourceKey)
+    const target = position.get(edge.targetKey)
+    if (!source || !target) {
+      return []
+    }
+    return [{
+      ...edge,
+      x1: source.x,
+      y1: source.y,
+      x2: target.x,
+      y2: target.y,
+    }]
+  })
+})
+const memoryMaterialNodes = computed(() => memory.value?.material.nodes ?? [])
+const memoryMaterialEdges = computed(() => memory.value?.material.edges ?? [])
+const sourceEntry = computed(() =>
+  memory.value?.entries.find((entry) => entry.memoryId === selectedSource.value?.memoryId),
+)
+const sourceTargetAction = computed(() => {
+  if (!selectedSource.value) {
+    return null
+  }
+  return (
+    actions.value.find((action) => action.actionId === selectedSource.value?.actionId) ??
+    null
+  )
+})
 const memoryStatusText = computed(() => {
   const status = memory.value?.status
   if (!status) {
@@ -239,6 +320,10 @@ async function loadDetail(runId: string, quiet = false): Promise<void> {
     actionError.value = ''
     selectedSource.value = null
     selectedMemoryAction.value = null
+    if (memoryPollTimer !== null) {
+      clearTimeout(memoryPollTimer)
+      memoryPollTimer = null
+    }
     memoryState.value = createMemoryState()
     state.value = switchRun(state.value, runId)
   }
@@ -414,6 +499,10 @@ function selectRun(runId: string): void {
     actionError.value = ''
     selectedSource.value = null
     selectedMemoryAction.value = null
+    if (memoryPollTimer !== null) {
+      clearTimeout(memoryPollTimer)
+      memoryPollTimer = null
+    }
     memoryState.value = createMemoryState()
     state.value = switchRun(state.value, runId)
   }
@@ -490,6 +579,8 @@ async function loadMemory(runId: string): Promise<void> {
       return
     }
     memoryState.value = applyMemoryView(memoryState.value, view, expected)
+    pruneExcludedSource()
+    scheduleMemoryPoll(runId)
   } catch (caught) {
     if (await handleAuth(caught)) {
       return
@@ -505,11 +596,142 @@ async function loadMemory(runId: string): Promise<void> {
           ? t.value.serviceUnavailable
           : t.value.memoryUnavailable,
     }
+    scheduleMemoryPoll(runId)
+  }
+}
+
+function sourceVisibleInView(
+  view: NonNullable<MemoryViewState['memory']>,
+  source: MemorySource,
+): boolean {
+  if (source.roundIndex > view.round) {
+    return false
+  }
+  if (view.platform && source.platformKey !== view.platform) {
+    return false
+  }
+  if (view.entries.some((entry) => entry.actionId === source.actionId)) {
+    return true
+  }
+  const items = [...view.runtime.nodes, ...view.runtime.edges]
+  return items.some((item) =>
+    (item.sources ?? []).some(
+      (candidate) =>
+        candidate.memoryId === source.memoryId &&
+        candidate.facet === source.facet,
+    ),
+  )
+}
+
+function clearSelectedSource(): void {
+  selectedSource.value = null
+  selectedMemoryAction.value = null
+  materialSourceOpen.value = false
+}
+
+function pruneExcludedSource(): void {
+  if (selectedSource.value && memory.value && !sourceVisibleInView(memory.value, selectedSource.value)) {
+    clearSelectedSource()
+  }
+}
+
+function clearSelectionIfExcluded(round: number | null, platform: string | null): void {
+  if (!selectedSource.value) {
+    return
+  }
+  if (
+    (round !== null && selectedSource.value.roundIndex > round) ||
+    (platform !== null && selectedSource.value.platformKey !== platform)
+  ) {
+    clearSelectedSource()
+  }
+}
+
+function scheduleMemoryPoll(runId: string): void {
+  if (memoryPollTimer !== null) {
+    clearTimeout(memoryPollTimer)
+    memoryPollTimer = null
+  }
+  const status = memoryState.value.memory?.status.status
+  if (!['pending', 'syncing', 'partial'].includes(status ?? '')) {
+    return
+  }
+  memoryPollTimer = setTimeout(() => {
+    memoryPollTimer = null
+    if (state.value.runId === runId) {
+      void loadMemory(runId)
+    }
+  }, 700)
+}
+
+async function openMaterialSource(source: MemorySource): Promise<void> {
+  if (!source.locator) {
+    return
+  }
+  if (source.locator.kind === 'pdf') {
+    window.open(source.locator.url, '_blank', 'noopener')
+    return
+  }
+  materialSourceOpen.value = true
+  materialSourceError.value = ''
+  materialSourceText.value = ''
+  try {
+    materialSourceText.value = await api.text(source.locator.url)
+    await nextTick()
+    const element = materialSourceRef.value
+    if (!element) {
+      return
+    }
+    const start = source.locator.sourceStart ?? source.sourceStart ?? 0
+    const end = source.locator.sourceEnd ?? source.sourceEnd ?? start
+    const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT)
+    const range = document.createRange()
+    let offset = 0
+    let startNode: Text | null = null
+    let endNode: Text | null = null
+    let startOffset = 0
+    let endOffset = 0
+    let current = walker.nextNode() as Text | null
+    while (current) {
+      const length = current.data.length
+      if (!startNode && start >= offset && start <= offset + length) {
+        startNode = current
+        startOffset = start - offset
+      }
+      if (!endNode && end >= offset && end <= offset + length) {
+        endNode = current
+        endOffset = end - offset
+        break
+      }
+      offset += length
+      current = walker.nextNode() as Text | null
+    }
+    if (startNode && endNode) {
+      range.setStart(startNode, startOffset)
+      range.setEnd(endNode, endOffset)
+      const selection = window.getSelection()
+      selection?.removeAllRanges()
+      selection?.addRange(range)
+      element.scrollIntoView({ block: 'center' })
+    }
+  } catch (caught) {
+    if (!(await handleAuth(caught))) {
+      materialSourceError.value = t.value.memorySourceFailed
+    }
+  }
+}
+
+function openCanvasNode(node: { sources?: MemorySource[] }): void {
+  const source = node.sources?.[0]
+  if (source) {
+    openMemorySource(source)
   }
 }
 
 function selectMemoryRound(event: Event): void {
   const value = (event.target as HTMLSelectElement).value
+  const nextRound = value ? Number(value) : null
+  clearSelectionIfExcluded(nextRound, memoryPlatform.value)
   void router.replace({
     path: route.path,
     query: {
@@ -522,6 +744,7 @@ function selectMemoryRound(event: Event): void {
 
 function selectMemoryPlatform(event: Event): void {
   const value = (event.target as HTMLSelectElement).value
+  clearSelectionIfExcluded(memoryRound.value, value || null)
   void router.replace({
     path: route.path,
     query: {
@@ -586,6 +809,10 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   closeStream()
+  if (memoryPollTimer !== null) {
+    clearTimeout(memoryPollTimer)
+    memoryPollTimer = null
+  }
 })
 </script>
 
@@ -763,6 +990,34 @@ onBeforeUnmount(() => {
               <span class="muted">{{ memoryOriginLabel('role', props.lang) }}</span>
               <span class="muted">{{ memoryOriginLabel('simulation', props.lang) }}</span>
             </div>
+            <div v-if="memoryCanvasNodes.length" class="memory-canvas-wrap" data-view="memory-canvas">
+              <h4>{{ t.memoryCanvas }}</h4>
+              <svg class="memory-canvas" viewBox="0 0 640 360" role="img" :aria-label="t.memoryCanvas">
+                <line
+                  v-for="edge in memoryCanvasEdges"
+                  :key="edge.canvasKey"
+                  :x1="edge.x1"
+                  :y1="edge.y1"
+                  :x2="edge.x2"
+                  :y2="edge.y2"
+                  class="memory-canvas-edge"
+                  :class="`memory-canvas-edge--${edge.origin}`"
+                />
+                <g
+                  v-for="node in memoryCanvasNodes"
+                  :key="node.canvasKey"
+                  class="memory-canvas-node"
+                  :class="`memory-canvas-node--${node.canvasOrigin}`"
+                  :data-node-key="node.canvasKey"
+                  @click="openCanvasNode(node)"
+                >
+                  <circle :cx="node.x" :cy="node.y" r="26" />
+                  <text :x="node.x" :y="node.y + 4" text-anchor="middle">
+                    {{ node.label.length > 10 ? node.label.slice(0, 10) + '…' : node.label }}
+                  </text>
+                </g>
+              </svg>
+            </div>
             <div v-if="memory && (memory.runtime.nodes.length || memory.runtime.edges.length)" class="memory-grid">
               <div>
                 <h4>{{ t.memoryNodes }}</h4>
@@ -781,6 +1036,8 @@ onBeforeUnmount(() => {
                         type="button"
                         class="link-button"
                         data-action="memory-source"
+                        :data-memory-id="source.memoryId"
+                        :data-action-id="source.actionId"
                         @click="openMemorySource(source)"
                       >
                         {{ memorySourceLabel(source, props.lang) }}
@@ -806,6 +1063,8 @@ onBeforeUnmount(() => {
                         type="button"
                         class="link-button"
                         data-action="memory-source"
+                        :data-memory-id="source.memoryId"
+                        :data-action-id="source.actionId"
                         @click="openMemorySource(source)"
                       >
                         {{ memorySourceLabel(source, props.lang) }}
@@ -815,6 +1074,47 @@ onBeforeUnmount(() => {
                 </ul>
               </div>
             </div>
+            <div v-if="memoryMaterialNodes.length || memoryMaterialEdges.length" class="memory-material" data-field="memory-material">
+              <h4>{{ t.memoryMaterial }}</h4>
+              <ul class="memory-list">
+                <li v-for="node in memoryMaterialNodes" :key="`material-node-${node.key}`">
+                  <strong>{{ node.label }}</strong>
+                  <span class="muted"> · {{ memoryOriginLabel('material', props.lang) }} · {{ node.sourceCount ?? 0 }}</span>
+                  <div class="memory-sources">
+                    <button
+                      v-for="source in node.sources || []"
+                      :key="`material-node-${node.key}-${source.documentId}-${source.sourceStart}`"
+                      type="button"
+                      class="link-button"
+                      data-action="open-material-source"
+                      @click="openMaterialSource(source)"
+                    >
+                      {{ source.documentName || t.memoryOpenSource }}
+                      <template v-if="source.pageNo !== null && source.pageNo !== undefined"> · p.{{ source.pageNo }}</template>
+                      <template v-else-if="source.paragraphStart"> · P.{{ source.paragraphStart }}</template>
+                    </button>
+                  </div>
+                </li>
+                <li v-for="edge in memoryMaterialEdges" :key="`material-edge-${edge.key}`">
+                  <strong>{{ edge.label }}</strong>
+                  <span class="muted"> · {{ memoryOriginLabel('material', props.lang) }} · {{ edge.sourceCount ?? 0 }}</span>
+                  <div class="memory-sources">
+                    <button
+                      v-for="source in edge.sources || []"
+                      :key="`material-edge-${edge.key}-${source.documentId}-${source.sourceStart}`"
+                      type="button"
+                      class="link-button"
+                      data-action="open-material-source"
+                      @click="openMaterialSource(source)"
+                    >
+                      {{ source.documentName || t.memoryOpenSource }}
+                      <template v-if="source.pageNo !== null && source.pageNo !== undefined"> · p.{{ source.pageNo }}</template>
+                      <template v-else-if="source.paragraphStart"> · P.{{ source.paragraphStart }}</template>
+                    </button>
+                  </div>
+                </li>
+              </ul>
+            </div>
             <div v-if="selectedSource" class="memory-source-block" data-field="memory-source">
               <p class="eyebrow">{{ t.memorySourceAction }}</p>
               <p>
@@ -823,6 +1123,28 @@ onBeforeUnmount(() => {
                 {{ simulatedClock(selectedSource.simulatedAt, props.lang, detail.simulatedStart) }}
               </p>
               <p v-if="selectedSource.content">{{ selectedSource.content }}</p>
+              <div data-field="memory-target">
+                <p class="eyebrow">{{ t.memoryTarget }}</p>
+                <template v-if="sourceTargetAction?.target">
+                  <p>{{ sourceTargetAction.target.content }}</p>
+                  <p class="muted">
+                    {{ sourceTargetAction.target.actorRoleName }} · R{{ sourceTargetAction.target.roundIndex }} ·
+                    {{ simulatedClock(sourceTargetAction.target.simulatedAt, props.lang, detail.simulatedStart) }}
+                  </p>
+                </template>
+                <p v-else class="muted">{{ t.memoryTargetNone }}</p>
+              </div>
+              <div data-field="memory-reads">
+                <p class="eyebrow">{{ t.memoryReads }}</p>
+                <ul v-if="sourceEntry?.memoryReads?.length" class="memory-list">
+                  <li v-for="read in sourceEntry.memoryReads" :key="read.memoryId">
+                    <strong>R{{ read.roundIndex }} · {{ read.actorRoleName }}</strong>
+                    <p>{{ read.speechText || read.nativeAction }}</p>
+                    <p class="muted">memoryId {{ read.memoryId }}</p>
+                  </li>
+                </ul>
+                <p v-else class="muted">{{ t.memoryReadsEmpty }}</p>
+              </div>
               <p class="muted">
                 actionId {{ selectedSource.actionId }} · event #{{ selectedSource.sourceEventSeq }}
               </p>
@@ -835,6 +1157,14 @@ onBeforeUnmount(() => {
                 {{ t.memoryAction }}
               </button>
             </div>
+            <section v-if="materialSourceOpen" class="source-panel memory-source-panel" aria-live="polite">
+              <header>
+                <h4>{{ t.memoryOpenSource }}</h4>
+                <button type="button" class="ghost" data-action="close-material-source" @click="materialSourceOpen = false">×</button>
+              </header>
+              <p v-if="materialSourceError" class="error" role="alert">{{ materialSourceError }}</p>
+              <pre ref="materialSourceRef" class="source-text">{{ materialSourceText }}</pre>
+            </section>
           </section>
           <div class="platform-grid" data-field="platforms">
             <article
@@ -1109,6 +1439,44 @@ onBeforeUnmount(() => {
   flex-wrap: wrap;
   gap: 0.35rem;
   margin-top: 0.35rem;
+}
+.memory-canvas-wrap {
+  margin: 0.75rem 0;
+}
+.memory-canvas {
+  width: 100%;
+  min-height: 18rem;
+  border: 1px solid var(--border);
+  border-radius: 0.75rem;
+  background: var(--surface-muted);
+}
+.memory-canvas-edge {
+  stroke: var(--border-strong, #8892a0);
+  stroke-width: 1.5;
+}
+.memory-canvas-edge--material {
+  stroke-dasharray: 5 4;
+  opacity: 0.65;
+}
+.memory-canvas-node {
+  cursor: pointer;
+}
+.memory-canvas-node circle {
+  fill: var(--surface);
+  stroke: var(--accent);
+  stroke-width: 2;
+}
+.memory-canvas-node--material circle {
+  stroke-dasharray: 4 3;
+  opacity: 0.8;
+}
+.memory-canvas-node text {
+  font-size: 0.7rem;
+  fill: var(--text);
+  pointer-events: none;
+}
+.memory-material {
+  margin-top: 0.75rem;
 }
 .memory-source-block {
   margin-top: 0.75rem;

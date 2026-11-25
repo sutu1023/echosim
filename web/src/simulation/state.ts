@@ -456,6 +456,31 @@ export interface MemorySource {
   nativeAction?: string
   targetActionId?: string | null
   content?: string
+  summary?: string | null
+  documentId?: string
+  documentName?: string
+  kind?: string
+  pageNo?: number | null
+  paragraphStart?: number | null
+  sourceStart?: number
+  sourceEnd?: number
+  quote?: string
+  locator?: {
+    kind: 'pdf' | 'text'
+    url: string
+    pageNo?: number
+    sourceStart?: number
+    sourceEnd?: number
+  }
+}
+
+export interface MemoryRead {
+  memoryId: string
+  roundIndex: number
+  episodeId: string | null
+  actorRoleName: string
+  speechText: string
+  nativeAction: string
 }
 
 export interface MemoryNode {
@@ -502,6 +527,7 @@ export interface MemoryEntry {
   graphState: string
   writeOutcome: string
   facets: string[]
+  memoryReads?: MemoryRead[]
 }
 
 export interface SimulationMemorySummary {
